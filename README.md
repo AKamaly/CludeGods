@@ -6,7 +6,7 @@
 
 ### Talk to Claude Code out loud, and keep always-on workers right beside you.
 
-**Voice calls, spoken progress, standing worker chats, and click-only approvals, inside the Claude desktop app on your Mac.**
+**Voice calls, spoken progress, always-on workers with their own voices, Spaces for your docs, Slack, and click-only approvals, inside the Claude desktop app on your Mac.**
 
 Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [VoiceMode](https://github.com/mbailey/voicemode). · [Get started](#get-started) · [Overview](#overview) · [Architecture](#architecture) · [Features](#features) · [Safety](#safety-model) · [Contributing](#contributing)
 
@@ -63,8 +63,15 @@ The parts:
   by a physical click.
 - **Hooks**: `narrate` says each step out loud as it happens; `permit` routes permission
   prompts to the pill.
-- **Workers pane mod**: a pane beside the chat with your standing worker chats as persona
-  cards, live status, and a task box per worker.
+- **Workers pane mod**: a pane beside the chat with your standing worker chats as cards,
+  each one a god with its own voice and hours, live status, a task box, an outbox you
+  approve with a click, and an Activity view of its last steps.
+- **Spaces pane mod and `pages`**: Markdown spaces and pages that you and your workers
+  share. Workers save drafts; a page lands only after you approve it.
+- **`guard` hook**: holds each worker to the tools you gave it (read only, drafts only, or
+  full).
+- **Slack bridge**: mention a worker in your own Slack workspace and it answers in the
+  thread, through a local Socket Mode app with an allow-list.
 
 ### What it feels like
 
@@ -108,9 +115,11 @@ only in the call's own session. You hear what Claude is doing without watching t
 
 ### Keep always-on workers
 
-Each worker is its own Claude Code chat with a name, a role, a model, and an avatar. The
-Workers pane lists them as cards with Working or Idle status read from each transcript.
-Type a task into a card and press Enter to send it to that chat; click the name to open it.
+Each worker is its own Claude Code chat with a name, a role, a god, a voice and its own
+hours. The Workers pane lists them as cards: the god animates while the worker is Working,
+a badge counts the drafts waiting for your yes, and Activity shows its last steps read
+from the transcript. Type a task into a card and press Enter to send it to that chat; Open
+jumps to it.
 
 <div align="center">
 
@@ -122,7 +131,26 @@ Type a task into a card and press Enter to send it to that chat; click the name 
 
 </div>
 
-_Workers connect to you through the pane: send a task, run on a schedule, collect drafts in an outbox, approve with a typed yes._
+_Workers connect to you through the pane: send a task, run on a schedule, collect drafts in an outbox, approve with a click._
+
+### Make them yours
+
+Settings on every card: a name, one of six gods, a voice (Kokoro: `af_heart`, `am_michael`,
+`bf_emma` and more), working hours, a tools preset, pause, and the Spaces it may write
+to. It all lands in `~/.voicemode/call/workers.json`, and each worker speaks its heads-ups
+in its own voice.
+
+<div align="center">
+
+<table><tr><td>
+
+<img src="docs/media/make-them-yours.jpg" alt="Make them yours: Research, Sales and Scout, each with its own voice" width="100%" />
+
+</td></tr></table>
+
+</div>
+
+_Their names. Their voices. Their hours._
 
 ### Approve with a click, never by voice
 
@@ -145,9 +173,10 @@ _A permission request on CallPill. Only the click counts._
 ### Workers that check in on their own
 
 Give a worker a `charter` and a `schedule`, and the pane wakes it at that time. It does its
-run, writes drafts and notes to an outbox, and the card shows `Outbox · 2 drafts`. Nothing
-is sent until you type yes in the worker's own chat. Details in
-[Proactive workers](#proactive-workers).
+run, writes drafts and notes to an outbox, and the card shows a `2 drafts` badge. Each
+item that needs a yes gets Approve and Decline on the card: Approve tells the worker to go
+ahead with exactly that draft, Decline tells it to drop it. Nothing goes out before your
+click. Details in [Proactive workers](#proactive-workers).
 
 <div align="center">
 
@@ -160,6 +189,40 @@ is sent until you type yes in the worker's own chat. Details in
 </div>
 
 _Scribe runs Monday to Friday at 9:00 and leaves two drafts that need your yes._
+
+### Spaces and Pages
+
+A Space is a folder of Markdown pages under `~/.voicemode/call/spaces/`. The Spaces pane
+lists them with search and nested subpages, shows a page, and has **Ask a worker** (send a
+question about this page to any worker) and **Open in editor**. Workers read pages and save
+through `pages draft`: the draft shows up in their outbox as "needs your yes", and only
+your Approve publishes it, with a revision check so a stale draft never overwrites newer
+edits. A built-in **Memory** space holds preferences every worker reads before it starts,
+and each call leaves a short receipt page in a **calls** space.
+
+### Put a worker on the call
+
+Say "put me on with Scribe" during a call. CallPill switches to Scribe's god and name, your
+words go to Scribe's chat, and Scribe answers out loud in its own voice. "Back to you"
+returns the call to Claude. Names must match a worker exactly; Claude asks if it is unsure.
+
+### Bring workers into Slack
+
+`skills/colleague/bridges/slack/` is a local Socket Mode Slack app, so it needs no public
+URL. Mention the app or DM it, optionally with a worker's name first ("@CludeGods scribe
+draft the release note"), and the message lands in that worker's chat; the reply goes back
+into the same thread. Only allow-listed users and channels get through, replies can only go
+to threads that came in that way, and tokens live in your keychain. Setup, the app manifest,
+and what leaves your Mac: [bridges/slack/README.md](skills/colleague/bridges/slack/README.md).
+Microsoft Teams is not supported yet.
+
+### Each worker gets only the tools you give it
+
+The `guard` hook checks every tool call a worker makes against its preset: `read` (read
+and search only), `drafts` (read, plus writing its own outbox and page drafts), `full`, or
+an explicit list of tools. A denied call goes back to the worker with the reason, so it can
+draft instead. Publishing a page, editing the registry, and approving its own drafts are
+never open to a `read` or `drafts` worker.
 
 ### Local voice
 
@@ -319,6 +382,18 @@ flowchart LR
   pane -- "scheduled wake / Run now" --> workers
   workers -- "outbox/*.jsonl" --> pane
   pane -- "outbox-say" --> mouth
+
+  workers -- "PreToolUse" --> guard["guard hook<br/>tools preset per worker"]
+  guard -. "reads presets" .-> reg
+  workers -- "pages draft" --> store[("spaces/*.md")]
+  pane -- "Approve: pages publish" --> store
+  spacespane["Spaces pane mod"] <--> store
+  spacespane -- "Ask a worker" --> workers
+
+  slack([Slack]) <--> bridge["Slack bridge<br/>Socket Mode, allow-list"]
+  bridge -- "inbox/*.jsonl" --> relay["inbox-relay mod"]
+  relay -- "hand the message over" --> workers
+  workers -- "bin/reply" --> bridge
 ```
 
 Everything runs on your Mac. The only state is plain files under `~/.voicemode/call/`.
@@ -383,9 +458,45 @@ in your prompt box for your own Enter, because the app refuses to start sessions
 automated events. A `Workers · N` launcher sits in the footer. All paths are resolved from
 `$HOME` at runtime.
 
+The card's Settings view writes `god`, `voice`, `hours`, `tools`, `paused` and `spaces`
+back to the worker's registry entry and keeps every key it does not know. The outbox lists
+items that need a yes with Approve and Decline; decisions go to
+`outbox/<key>.decisions.jsonl`. Activity shows the last ten tool steps from the worker's
+transcript. `hooks/gods.ts` draws the six gods as SVG (animated with SMIL while working).
+
 `tsconfig.json` only extends `.claude-plugin/types/tsconfig.json`, which Claude Code
 generates when it loads the mod. It is there so your editor and `tsc` type-check the mod;
 the generated types are not committed.
+
+#### `mods/spaces-pane` and `skills/colleague/bin/pages`
+
+`pages` is a standard-library Python CLI over `~/.voicemode/call/spaces/<space>/<page>.md`
+(front matter: `title`, `created`, `updated`, `by`, `parent`): `spaces`, `mkspace`,
+`list`, `show`, `new`, `draft` and `publish`. `draft` writes `spaces/.drafts/<id>.md` and
+the matching outbox item; `publish` refuses a draft whose page changed since it was made
+(exit 3) and a space the worker may not write (exit 4). The Spaces pane mod draws the
+library, the page view, Ask a worker, and a footer launcher. `skills/spaces/SKILL.md` tells
+workers how to use it.
+
+#### `skills/colleague/bin/guard`
+
+A `PreToolUse` hook. It maps the hook's session to a worker through the registry's
+`transcript`, and holds that worker to its `tools` preset. Sessions that are not workers,
+and workers without a preset, pass untouched. It fails open on its own errors and logs to
+`~/.voicemode/call/guard.log`. `guard --selftest` runs its cases.
+
+#### `skills/colleague/bridges/slack`, `mods/inbox-relay`, `bin/reply`, `bin/bridge`
+
+The bridge daemon (Python, `slack_sdk` in its own uv venv) writes allowed messages to
+`~/.voicemode/call/inbox/<worker>.jsonl`. The inbox-relay mod hands each one to the
+worker's chat. The worker answers with `bin/reply <id> "text"`, and the bridge posts it in
+the thread it came from. `bin/bridge start|stop|status|log` runs the daemon.
+
+#### `art/` and `scripts/render-gods.mjs`
+
+`art/gods.js` is the source of the six gods (colleague, research, scribe, scout, sales,
+herald) and their states (idle, talk, listen, work, happy). `render-gods.mjs` renders the
+sprite strips CallPill animates (`skills/colleague/bin/gods/`).
 
 #### `patches/voicemode-mouth-bluetooth.patch`
 
@@ -427,22 +538,22 @@ running yet) gives its claim back and retries every 10 minutes.
 `~/.voicemode/call/outbox/<key>.jsonl`:
 
 ```json
-{"at": "2026-01-05T09:04:00Z", "kind": "draft", "title": "a reply to the venue about Friday",
- "body": "Hi, Friday works for us...", "to": "events@example.com", "needs_approval": true}
+{"id": "ob_3f9c1a2b7d4e", "at": "2026-01-05T09:04:00Z", "kind": "draft",
+ "title": "a reply to the venue about Friday", "body": "Hi, Friday works for us...",
+ "to": "events@example.com", "needs_approval": true}
 ```
 
-`kind` is `draft` (something outward, `needs_approval: true`) or `note` (a finding). The
-card's Outbox button reads `Outbox · 2 drafts` while something is new, and it is the only
-draft indicator. Pressing it lists the newest items with their recipient, age and first
-lines, and marks them seen. The pane never sends anything.
+`kind` is `draft` (something outward, `needs_approval: true`), `note` (a finding), or `page`
+(a Spaces draft). The card's badge counts the items still waiting for a yes, and Outbox
+lists them with their recipient, age and first lines. The pane itself never sends anything:
+Approve passes your go to the worker's chat, which then acts on exactly that draft.
 
 **The spoken heads-up.** Each new outbox line is toasted in the app. During a live call,
 `skills/colleague/bin/outbox-say` also speaks one line for it ("Inbox drafted a reply to
 the venue about Friday"), once per line, however many panes saw it.
 
-**Approvals stay a typed yes in the worker's own chat.** Click the worker's name (or Open
-chat under the feed) to review a draft there, edit it, and type yes to send. A spoken yes
-does not count.
+**Approvals are a click or a typed yes, never a spoken one.** Approve on the card, or open
+the worker's chat, edit the draft there and type yes. A spoken yes does not count.
 
 Limits:
 
@@ -467,6 +578,13 @@ will mishear.
 - **Voice never starts sessions.** New worker chats start only from text you submit
   yourself. The desktop app also refuses session starts from automated events, so a mod or
   hook cannot do it on its own.
+- **Each worker is held to its tools.** The `guard` hook enforces a worker's preset on
+  every tool call. A `drafts` worker can only write its own outbox and page drafts, so it
+  cannot raise its own permissions or approve its own work.
+- **Pages land only on your Approve.** Workers draft; `pages publish` is not open to them.
+- **Slack is allow-listed.** Only listed users and channels reach a worker, replies only go
+  to threads that came in that way, and message text is treated as a request from that
+  person, never as instructions that override the worker's charter.
 - **Names are never fuzzy-matched.** If Claude is unsure it heard a person or company right,
   it asks.
 - **The echo gate** keeps Claude from hearing itself on laptop speakers and acting on its
@@ -486,18 +604,31 @@ will mishear.
   (`voice_mode.mouth`) are experimental upstream and may change between releases.
 - The first spoken line after a cold start can take up to a minute while the voice model
   loads.
+- The Slack bridge is tested against a fake Slack client; a live workspace run is still to
+  do. Microsoft Teams is not supported.
+- A worker is guarded once its registry entry has a `transcript`; until then its tools are
+  not restricted.
 
 ## Roadmap
 
 Ideas, not built:
 
-- **A voice per worker.** Today every spoken line uses one voice, set by `CALL_VOICE`.
+- **Microsoft Teams**, which needs a public HTTPS endpoint or an Azure Bot registration.
+- **A browser profile per worker**, so each one keeps its own sign-ins.
+- **Workers that hand work to each other** without going through you.
 
 ## Repository layout
 
 ```
-skills/colleague/        the skill: SKILL.md, bin/ (call, listen.py, narrate, permit, outbox-say, pill.swift), design/
+skills/colleague/        the skill: SKILL.md, bin/ (call, listen.py, narrate, permit, guard, outbox-say,
+                         pages, reply, bridge, pill.swift, gods/), bridges/slack/, design/
+skills/spaces/           the skill workers read for Spaces and Pages
 mods/workers-pane/       the Workers pane mod (hooks/, tests/)
+mods/spaces-pane/        the Spaces pane mod
+mods/inbox-relay/        hands bridge messages to worker chats
+art/                     the gods (gods.js, gods.html)
+scripts/render-gods.mjs  renders the gods' sprite strips for CallPill
+docs/design/SPEC.md      the v0.2 design and file contracts
 patches/                 the VoiceMode Bluetooth diff
 config/                  example settings hooks and workers registry
 scripts/build-pill.sh    builds and ad-hoc signs CallPill.app
@@ -511,8 +642,11 @@ easiest to review. Before sending a change:
 
 - to the echo gate or barge-in: run `skills/colleague/bin/listen.py --selftest`, and
   `--replay FILE` on a real log if you have one;
-- to the Workers pane: run the mod's tests in `mods/workers-pane/tests/` and type-check with
-  `tsc` after loading the mod once;
+- to a mod (`mods/*`): run its tests with `claude plugin test mods/<name>` and type-check
+  with `tsc` after loading the mod once;
+- to `pages`, `guard` or the Slack bridge: `python3 -m unittest discover -s skills/spaces/tests`,
+  `skills/colleague/bin/guard --selftest`, and
+  `python3 -m unittest discover -s skills/colleague/bridges/slack/tests`;
 - to anything that approves, sends, or starts sessions: keep the [Safety model](#safety-model)
   intact and say in the PR how the change preserves it.
 
