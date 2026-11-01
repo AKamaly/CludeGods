@@ -71,6 +71,9 @@ ECHO_SHARE = 0.6          # speakers: a partial this much my line needs one more
 BARGE_SLACK_S = 2.0       # speakers: my line's echo can still be in a partial this much later
 BARGE_LINK_S = 20.0       # a barge-in with no turn covering it is forgotten after this
 OPEN_MAX_S = 180.0        # a 'saying' with no 'said' after this long is stale, not playing
+ECHO_TEXT_SHARE = 0.8     # speakers: a mic line this much one recent line of mine is my echo,
+ECHO_TEXT_MIN = 3         # ...whatever its timing, if it has at least this many words
+ECHO_RECENT_S = 60.0      # how long a line of mine can still come back through a slow STT
 CALL = Path(__file__).resolve().parent / "call"
 STOPWORDS = set("a an the and or but so i you he she we they it is was are be been to of in on "
                 "at as for with that this my me your just um uh".split())
@@ -263,6 +266,7 @@ class Gate:
         self.capture_start = None
         self.live_events = False       # set once the initial catch-up read is done
         self.offsets = []              # wall ts minus capture time, from recent partials
+        self.anchors = []              # capture-to-wall shifts measured from my own echo
         self.mouth = {}                # utt -> {"text", "start", "end"}
         self.fillers = filler_text()
         self.barged_utts = set()       # lines a barge-in already cut
@@ -291,6 +295,7 @@ class Gate:
                 restarted = self.capture_start is not None
                 self.capture_start = ts(rec)
                 self.offsets = []
+                self.anchors = []
                 if restarted and (CALL_DIR / "muted").exists() is False and self.live_events:
                     return ("up",)
             elif rec.get("event") == "listen-stopped":
@@ -301,6 +306,10 @@ class Gate:
             # capture time lags wall time by a steady offset (audio starts flowing after
             # listen-started is logged); a partial lands one STT pass after its chunk ends
             self.offsets = (self.offsets + [ts(rec) - (self.capture_start + rec["t1"])])[-30:]
+            if not self.headphones():
+                rest = self.text_echo(rec)
+                if rest is not None and not self.enough(rest):
+                    return None    # my own line coming back, however late the STT is
             return self.check_barge(rec, now)
 
         if kind != "turn" or source != "mic" or rec.get("via") == "converse":
@@ -309,10 +318,51 @@ class Gate:
         out = self.judge_turn(rec, now)
         return self.after_barge(rec, out)
 
+    def text_echo(self, rec):
+        """Is this mic text one of my recent lines coming back, judged by its words alone?
+        Timing can't be trusted at the start of a call: the STT's first passes land 15 s
+        or more late, so the offset learned from partials runs far ahead of the truth.
+        A match also measures the real capture-to-wall shift (self.anchors). Returns None,
+        or the words left once mine are taken out (his, if enough survive: "What about item
+        3?" in front of a whole echoed line of mine)."""
+        heard = spoken(rec.get("text") or "")
+        if len(heard) < ECHO_TEXT_MIN:
+            return None
+        at = ts(rec)
+        for utt, m in reversed(list(self.mouth.items())):
+            if m["start"] > at + LEAD_S or at - m["start"] > ECHO_RECENT_S:
+                continue
+            said = spoken(m["text"])
+            flags = [mine_word(w, set(said), "".join(said) + " ") for w in heard]
+            if sum(flags) / len(heard) < ECHO_TEXT_SHARE:
+                continue
+            rest = [w for w, f in zip(heard, flags) if not f]
+            if self.capture_start is not None and "t0" in rec and said:
+                # where in my line the heard words start, and so when that audio played
+                block = next((b for b in difflib.SequenceMatcher(None, heard, said, autojunk=False)
+                              .get_matching_blocks() if b.size), None)
+                frac = block.b / len(said) if block else 0.0
+                dur = (m["end"] - m["start"]) if m["end"] else 0.35 * len(said)
+                self.anchors = (self.anchors + [m["start"] + frac * dur
+                                                - (self.capture_start + rec["t0"])])[-10:]
+            return rest
+        return None
+
+    @staticmethod
+    def enough(rest):
+        """Do the words left after my echo come out stand as a turn of his?"""
+        return (rest is not None and len(rest) >= MIN_OVER_WORDS
+                and len([w for w in rest if w not in STOPWORDS]) >= MIN_OVER_CONTENT)
+
     def audio_span(self, rec):
-        """The wall-clock span of a turn's or partial's audio."""
+        """The wall-clock span of a turn's or partial's audio. The latency-based shift is an
+        upper bound (a partial can't land sooner than STT_LATENCY_S after its chunk); my own
+        echo, when heard, pins the real shift, so the smaller of the two wins."""
         if self.capture_start is not None and self.offsets and "t0" in rec and "t1" in rec:
-            shift = self.capture_start + min(self.offsets) - STT_LATENCY_S
+            shift = min(self.offsets) - STT_LATENCY_S
+            if self.anchors:
+                shift = min(shift, sorted(self.anchors)[len(self.anchors) // 2])
+            shift += self.capture_start
             return shift + rec["t0"], shift + rec["t1"]
         a1 = ts(rec) - 0.7
         return a1 - (rec.get("t1", 0) - rec.get("t0", 0)), a1
@@ -380,6 +430,13 @@ class Gate:
         text = (rec.get("text") or "").strip()
         if NOISE.match(text) or CJK.search(text):
             return ("drop", "noise")
+
+        if not self.headphones():
+            rest = self.text_echo(rec)
+            if rest is not None:
+                if not self.enough(rest):
+                    return ("drop", "echo of me (by its words)")
+                return ("emit", f"USER: {' '.join(rest)}", True)
 
         a0, a1 = self.audio_span(rec)  # the turn's real audio span
 
@@ -836,6 +893,28 @@ def selftest():
           (f"{datetime.fromtimestamp(base):%Y-%m-%d-%H%M}.md",
            f"{datetime.fromtimestamp(base):%Y-%m-%d-%H%M}-2.md", "Calls", True))
     shutil.rmtree(tmp, ignore_errors=True)
+
+    # 11. speakers, cold STT: the first passes land ~16 s late, so the partial-based offset
+    # puts my own echo on top of the NEXT line (Sales speaking) and it used to cut it. My
+    # words are caught by their text instead, and his words in front of an echo survive.
+    long = ("Two decisions from you. One, approve the switches for the workers in the app. "
+            "Two, say yes or no to moving the workers into the workers section.")
+    cold = [{"ts": at(0), "kind": "event", "source": "mic", "event": "listen-started"},
+            saying(10, "c1", "Test call. This is Claude. I'm putting Sales on for a moment."),
+            said(14, "c1"),
+            saying(26, "c2", "Hi, this is Sales. Voice check done, back on standby."),
+            {"ts": at(28), "kind": "partial", "source": "mic", "text": "Test call. This is Claude.",
+             "t0": 10.2, "t1": 12.0},
+            turn(30, "Test call. This is Claude. I'm putting sales on for a moment", 10.2, 13.8),
+            said(31, "c2"),
+            saying(40, "c3", long), said(48, "c3"),
+            turn(52, "What about item 3? " + long, 36.0, 48.5)]
+    outs = run(cold, headphones=False)
+    check("cold STT: my own late echo does not cut the line playing", barges(outs), [])
+    check("cold STT: the late echo turn is dropped by its words", outs[5],
+          ("drop", "echo of me (by its words)"))
+    check("cold STT: his words in front of my echoed line survive", outs[-1],
+          ("emit", "USER: what about item three", True))
 
     print(f"\n{checks - fails} passed, {fails} failed")
     return fails
