@@ -1,0 +1,6 @@
+{
+  "name": "workers-pane",
+  "version": "0.1.0",
+  "description": "A Workers pane beside the chat: your standby worker chats as persona cards with avatars, live status, a task box and an Open link",
+  "types": "./types/index.d.ts"
+}

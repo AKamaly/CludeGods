@@ -1,0 +1,36 @@
+{
+  "workers": [
+    {
+      "key": "research",
+      "name": "Research",
+      "role": "Reads, compares, and summarises; never changes anything",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "session": "local_00000000-0000-4000-8000-000000000001",
+      "transcript": "-Users-you-Projects-example/00000000-0000-4000-8000-0000000000a1.jsonl",
+      "avatar": "violet"
+    },
+    {
+      "key": "scribe",
+      "name": "Scribe",
+      "role": "Drafts docs, release notes, and replies; drafts only",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "session": "local_00000000-0000-4000-8000-000000000002",
+      "transcript": "-Users-you-Projects-example/00000000-0000-4000-8000-0000000000a2.jsonl",
+      "avatar": "blue",
+      "charter": "You are Scribe, a standing drafting worker. Drafts only: never send, post, publish, or change anything outside this machine. Each run: read what changed since your last run, draft what needs drafting, and append one JSON line per item to the outbox. The user reviews in this chat and approves with a typed yes.",
+      "schedule": { "days": "mon-fri", "time": "09:00", "tz": "UTC" },
+      "outbox": "~/.voicemode/call/outbox/scribe.jsonl"
+    },
+    {
+      "key": "scout",
+      "name": "Scout",
+      "role": "Quick lookups and opening things",
+      "model": "claude-haiku-5-5",
+      "effort": "low",
+      "session": "local_00000000-0000-4000-8000-000000000003",
+      "avatar": "lime"
+    }
+  ]
+}

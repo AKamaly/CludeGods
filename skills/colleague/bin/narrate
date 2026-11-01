@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""PreToolUse hook: say out loud, in a few words, what the call session is about to do.
+
+No silence while work runs: a short sentence about what the session is doing. It speaks only when a voice call is live AND the hook fired in the call's own session
+(`call start` records it in ~/.voicemode/call/session), so every other session is untouched.
+At most one line every NARRATE_GAP_S seconds; the call's own plumbing is never narrated.
+Standard library only; always exits 0 and prints nothing, so it can never block a tool.
+"""
+
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+CALL_DIR = Path.home() / ".voicemode" / "call"
+CALL = Path(__file__).resolve().parent / "call"
+GAP_S = float(os.environ.get("NARRATE_GAP_S", "6"))
+
+SILENT_TOOLS = re.compile(
+    r"^(Monitor|TaskStop|ToolSearch|Skill|SendMessage|AskUserQuestion|ExitPlanMode|EnterPlanMode"
+    r"|mcp__ccd_turn__.*|mcp__ccd_view__.*|mcp__ccd_session_mgmt__get_session)$")
+OPENERS = ["Now I'm going to", "Next, I'll", "Okay, I'm going to", "Let me"]
+
+
+def live(session_id):
+    try:
+        pid = int((CALL_DIR / "ears.pid").read_text())
+        os.kill(pid, 0)
+        return (CALL_DIR / "session").read_text().strip() == session_id
+    except (OSError, ValueError):
+        return False
+
+
+def lower_first(s):
+    return s[:1].lower() + s[1:] if s and not s[:2].isupper() else s
+
+
+def line_for(tool, inp):
+    if tool == "Bash":
+        cmd, desc = inp.get("command", ""), (inp.get("description") or "").strip().rstrip(".")
+        if "colleague/bin/call" in cmd or not desc:
+            return None
+        return f"{random.choice(OPENERS)} {lower_first(desc)}."
+    if tool == "Agent":
+        desc = (inp.get("description") or "a helper").strip().rstrip(".")
+        model = inp.get("model")
+        who = f"an {model.capitalize()} helper" if model == "opus" else "a helper"
+        return f"Starting {who} on this: {lower_first(desc)}."
+    if tool in ("Edit", "Write"):
+        name = Path(inp.get("file_path", "")).name
+        return f"Editing {name}." if name else None
+    if tool == "Read":
+        name = Path(inp.get("file_path", "")).name
+        return f"Reading {name}." if name else None
+    if tool in ("Grep", "Glob"):
+        return "Searching the code."
+    if tool == "WebSearch":
+        q = (inp.get("query") or "").strip()
+        return f"Searching the web for {q}." if q else "Searching the web."
+    if tool.endswith("navigate"):
+        m = re.match(r"(?:https?://)?([^/]+)", inp.get("url", ""))
+        return f"Opening {m.group(1)}." if m else None
+    if "computer" in tool or "find" in tool or "read_page" in tool or "get_page_text" in tool:
+        return "Looking at the page."
+    if tool.startswith("mcp__"):
+        return "Working on it."
+    return None
+
+
+def main():
+    try:
+        event = json.load(sys.stdin)
+    except ValueError:
+        return
+    tool, inp = event.get("tool_name", ""), event.get("tool_input") or {}
+    if SILENT_TOOLS.match(tool) or not live(event.get("session_id", "")):
+        return
+    stamp = CALL_DIR / "narrated"
+    try:
+        if time.time() - stamp.stat().st_mtime < GAP_S:
+            return
+    except OSError:
+        pass
+    line = line_for(tool, inp)
+    if not line:
+        return
+    stamp.touch()
+    subprocess.Popen([str(CALL), "say", line], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass

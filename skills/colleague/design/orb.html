@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voice Orb Prototype</title>
+<style>
+:root{
+  --bg:#0b0b0f; --fg:#f5f5f7; --fg2:rgba(235,235,245,.62); --fg3:rgba(235,235,245,.38);
+  --card:#141419; --line:rgba(255,255,255,.08); --seg:rgba(118,118,128,.22); --segOn:#5a5a61;
+  --segOnFg:#fff; --accent:#FF7A1A;
+  --wall:radial-gradient(60% 80% at 18% 30%,#3b2a74 0%,transparent 60%),
+         radial-gradient(55% 70% at 85% 75%,#0e5a73 0%,transparent 62%),
+         radial-gradient(40% 50% at 60% 20%,#5a2350 0%,transparent 60%),#0c0f1e;
+  --menubar:rgba(20,20,28,.35); --menufg:rgba(255,255,255,.9);
+  --pill:rgba(30,30,36,.52); --pillBorder:rgba(255,255,255,.14); --pillHi:rgba(255,255,255,.10);
+  --pillShadow:0 10px 30px rgba(0,0,0,.45),0 1px 3px rgba(0,0,0,.35);
+  --pillFg:#f5f5f7; --pillFg2:rgba(235,235,245,.55);
+  --orbBg:#0b0b0f;
+}
+:root[data-theme=light]{
+  --bg:#f2f2f5; --fg:#1d1d1f; --fg2:rgba(60,60,67,.66); --fg3:rgba(60,60,67,.4);
+  --card:#ffffff; --line:rgba(0,0,0,.08); --seg:rgba(118,118,128,.12); --segOn:#ffffff; --segOnFg:#1d1d1f;
+  --wall:radial-gradient(60% 80% at 15% 25%,#ffd9c4 0%,transparent 60%),
+         radial-gradient(55% 70% at 85% 80%,#c6dcff 0%,transparent 62%),
+         radial-gradient(45% 55% at 62% 18%,#ead6ff 0%,transparent 60%),#eef1f7;
+  --menubar:rgba(255,255,255,.45); --menufg:rgba(0,0,0,.85);
+  --pill:rgba(250,250,252,.58); --pillBorder:rgba(0,0,0,.08); --pillHi:rgba(255,255,255,.7);
+  --pillShadow:0 10px 28px rgba(30,30,60,.16),0 1px 3px rgba(30,30,60,.12);
+  --pillFg:#1d1d1f; --pillFg2:rgba(60,60,67,.6);
+  --orbBg:#f2f2f5;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
+  -webkit-font-smoothing:antialiased;transition:background .35s,color .35s}
+.wrap{max-width:1120px;margin:0 auto;padding:22px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 20px;margin-bottom:18px}
+h1{font-size:17px;font-weight:600;margin:0;letter-spacing:-.01em;flex:1 1 auto}
+h1 small{display:block;font-size:12px;font-weight:400;color:var(--fg2);letter-spacing:0}
+.seg{display:inline-flex;background:var(--seg);border-radius:8px;padding:2px;gap:2px}
+.seg button{appearance:none;border:0;background:transparent;color:var(--fg);font:500 12px/1 inherit;
+  padding:6px 11px;border-radius:6px;cursor:pointer;transition:background .2s,color .2s,box-shadow .2s;white-space:nowrap}
+.seg button.on{background:var(--segOn);color:var(--segOnFg);box-shadow:0 1px 2px rgba(0,0,0,.18),0 0 0 .5px rgba(0,0,0,.06)}
+.controls{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-bottom:16px}
+.controls .lbl{color:var(--fg3);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-right:-6px}
+.btn{appearance:none;border:0;background:var(--seg);color:var(--fg);font:500 12px/1 inherit;padding:7px 11px;border-radius:7px;cursor:pointer}
+.btn.on{background:var(--accent);color:#fff}
+.readout{font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--fg2);margin-left:auto;display:flex;gap:10px;align-items:center}
+.lvl{width:90px;height:3px;border-radius:2px;background:var(--seg);overflow:hidden}
+.lvl i{display:block;height:100%;width:0;background:var(--accent);border-radius:2px}
+
+.grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px}
+@media (max-width:860px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:.5px solid var(--line);border-radius:14px;overflow:hidden;transition:background .35s}
+.cap{display:flex;justify-content:space-between;padding:10px 14px;color:var(--fg2);font-size:11.5px;border-top:.5px solid var(--line)}
+
+/* fake desktop */
+.desk{position:relative;height:330px;background:var(--wall);overflow:hidden}
+.menubar{position:absolute;inset:0 0 auto 0;height:26px;display:flex;align-items:center;gap:18px;padding:0 14px;
+  background:var(--menubar);backdrop-filter:blur(24px) saturate(160%);-webkit-backdrop-filter:blur(24px) saturate(160%);
+  color:var(--menufg);font-size:12.5px}
+.menubar b{font-weight:700}
+.menubar .r{margin-left:auto;font-variant-numeric:tabular-nums}
+.window{position:absolute;left:8%;right:22%;top:96px;bottom:-20px;border-radius:12px;background:rgba(127,127,140,.10);
+  border:.5px solid var(--line);backdrop-filter:blur(2px)}
+.pillzone{position:absolute;top:34px;left:0;right:0;display:flex;justify-content:center}
+
+/* pill */
+.pill{--s:1;position:relative;width:calc(180px*var(--s));height:calc(48px*var(--s));border-radius:calc(24px*var(--s));
+  background:var(--pill);backdrop-filter:blur(30px) saturate(180%);-webkit-backdrop-filter:blur(30px) saturate(180%);
+  box-shadow:var(--pillShadow),inset 0 .5px 0 var(--pillHi);border:.5px solid var(--pillBorder);
+  overflow:hidden;color:var(--pillFg);transition:background .35s,box-shadow .35s}
+.pill canvas{position:absolute;left:calc(2px*var(--s));top:calc(2px*var(--s));width:calc(44px*var(--s));height:calc(44px*var(--s))}
+.pill .labels{position:absolute;left:calc(52px*var(--s));top:0;bottom:0;right:calc(54px*var(--s))}
+.pill .labels span{position:absolute;left:0;top:50%;transform:translateY(-50%);font-size:calc(13px*var(--s));font-weight:600;
+  letter-spacing:-.01em;white-space:nowrap;opacity:0;transition:opacity .35s ease, transform .35s ease}
+.pill .labels span.on{opacity:1}
+.pill .labels span:not(.on){transform:translateY(-35%)}
+.pill .timer{position:absolute;right:calc(16px*var(--s));top:50%;transform:translateY(-50%);font-size:calc(11.5px*var(--s));
+  color:var(--pillFg2);font-variant-numeric:tabular-nums;font-weight:500}
+/* vertical card: orb on top, label, then timer */
+.pill.vert{width:calc(96px*var(--s));height:calc(132px*var(--s));border-radius:calc(24px*var(--s))}
+.pill.vert canvas{left:calc(6px*var(--s));top:calc(6px*var(--s));width:calc(84px*var(--s));height:calc(84px*var(--s))}
+.pill.vert .labels{left:calc(6px*var(--s));right:calc(6px*var(--s));top:calc(81px*var(--s));bottom:auto;height:calc(19px*var(--s))}
+.pill.vert .labels span{left:0;right:0;text-align:center}
+.pill.vert .timer{left:0;right:0;top:calc(101px*var(--s));transform:none;text-align:center;font-size:calc(11px*var(--s))}
+.desk.vert .pillzone{top:42px;justify-content:flex-end;padding-right:16px}
+.zoomrow{display:flex;align-items:center;justify-content:center;gap:28px;padding:26px 16px;background:var(--wall)}
+
+.orbstage{position:relative;height:100%;min-height:400px;display:flex;align-items:center;justify-content:center;background:var(--orbBg);transition:background .35s}
+.orbstage canvas{width:400px;height:400px;max-width:100%}
+.orbstage .tag{position:absolute;left:14px;top:12px;color:var(--fg3);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.orbstage .state{position:absolute;left:0;right:0;bottom:16px;text-align:center;font-size:15px;font-weight:600;letter-spacing:-.01em}
+.right{display:flex;flex-direction:column}
+.right .orbstage{flex:1}
+
+/* port notes */
+.notes{margin-top:22px;padding:18px 18px 8px}
+.notes h2{font-size:15px;margin:0 0 4px}
+.notes h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg3);margin:18px 0 8px;font-weight:600}
+.notes p,.notes li{color:var(--fg2);max-width:900px}
+.notes code{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--fg)}
+.notes ol,.notes ul{padding-left:18px;margin:6px 0}
+.notes li{margin:3px 0}
+.tbl{width:100%;overflow-x:auto}
+table{border-collapse:collapse;font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;width:100%;min-width:760px}
+th,td{text-align:left;padding:6px 8px;border-bottom:.5px solid var(--line);white-space:nowrap}
+th{color:var(--fg3);font-weight:500}
+.sw{display:inline-block;width:10px;height:10px;border-radius:3px;vertical-align:-1px;margin-right:4px}
+.err{padding:30px;color:#ff453a}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Voice orb, call status pill <small>Prototype for the /colleague status pill. WebGL reference shader, ports 1:1 to Metal.</small></h1>
+    <div class="seg" id="themeSeg"><button data-v="dark" class="on">Dark</button><button data-v="light">Light</button></div>
+  </header>
+
+  <div class="controls">
+    <span class="lbl">State</span>
+    <div class="seg" id="stateSeg">
+      <button data-v="listening" class="on">Listening</button>
+      <button data-v="you">You</button>
+      <button data-v="thinking">Thinking</button>
+      <button data-v="claude">Claude</button>
+      <button data-v="off">Mic off</button>
+    </div>
+    <span class="lbl">Voice</span>
+    <div class="seg" id="inputSeg"><button data-v="sim" class="on">Simulate</button><button data-v="mic">Use my mic</button></div>
+    <span class="lbl">Layout</span>
+    <div class="seg" id="layoutSeg"><button data-v="horizontal">Horizontal</button><button data-v="vertical" class="on">Vertical</button></div>
+    <button class="btn" id="cycleBtn">Auto-cycle</button>
+    <div class="readout"><span id="lvlTxt">level 0.00</span><span class="lvl"><i id="lvlBar"></i></span><span id="fps">-- fps</span></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="desk">
+        <div class="menubar"><b>Claude Code</b><span>File</span><span>Edit</span><span>View</span><span>Window</span><span class="r" id="clock">Sun 1 Nov 15:42</span></div>
+        <div class="window"></div>
+        <div class="pillzone">
+          <div class="pill" id="pill1"><canvas></canvas><div class="labels"></div><div class="timer">0:00</div></div>
+        </div>
+      </div>
+      <div class="cap"><span id="cap1">Pill at 1x, 180 x 48 pt, top of screen</span><span>frosted: blur 30, saturate 180%</span></div>
+      <div class="zoomrow">
+        <div class="pill" id="pill2" style="--s:2"><canvas></canvas><div class="labels"></div><div class="timer">0:00</div></div>
+      </div>
+      <div class="cap"><span>Same pill at 2x for detail</span><span id="cap2">orb 28 pt inside a 44 pt glow box</span></div>
+    </div>
+    <div class="card right">
+      <div class="orbstage"><span class="tag">Orb, 240 px</span><canvas id="big"></canvas><div class="state" id="bigState">Listening</div></div>
+      <div class="cap"><span>Same shader and parameters as the pill</span><span id="phaseTxt"></span></div>
+    </div>
+  </div>
+
+  <div class="card notes" id="notes">
+    <h2>Port notes</h2>
+    <p>The WebGL fragment shader in this file is the reference. For parity, port it to a Metal <code>[[stitchable]]</code> colour effect used from SwiftUI (<code>.colorEffect(ShaderLibrary.orb(...))</code>, macOS 14+) or an <code>MTKView</code>. Drive every uniform from one <code>CADisplayLink</code>/<code>TimelineView(.animation)</code> tick. The Core Animation layer stack below is the fallback approximation (loses domain warp and the silk bands, keeps everything else).</p>
+
+    <h3>Per-state parameters (sRGB hex, used directly, no linearisation)</h3>
+    <div class="tbl"><table id="stateTable"></table></div>
+
+    <h3>Global constants</h3>
+    <ul>
+      <li><b>Orb radius</b> R = 0.58 x half-canvas (big, 240 px orb in a 400 px box), 0.64 x half-canvas in the pill (28 pt orb in a 44 pt box). Radius scale = <code>1 + breath*sin(breathPhase) + 0.09*level</code>.</li>
+      <li><b>Motion phase</b> is integrated, never <code>time*speed</code>: <code>phase += dt*(speed + levelSpeed*level)</code>; <code>breathPhase += dt*breathRate</code>. This is what keeps state changes from jumping.</li>
+      <li><b>Lobes</b> (4): lobe i orbits at angle <code>t = phase*(0.55+0.17i)*(i odd ? -0.8 : 1) + 1.7i</code>, centre <code>rad*(cos t, sin(1.07t + 0.6i))</code>, <code>rad = 0.40 + 0.16 sin(0.43 phase + 2.3i) + 0.10 level</code>, gaussian sigma <code>0.42 + 0.08 sin(0.61 phase + 1.9i) + 0.14 level</code> (all in units of R). Additive accumulate, then tone map <code>1 - exp(-acc*glow)</code>, then saturation 1.3 around Rec.601 luma.</li>
+      <li><b>Swirl</b>: rotate sample point by <code>swirl*1.4*(1 - smoothstep(0,1.2,d))</code> rad (stronger near centre). <b>Domain warp</b>: two simplex octaves at freq 1.3, drift 0.17 to 0.23 per phase unit, amplitude <code>0.18 + 0.22 level + 0.10 swirl</code>.</li>
+      <li><b>Silk bands</b>: contours of a curved field, <code>f = noise(0.8w + drift(0.07,-0.05)*phase) + 0.45 dot(w,dir)</code>, <code>silk = 0.5+0.5 sin(5f + 0.6 phase)</code>, dir rotates at 0.12 rad/phase; squared, then multiplies lobes by <code>mix(1, 0.55 + 1.1*silk^2, silkAmt)</code>. Plus a wash: mean lobe colour x 0.22 x <code>exp(-1.2 d^2)</code>.</li>
+      <li><b>Core flash</b>: white-tinted gaussian <code>exp(-3.5 d^2) * level * core</code>.</li>
+      <li><b>Body</b>: dark <code>#090A11</code> alpha 0.82, light <code>#F9F9FB</code> alpha 0.60. Glow composites over it premultiplied: <code>rgb = glow + body*(1-max(glow))</code>.</li>
+      <li><b>Edge</b>: smoothstep feather of 1.8 px + 0.015 R. Edge falloff of lobe light to 0.8 beyond 0.55 R.</li>
+      <li><b>Specular</b>: white gaussian at (-0.32 R, +0.42 R), <code>exp(-5 r^2)</code>, alpha 0.20 (x0.6 in light). <b>Rim</b>: <code>smoothstep(0.78,1,d)*0.22</code>, colour = 50/50 white and the lobe-2/3 mean. Both scale by <code>life</code>.</li>
+      <li><b>Halo</b>: hue = mean of the 4 lobe colours normalised to max channel 1. Intensity <code>(halo + haloGain*level) * exp(-((r-0.92R)/w)^1.3)</code>, <code>w = R*(0.28 + 0.35 level)</code>, faded to 0 between 0.82 and 1.0 of the canvas half-size, capped 0.9. Light theme adds a soft contact shadow, black alpha <code>0.10*exp(-(r-R)/0.12R)</code>.</li>
+      <li><b>Dither</b>: +/- 0.5/255 hash noise on the final colour (kills banding in the halo).</li>
+      <li><b>Level smoothing</b>: one-pole, <code>a = 1 - exp(-dt/tau)</code>, attack tau = 0.045 s, release tau = 0.20 s.</li>
+      <li><b>Mic</b>: 1024-sample frames, RMS, <code>dBFS = 20 log10(rms)</code>, map -55 dBFS to 0 and -15 dBFS to 1, clamp. Disable echo cancellation, noise suppression, and AGC for the meter tap.</li>
+      <li><b>State crossfade</b>: every scalar and every colour channel eases with the same one-pole, tau = 0.35 s (about 1 s to settle). Theme crossfade the same.</li>
+      <li><b>Level routing</b>: <code>level = you*userVoice + amb*ambient + tts*claudeVoice + pulse*(0.5+0.5 sin(2.4 t))</code>, each weight crossfaded with the state.</li>
+    </ul>
+
+    <h3>Core Animation fallback stack (back to front)</h3>
+    <ol>
+      <li><b>Halo</b>: circle <code>CALayer</code>, diameter 1.5 R, fill = halo hue, opacity <code>halo + haloGain*level</code>, Gaussian blur radius <code>0.35 R*(1+0.6 level)</code> (<code>CAFilter gaussianBlur</code> or <code>NSVisualEffect</code>-free <code>shadowRadius</code> on a clear-filled path), transform scale <code>1 + 0.08 level</code>.</li>
+      <li><b>Body</b>: circle, colours above.</li>
+      <li><b>Lobe container</b>: masked by a circle (feather via 1.5 px blurred mask), <code>compositingFilter = "plusL"</code> on children.</li>
+      <li><b>4 lobe layers</b>: <code>CAGradientLayer(type: .radial)</code>, colour to clear, diameter <code>2*sigma*R*1.6</code>, blur 0.25 R, positions from the lobe orbit formula above, updated per frame.</li>
+      <li><b>Specular</b>: radial gradient white 0.20 to clear, diameter 0.9 R, centre (-0.32 R, -0.42 R in flipped coords), plusL.</li>
+      <li><b>Rim</b>: ring <code>CAShapeLayer</code> stroke 0.12 R, white 0.18, blur 0.06 R, masked to the disc.</li>
+    </ol>
+  </div>
+</div>
+
+<script id="vs" type="x-shader/x-vertex">
+attribute vec2 aPos; varying vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }
+</script>
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+varying vec2 vUv;
+uniform vec2 uRes;
+uniform float uRadius, uPhase, uBreathPhase, uBreath, uLevel, uSwirl, uGlow, uHalo, uHaloGain, uSilk, uCore, uLife, uLight;
+uniform vec3 uC[4];
+
+vec3 permute(vec3 x){ return mod(((x*34.0)+1.0)*x, 289.0); }
+float snoise(vec2 v){
+  const vec4 C = vec4(0.211324865405187,0.366025403784439,-0.577350269189626,0.024390243902439);
+  vec2 i = floor(v + dot(v, C.yy));
+  vec2 x0 = v - i + dot(i, C.xx);
+  vec2 i1 = (x0.x > x0.y) ? vec2(1.0,0.0) : vec2(0.0,1.0);
+  vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1;
+  i = mod(i, 289.0);
+  vec3 p = permute(permute(i.y + vec3(0.0,i1.y,1.0)) + i.x + vec3(0.0,i1.x,1.0));
+  vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+  m = m*m; m = m*m;
+  vec3 x = 2.0*fract(p*C.www) - 1.0;
+  vec3 h = abs(x) - 0.5;
+  vec3 ox = floor(x + 0.5);
+  vec3 a0 = x - ox;
+  m *= 1.79284291400159 - 0.85373472095314*(a0*a0 + h*h);
+  vec3 g; g.x = a0.x*x0.x + h.x*x0.y; g.yz = a0.yz*x12.xz + h.yz*x12.yw;
+  return 130.0*dot(m, g);
+}
+float max3(vec3 c){ return max(max(c.r,c.g),c.b); }
+
+void main(){
+  vec2 p = vUv*2.0 - 1.0;
+  float ph = uPhase;
+  float R = uRadius*(1.0 + uBreath*sin(uBreathPhase) + 0.09*uLevel);
+  float r = length(p);
+  vec2 q = p / R;
+  float d = length(q);
+
+  // swirl (stronger near the centre)
+  float sw = uSwirl*1.4*(1.0 - smoothstep(0.0, 1.2, d));
+  float cs = cos(sw), sn = sin(sw);
+  vec2 qs = vec2(cs*q.x - sn*q.y, sn*q.x + cs*q.y);
+
+  // domain warp
+  vec2 warp = vec2(snoise(qs*1.3 + vec2(ph*0.21, -ph*0.17)),
+                   snoise(qs*1.3 + vec2(4.7 - ph*0.19, 2.1 + ph*0.23)));
+  vec2 w = qs + warp*(0.18 + 0.22*uLevel + 0.10*uSwirl);
+
+  // colour lobes
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < 4; i++){
+    float fi = float(i);
+    float dirn = (mod(fi, 2.0) < 0.5) ? 1.0 : -0.8;
+    float t = ph*(0.55 + 0.17*fi)*dirn + fi*1.7;
+    float rad = 0.40 + 0.16*sin(ph*0.43 + fi*2.3) + 0.10*uLevel;
+    vec2 c = rad*vec2(cos(t), sin(t*1.07 + fi*0.6));
+    float s = 0.42 + 0.08*sin(ph*0.61 + fi*1.9) + 0.14*uLevel;
+    vec2 dv = w - c;
+    acc += uC[i]*exp(-dot(dv,dv)/(s*s));
+  }
+  // silk bands
+  float ang = ph*0.12;
+  float sf = snoise(w*0.8 + vec2(ph*0.07, -ph*0.05)) + 0.45*dot(w, vec2(cos(ang), sin(ang)));
+  float silk = 0.5 + 0.5*sin(5.0*sf + ph*0.6);
+  float silkF = silk*silk;
+  acc *= mix(1.0, 0.55 + 1.1*silkF, uSilk);
+  // soft colour wash so the sphere never reads as empty
+  acc += 0.25*(uC[0]+uC[1]+uC[2]+uC[3])*0.22*exp(-d*d*1.2);
+  // core flash on voice peaks
+  acc += mix(vec3(1.0), 0.5*(uC[0]+uC[1]), 0.5)*exp(-d*d*3.5)*uLevel*uCore;
+  acc *= mix(1.0, 0.8, smoothstep(0.55, 1.0, d));
+
+  vec3 glow = 1.0 - exp(-acc*uGlow);
+  float lum = dot(glow, vec3(0.299, 0.587, 0.114));
+  glow = clamp(mix(vec3(lum), glow, 1.3), 0.0, 1.0);
+  float gA = max3(glow);
+
+  // body (glass sphere)
+  vec3 base = mix(vec3(0.035,0.04,0.065), vec3(0.975,0.975,0.985), uLight);
+  float bA = mix(0.82, 0.60, uLight);
+  vec3 orbP = glow + base*bA*(1.0 - gA);
+  float orbA = gA + bA*(1.0 - gA);
+
+  // specular + rim
+  vec2 hp = q - vec2(-0.32, 0.42);
+  float spec = exp(-dot(hp,hp)*5.0)*0.20;
+  float rim = smoothstep(0.78, 1.0, d)*0.22;
+  vec3 rimC = mix(vec3(1.0), 0.5*(uC[1]+uC[2]), 0.5);
+  vec3 add = (vec3(spec) + rimC*rim)*mix(1.0, 0.6, uLight)*uLife;
+  orbP += add; orbA = clamp(orbA + max3(add), 0.0, 1.0);
+
+  float aa = 1.8/(R*uRes.y*0.5);
+  float disc = 1.0 - smoothstep(1.0 - aa - 0.015, 1.0 + aa, d);
+  orbP *= disc; orbA *= disc;
+
+  // halo
+  vec3 hc = 0.25*(uC[0]+uC[1]+uC[2]+uC[3]);
+  hc = hc / max(max3(hc), 1e-3);
+  float hw = R*(0.28 + 0.35*uLevel);
+  float hd = max(r - R*0.92, 0.0);
+  float hI = (uHalo + uHaloGain*uLevel)*exp(-pow(hd/hw, 1.3));
+  hI *= 1.0 - smoothstep(0.82, 1.0, r);
+  hI = min(hI*mix(1.0, 0.85, uLight), 0.9);
+  float sh = uLight*0.10*exp(-max(r - R, 0.0)/(0.12*R))*(1.0 - smoothstep(0.82, 1.0, r));
+  vec3 haloP = hc*hI;
+  float haloA = clamp(hI + sh*(1.0 - hI), 0.0, 1.0);
+
+  vec3 outP = orbP + haloP*(1.0 - orbA);
+  float outA = orbA + haloA*(1.0 - orbA);
+
+  float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)))*43758.5453) - 0.5;
+  outP += n/255.0; outA = clamp(outA + n/255.0, 0.0, 1.0);
+  gl_FragColor = vec4(clamp(outP, 0.0, outA), outA);
+}
+</script>
+
+<script>
+(() => {
+const $ = s => document.querySelector(s);
+const hex = h => { h = h.replace('#',''); return [0,2,4].map(i => parseInt(h.slice(i,i+2),16)/255); };
+
+// ---------- states ----------
+const STATES = {
+  listening:{label:'Listening', colors:['#4FB3FF','#6E6BFF','#5BE1FF','#B58CFF'],
+    speed:0.45, levelSpeed:0.6, swirl:0.35, glow:1.35, halo:0.14, haloGain:0.25, breath:0.035, breathRate:1.15,
+    silk:0.6, core:0.15, life:1.0, you:0.0, amb:0.35, tts:0.0, pulse:0.0},
+  you:{label:'You', colors:['#2EE6A6','#18C7D9','#7CF29A','#3FA9FF'],
+    speed:0.75, levelSpeed:2.4, swirl:0.55, glow:1.6, halo:0.16, haloGain:0.45, breath:0.02, breathRate:1.6,
+    silk:0.8, core:0.45, life:1.0, you:1.0, amb:0.0, tts:0.0, pulse:0.0},
+  thinking:{label:'Thinking', colors:['#FFB020','#FF8A1F','#FFD45A','#FF6A4D'],
+    speed:0.42, levelSpeed:0.5, swirl:1.6, glow:1.45, halo:0.16, haloGain:0.20, breath:0.03, breathRate:1.9,
+    silk:1.0, core:0.10, life:1.0, you:0.0, amb:0.0, tts:0.0, pulse:0.35},
+  claude:{label:'Claude', colors:['#FF7A1A','#FF4E3A','#FFB547','#FF5E8A'],
+    speed:0.65, levelSpeed:2.0, swirl:0.5, glow:1.6, halo:0.16, haloGain:0.40, breath:0.02, breathRate:1.4,
+    silk:0.8, core:0.40, life:1.0, you:0.0, amb:0.0, tts:1.0, pulse:0.0},
+  off:{label:'Mic off', colors:['#FF3B30','#7A1424','#FF6B5E','#4A1020'],
+    speed:0.06, levelSpeed:0.0, swirl:0.2, glow:0.6, halo:0.06, haloGain:0.0, breath:0.008, breathRate:0.6,
+    silk:0.3, core:0.0, life:0.35, you:0.0, amb:0.0, tts:0.0, pulse:0.0},
+};
+const KEYS = ['speed','levelSpeed','swirl','glow','halo','haloGain','breath','breathRate','silk','core','life','you','amb','tts','pulse'];
+const snap = s => { const o = {}; KEYS.forEach(k => o[k] = s[k]); o.c = s.colors.map(hex); return o; };
+
+const qs = new URLSearchParams(location.search);
+let stateKey = STATES[qs.get('state')] ? qs.get('state') : 'listening';
+let theme = qs.get('theme') === 'light' ? 'light' : 'dark';
+let cur = snap(STATES[stateKey]);
+let light = theme === 'light' ? 1 : 0;
+
+// ---------- renderers ----------
+function makeOrb(canvas, radius){
+  const gl = canvas.getContext('webgl', {premultipliedAlpha:true, alpha:true, antialias:false});
+  if (!gl) return null;
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, $('#vs').textContent));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, $('#fs').textContent));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  const ap = gl.getAttribLocation(prog, 'aPos'); gl.enableVertexAttribArray(ap); gl.vertexAttribPointer(ap, 2, gl.FLOAT, false, 0, 0);
+  const L = {}; ['uRes','uRadius','uPhase','uBreathPhase','uBreath','uLevel','uSwirl','uGlow','uHalo','uHaloGain','uSilk','uCore','uLife','uLight','uC']
+    .forEach(n => L[n] = gl.getUniformLocation(prog, n));
+  const cflat = new Float32Array(12);
+  return {
+    draw(U){
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(1, Math.round(canvas.clientWidth*dpr)), h = Math.max(1, Math.round(canvas.clientHeight*dpr));
+      if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; }
+      gl.viewport(0, 0, w, h);
+      gl.uniform2f(L.uRes, w, h); gl.uniform1f(L.uRadius, radius);
+      gl.uniform1f(L.uPhase, U.phase); gl.uniform1f(L.uBreathPhase, U.breathPhase); gl.uniform1f(L.uBreath, U.breath);
+      gl.uniform1f(L.uLevel, U.level); gl.uniform1f(L.uSwirl, U.swirl); gl.uniform1f(L.uGlow, U.glow);
+      gl.uniform1f(L.uHalo, U.halo); gl.uniform1f(L.uHaloGain, U.haloGain); gl.uniform1f(L.uSilk, U.silk);
+      gl.uniform1f(L.uCore, U.core); gl.uniform1f(L.uLife, U.life); gl.uniform1f(L.uLight, U.light);
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 3; j++) cflat[i*3+j] = U.c[i][j];
+      gl.uniform3fv(L.uC, cflat);
+      gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+  };
+}
+
+const orbs = [];
+try {
+  orbs.push(makeOrb($('#big'), 0.58));
+  ['#pill1','#pill2'].forEach(id => orbs.push(makeOrb($(id + ' canvas'), 0.64)));
+} catch (e) { document.body.insertAdjacentHTML('afterbegin', '<div class="err">Shader error: ' + e.message + '</div>'); }
+if (orbs.some(o => !o)) document.body.insertAdjacentHTML('afterbegin', '<div class="err">WebGL unavailable in this browser.</div>');
+
+// ---------- labels ----------
+document.querySelectorAll('.pill .labels').forEach(el => {
+  el.innerHTML = Object.entries(STATES).map(([k, s]) => `<span data-k="${k}">${s.label}</span>`).join('');
+});
+function setLabels(){
+  document.querySelectorAll('.pill .labels span').forEach(s => s.classList.toggle('on', s.dataset.k === stateKey));
+  $('#bigState').textContent = STATES[stateKey].label;
+  document.querySelectorAll('#stateSeg button').forEach(b => b.classList.toggle('on', b.dataset.v === stateKey));
+}
+
+// ---------- voice sources ----------
+const rand = (a, b) => a + Math.random()*(b - a);
+function speechGen(o){
+  let t = 0, segEnd = rand(0.2, 0.6), speaking = false, sylStart = 0, sylEnd = 0, amp = 0;
+  return dt => {
+    t += dt;
+    if (t > segEnd){ speaking = !speaking; segEnd = t + (speaking ? rand(o.talk[0], o.talk[1]) : rand(o.pause[0], o.pause[1])); sylEnd = t; }
+    if (!speaking) return o.floor*(0.6 + 0.4*Math.random());
+    if (t >= sylEnd){ sylStart = t; sylEnd = t + rand(o.syl[0], o.syl[1]);
+      amp = rand(o.amp[0], o.amp[1])*(Math.random() < o.emph ? 1.25 : 1); }
+    const x = (t - sylStart)/(sylEnd - sylStart);
+    return Math.min(1, amp*Math.pow(Math.sin(Math.PI*Math.min(1, x)), 0.6));
+  };
+}
+const userSim = speechGen({talk:[1.2,3.6], pause:[0.35,1.3], syl:[0.09,0.26], amp:[0.3,0.95], emph:0.15, floor:0.03});
+const ttsSim  = speechGen({talk:[2.4,5.0], pause:[0.22,0.55], syl:[0.15,0.21], amp:[0.55,0.82], emph:0.08, floor:0.02});
+let ambT = 0;
+const ambSim = dt => { ambT += dt; return 0.06 + 0.04*Math.sin(ambT*1.7) + 0.03*Math.sin(ambT*4.1 + 1.3); };
+
+let inputMode = 'sim', micLevel = 0, analyser = null, micBuf = null;
+async function startMic(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ac.createMediaStreamSource(stream);
+    analyser = ac.createAnalyser(); analyser.fftSize = 1024; micBuf = new Float32Array(analyser.fftSize);
+    src.connect(analyser);
+    return true;
+  } catch (e) { alert('Mic unavailable: ' + e.message); return false; }
+}
+function readMic(){
+  if (!analyser) return 0;
+  analyser.getFloatTimeDomainData(micBuf);
+  let s = 0; for (let i = 0; i < micBuf.length; i++) s += micBuf[i]*micBuf[i];
+  const db = 20*Math.log10(Math.sqrt(s/micBuf.length) + 1e-9);
+  return Math.max(0, Math.min(1, (db + 55)/40));
+}
+
+// ---------- loop ----------
+const TAU_STATE = 0.35, ATTACK = 0.045, RELEASE = 0.20;
+let phase = 0, breathPhase = 0, level = 0, last = performance.now(), clockT = 0, frames = 0, fpsT = 0;
+const start = performance.now();
+let cycle = null;
+
+function frame(now){
+  let dt = Math.min(0.05, (now - last)/1000); last = now;
+  const tgt = STATES[stateKey];
+  const a = 1 - Math.exp(-dt/TAU_STATE);
+  KEYS.forEach(k => cur[k] += (tgt[k] - cur[k])*a);
+  const tc = tgt.colors.map(hex);
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 3; j++) cur.c[i][j] += (tc[i][j] - cur.c[i][j])*a;
+  light += ((theme === 'light' ? 1 : 0) - light)*a;
+
+  clockT += dt;
+  const live = inputMode === 'mic' && analyser;
+  const m = live ? readMic() : 0;
+  const user = live ? m : userSim(dt);
+  const amb = live ? m : ambSim(dt);
+  const tts = ttsSim(dt);
+  const pulse = 0.5 + 0.5*Math.sin(clockT*2.4);
+  const raw = Math.min(1, cur.you*user + cur.amb*amb + cur.tts*tts + cur.pulse*pulse);
+  const tau = raw > level ? ATTACK : RELEASE;
+  level += (raw - level)*(1 - Math.exp(-dt/tau));
+
+  phase += dt*(cur.speed + cur.levelSpeed*level);
+  breathPhase += dt*cur.breathRate;
+
+  const U = Object.assign({}, cur, {phase, breathPhase, level, light});
+  orbs.forEach(o => o && o.draw(U));
+
+  frames++; fpsT += dt;
+  if (fpsT > 0.5){ $('#fps').textContent = Math.round(frames/fpsT) + ' fps'; frames = 0; fpsT = 0;
+    const s = Math.floor((now - start)/1000); const tt = Math.floor(s/60) + ':' + String(s%60).padStart(2,'0');
+    document.querySelectorAll('.pill .timer').forEach(el => el.textContent = tt); }
+  $('#lvlTxt').textContent = 'level ' + level.toFixed(2);
+  $('#lvlBar').style.width = (level*100).toFixed(1) + '%';
+  requestAnimationFrame(frame);
+}
+
+// ---------- controls ----------
+function setState(k){ stateKey = k; setLabels(); }
+function setTheme(t){ theme = t; document.documentElement.dataset.theme = t;
+  document.querySelectorAll('#themeSeg button').forEach(b => b.classList.toggle('on', b.dataset.v === t)); }
+let layout = qs.get('layout') === 'horizontal' ? 'horizontal' : 'vertical';
+function setLayout(l){ layout = l; const v = l === 'vertical';
+  document.querySelectorAll('.pill').forEach(p => p.classList.toggle('vert', v));
+  $('.desk').classList.toggle('vert', v);
+  $('#cap1').textContent = v ? 'Card at 1x, 96 x 132 pt, top-right, 16 pt in' : 'Pill at 1x, 180 x 48 pt, top of screen';
+  $('#cap2').textContent = v ? 'orb 54 pt inside an 84 pt glow box' : 'orb 28 pt inside a 44 pt glow box';
+  document.querySelectorAll('#layoutSeg button').forEach(b => b.classList.toggle('on', b.dataset.v === l)); }
+$('#layoutSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setLayout(b.dataset.v); });
+$('#stateSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setState(b.dataset.v); });
+$('#themeSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTheme(b.dataset.v); });
+$('#inputSeg').addEventListener('click', async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.v === 'mic' && !analyser && !(await startMic())) return;
+  inputMode = b.dataset.v;
+  document.querySelectorAll('#inputSeg button').forEach(x => x.classList.toggle('on', x === b));
+  if (inputMode === 'mic' && stateKey !== 'you') setState('you');
+});
+$('#cycleBtn').addEventListener('click', e => {
+  if (cycle){ clearInterval(cycle); cycle = null; e.target.classList.remove('on'); return; }
+  e.target.classList.add('on');
+  const order = Object.keys(STATES);
+  cycle = setInterval(() => setState(order[(order.indexOf(stateKey) + 1) % order.length]), 4000);
+});
+const d = new Date();
+$('#clock').textContent = d.toLocaleDateString('en-GB',{weekday:'short', day:'numeric', month:'short'}) + ' ' + d.toLocaleTimeString('en-GB',{hour:'2-digit', minute:'2-digit'});
+
+// port-notes table from the live params, so the notes never drift from the code
+const cols = ['speed','levelSpeed','swirl','glow','halo','haloGain','breath','breathRate','silk','core','life'];
+$('#stateTable').innerHTML = '<tr><th>state</th><th>lobe colours</th>' + cols.map(c => `<th>${c}</th>`).join('') + '<th>level from</th></tr>' +
+  Object.entries(STATES).map(([k, s]) => `<tr><td>${s.label}</td><td>${s.colors.map(c => `<span class="sw" style="background:${c}"></span>${c}`).join(' ')}</td>` +
+    cols.map(c => `<td>${s[c]}</td>`).join('') +
+    `<td>${['you','amb','tts','pulse'].filter(x => s[x] > 0).map(x => x + ' x' + s[x]).join(', ') || 'none'}</td></tr>`).join('');
+
+setTheme(theme); setLabels(); setLayout(layout);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

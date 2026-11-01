@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# call: voice-call plumbing for the colleague skill, on VoiceMode's ears and mouth.
+#
+#   call start         start the ears (always-on mic) and the mouth (speaker)
+#   call say TEXT      speak TEXT; returns at once, lines queue in order
+#   call say --now T   cut whatever is playing and speak T
+#   call hush          stop speaking and drop the queue
+#   call listen        the user's turns, one line each (run it under Monitor)
+#   call mute|unmute   turn the mic fully off / back on (the pill's mic button)
+#   call stopwork      cut speech and tell the call session to halt (the pill's stop button)
+#   call stop          hang up: stop the ears and the mouth
+#   call status        what is running
+set -euo pipefail
+
+PY="${VOICEMODE_PY:-$HOME/.local/share/uv/tools/voice-mode/bin/python}"
+DIR="$HOME/.voicemode/call"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SILERO="${CALL_SILERO_MODEL:-$HOME/.voicemode/models/silero_vad.onnx}"
+mkdir -p "$DIR"
+
+mouth() { "$PY" -m voice_mode.mouth "$@"; }
+
+# The mouth prefers mlx-audio (port 8890); fall back to Kokoro-FastAPI (port 8880).
+tts_env() {
+  if curl -s -m 0.5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8890/v1/models | grep -q 200; then
+    echo "mlx-audio"
+  else
+    export VOICEMODE_MOUTH_KOKORO_URL=http://127.0.0.1:8880/v1
+    export VOICEMODE_MOUTH_KOKORO_MODEL=kokoro
+    echo "kokoro"
+  fi
+}
+
+output_device() {
+  "$PY" -c "import sounddevice as sd; print(sd.query_devices(kind='output')['name'])"
+}
+
+builtin_mic() {
+  "$PY" -c "
+import sounddevice as sd
+for d in sd.query_devices():
+    if d['max_input_channels'] > 0 and 'microphone' in d['name'].lower() and 'macbook' in d['name'].lower():
+        print(d['name']); break
+" 2>/dev/null || true
+}
+
+alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+start_ears() {
+  alive "$DIR/ears.pid" && return 0
+  rm -f "$DIR/ears.stop"
+  # Bluetooth headset mics drop to low-quality call mode; listen on the Mac's own mic instead.
+  # CALL_MIC_DEVICE names the input explicitly; otherwise the built-in mic is looked up.
+  local mic=() name="${CALL_MIC_DEVICE:-}"
+  if [ -z "$name" ] && grep -qiE "airpods|headphone|buds|beats" "$DIR/device"; then name=$(builtin_mic); fi
+  if [ -n "$name" ]; then mic=(--device "$name"); fi
+  nohup "$PY" -m voice_mode.listen capture ${mic[@]+"${mic[@]}"} --detector silero --silero-model "$SILERO" --silero-threshold "${CALL_SILERO_THRESHOLD:-0.6}" \
+    --silence "${CALL_SILENCE_S:-0.7}" --turn-text redecode --stop-file "$DIR/ears.stop" \
+    > "$DIR/ears.log" 2>&1 &
+  echo $! > "$DIR/ears.pid"; disown
+}
+
+case "${1:-status}" in
+  start)
+    # mouth: restart the player so it picks up the backend and device
+    pkill -f "voice_mode.mouth (serve|mail)" 2>/dev/null || true
+    backend=$(tts_env)
+    output_device > "$DIR/device"
+    nohup "$PY" -m voice_mode.mouth serve > "$DIR/mouth.log" 2>&1 &
+    echo $! > "$DIR/mouth.pid"; disown
+    rm -f "$DIR/muted"
+    start_ears
+    # floating status pill
+    if [ -d "$HERE/CallPill.app" ]; then
+      pgrep -x CallPill > /dev/null || open -g "$HERE/CallPill.app"
+    fi
+    # warm the voice model silently so the first real line is not a cold start
+    ( mouth say --device null "Ready." > /dev/null 2>&1 & )
+    # the narrate hook only speaks for this session
+    [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo "$CLAUDE_CODE_SESSION_ID" > "$DIR/session"
+    echo "call up: voice=$backend, speaker=$(cat "$DIR/device")"
+    ;;
+  say)
+    shift
+    flag=()
+    if [ "${1:-}" = "--now" ]; then flag=(--now); shift; fi
+    mouth say ${flag[@]+"${flag[@]}"} --voice "${CALL_VOICE:-af_heart}" --speed "${CALL_SPEED:-1.05}" --device "$(cat "$DIR/device")" "$*" > /dev/null
+    ;;
+  hush)
+    mouth stop > /dev/null
+    ;;
+  listen)
+    exec python3 -u "$HERE/listen.py"
+    ;;
+  mute)
+    # the mic is really off (capture stops), not just ignored: for phone calls and visitors
+    touch "$DIR/muted" "$DIR/ears.stop"
+    echo "muted"
+    ;;
+  unmute)
+    rm -f "$DIR/muted"
+    start_ears
+    echo "unmuted"
+    ;;
+  stopwork)
+    # cut speech now; the listener tells the call session to halt its current work
+    mouth stop > /dev/null 2>&1 || true
+    touch "$DIR/stop-request"
+    echo "stop requested"
+    ;;
+  stop)
+    touch "$DIR/ears.stop"
+    mouth stop > /dev/null 2>&1 || true
+    pkill -f "voice_mode.mouth (serve|mail)" 2>/dev/null || true
+    rm -f "$DIR/mouth.pid"
+    pkill -x CallPill 2>/dev/null || true
+    rm -f "$DIR/session" "$DIR/muted"
+    echo "call down"
+    ;;
+  status)
+    alive "$DIR/ears.pid" && echo "ears: up" || echo "ears: down"
+    [ -f "$DIR/muted" ] && echo "mic: muted"
+    pgrep -f "voice_mode.mouth (serve|mail)" > /dev/null && echo "mouth: up" || echo "mouth: down"
+    [ -f "$DIR/device" ] && echo "speaker: $(cat "$DIR/device")"
+    ;;
+  *)
+    sed -n '2,12p' "$0"; exit 2
+    ;;
+esac

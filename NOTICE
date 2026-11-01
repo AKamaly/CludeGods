@@ -1,0 +1,10 @@
+CludeGods is an independent community project. It is not affiliated with, sponsored by,
+or endorsed by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, PBC,
+used here only to describe what this project works with.
+
+patches/voicemode-mouth-bluetooth.patch is a diff against VoiceMode
+(https://github.com/mbailey/voicemode), which is MIT licensed, copyright Mike Bailey.
+Only the diff is distributed here; VoiceMode itself is not included.
+
+The project also relies on, without bundling: Whisper and whisper.cpp (MIT), Kokoro (Apache-2.0),
+mlx-audio (MIT), Silero VAD (MIT), and ONNX Runtime (MIT). Check each project for its current terms.

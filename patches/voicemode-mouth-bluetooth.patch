@@ -1,0 +1,41 @@
+--- a/voice_mode/mouth/output.py
++++ b/voice_mode/mouth/output.py
+@@ -131,7 +131,12 @@
+     def __init__(self, name: str, sample_rate: int, pan: Optional[float] = None) -> None:
+         idx, self.name = resolve(name)
+         sd = _sd()
+-        self.sample_rate = sample_rate
++        # local patch (colleague skill): play at the device's native rate (AirPods: 48 kHz)
++        # and upsample here, continuously across blocks, instead of letting CoreAudio convert
++        dev_rate = int(sd.query_devices(idx)["default_samplerate"]) if idx is not None else sample_rate
++        self.up = dev_rate // sample_rate if dev_rate > sample_rate and dev_rate % sample_rate == 0 else 1
++        self._last = 0.0
++        self.sample_rate = sample_rate * self.up
+         self.gains: Optional[np.ndarray] = None
+         self.pan_ignored: Optional[str] = None
+         channels = 1
+@@ -154,8 +159,10 @@
+         self._hold = False
+         self._cur: Optional[np.ndarray] = None
+         self._pos = 0
+-        self.stream = sd.OutputStream(device=idx, samplerate=sample_rate, channels=channels,
+-                                      dtype="float32", callback=self._callback)
++        # local patch (colleague skill): Bluetooth outputs crackle at PortAudio's low latency
++        self.stream = sd.OutputStream(device=idx, samplerate=self.sample_rate, channels=channels,
++                                      dtype="float32", callback=self._callback,
++                                      latency=os.environ.get("VOICEMODE_MOUTH_LATENCY", "high"))
+         self.stream.start()
+         self.latency = float(getattr(self.stream, "latency", 0.0) or 0.0)
+ 
+@@ -193,6 +200,11 @@
+         self.frames_played += filled
+ 
+     def write(self, block: np.ndarray) -> None:
++        if self.up > 1 and len(block):
++            x = np.concatenate([[self._last], block.astype(np.float32)])
++            t = np.arange(1, self.up + 1, dtype=np.float32) / self.up
++            self._last = float(x[-1])
++            block = (x[:-1, None] * (1 - t) + x[1:, None] * t).reshape(-1)
+         frames = block.reshape(-1, 1)
+         if self.gains is not None:
+             frames = frames * self.gains  # (n, 1) * (2,) -> (n, 2)

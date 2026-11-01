@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""permit: Claude Code PermissionRequest hook that lets the call pill answer the prompt.
+
+Register (in ~/.claude/settings.json, see config/settings.example.json):
+  "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command",
+      "command": "$HOME/.claude/skills/colleague/bin/permit", "timeout": 60}]}]
+
+Flow:
+  - CallPill not running: exit 0, no output. Claude Code behaves exactly as without the hook.
+  - Otherwise write ~/.voicemode/call/permit/<id>.json and poll every 0.2 s for <id>.answer
+    ("allow" or "deny", written only by a physical click on the pill) for up to 50 s
+    (PERMIT_TIMEOUT_S overrides). allow/deny prints the decision JSON; timeout prints nothing,
+    so the in-app dialog takes over. Both files are always removed.
+  - During a live voice call, a spoken heads-up only. Voice can never answer: the only
+    writer of <id>.answer is the pill's click handler.
+Any error: exit 0, no output.
+"""
+import glob
+import json
+import os
+import secrets
+import signal
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+CALL = os.path.join(HOME, ".voicemode", "call")
+PERMIT_DIR = os.environ.get("PERMIT_DIR") or os.path.join(CALL, "permit")
+CALL_BIN = os.path.join(HOME, ".claude", "skills", "colleague", "bin", "call")
+
+
+def pill_running():
+    if os.environ.get("PERMIT_ASSUME_PILL") == "1":   # tests only
+        return True
+    try:
+        return subprocess.run(["pgrep", "-x", "CallPill"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=2).returncode == 0
+    except Exception:
+        return False
+
+
+def clip(s, n):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def summarize(tool, inp):
+    """(short, summary, mono): a few words for speech, the card text, monospaced or not."""
+    inp = inp if isinstance(inp, dict) else {}
+    if tool == "Bash":
+        desc = str(inp.get("description") or "").strip()
+        cmd = str(inp.get("command") or "").strip()
+        return (desc or clip(cmd, 60) or "a shell command"), (desc + "\n" + cmd if desc else cmd), True
+    if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Read"):
+        p = str(inp.get("file_path") or inp.get("notebook_path") or "")
+        verb = {"Write": "write", "Read": "read"}.get(tool, "edit")
+        return "%s %s" % (verb, os.path.basename(p) or "a file"), p, True
+    if tool in ("WebFetch",):
+        return "fetch a web page", str(inp.get("url") or ""), True
+    if tool in ("WebSearch",):
+        return "search the web", str(inp.get("query") or ""), False
+    if tool.startswith("mcp__"):
+        parts = tool.split("__")
+        name = parts[-1] if len(parts) >= 3 else tool
+        server = parts[1] if len(parts) >= 3 else ""
+        bits = []
+        for k, v in inp.items():
+            if isinstance(v, (dict, list)):
+                v = json.dumps(v, ensure_ascii=False)
+            bits.append("%s: %s" % (k, clip(v, 80)))
+            if len(bits) >= 4:
+                break
+        head = "%s (%s)" % (name, server) if server else name
+        return name.replace("_", " "), head + ("\n" + "\n".join(bits) if bits else ""), False
+    return tool, clip(json.dumps(inp, ensure_ascii=False), 300), True
+
+
+def session_title(sid):
+    """The Claude app's title for this CLI session, from its index file. Cheap glob only."""
+    if not sid or "/" in sid:
+        return ""
+    base = os.path.join(HOME, "Library", "Application Support", "Claude", "claude-code-sessions")
+    for p in glob.glob(os.path.join(base, "*", "*", "local_" + sid + ".json")):
+        try:
+            with open(p) as f:
+                m = json.load(f)
+            if m.get("cliSessionId") == sid and m.get("title"):
+                return str(m["title"])
+        except Exception:
+            pass
+    return ""
+
+
+def live_call():
+    if not os.path.exists(os.path.join(CALL, "session")):
+        return False
+    try:
+        with open(os.path.join(CALL, "ears.pid")) as f:
+            os.kill(int(f.read().strip()), 0)
+        return True
+    except Exception:
+        return False
+
+
+def heads_up(short):
+    try:
+        subprocess.Popen([CALL_BIN, "say", "Permission needed: %s. Allow or deny on the pill." % clip(short, 80)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception:
+        pass
+
+
+def main():
+    if not pill_running():
+        return None
+    raw = sys.stdin.read()
+    d = json.loads(raw) if raw.strip() else {}
+    tool = str(d.get("tool_name") or "tool")
+    short, summary, mono = summarize(tool, d.get("tool_input") or {})
+    sid = str(d.get("session_id") or "")
+    rid = secrets.token_hex(8)
+    os.makedirs(PERMIT_DIR, exist_ok=True)
+    req = os.path.join(PERMIT_DIR, rid + ".json")
+    ans = os.path.join(PERMIT_DIR, rid + ".answer")
+
+    def cleanup(*_):
+        for p in (req, ans, req + ".tmp"):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    def on_signal(*_):
+        cleanup()
+        os._exit(0)
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            signal.signal(s, on_signal)
+        except Exception:
+            pass
+    try:
+        rec = {
+            "id": rid,
+            "pid": os.getpid(),
+            "session_id": sid,
+            "title": session_title(sid),
+            "tool_name": tool,
+            "short": short,
+            "summary": clip(summary, 2000) if not mono else summary[:2000],
+            "mono": mono,
+            "cwd": str(d.get("cwd") or ""),
+            "permission_mode": str(d.get("permission_mode") or ""),
+            "created": time.time(),
+        }
+        with open(req + ".tmp", "w") as f:
+            json.dump(rec, f)
+        os.replace(req + ".tmp", req)
+        if live_call() and os.environ.get("PERMIT_QUIET") != "1":
+            heads_up(short)
+        try:
+            timeout = float(os.environ.get("PERMIT_TIMEOUT_S") or 50)
+        except ValueError:
+            timeout = 50.0
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                with open(ans) as f:
+                    a = f.read().strip().lower()
+            except FileNotFoundError:
+                a = ""
+            if a in ("allow", "deny"):
+                return a
+            time.sleep(0.2)
+        return None
+    finally:
+        cleanup()
+
+
+if __name__ == "__main__":
+    try:
+        verdict = main()
+    except Exception:
+        verdict = None
+    if verdict == "allow":
+        out = {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}
+    elif verdict == "deny":
+        out = {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                      "decision": {"behavior": "deny", "message": "Denied from the call pill"}}}
+    else:
+        out = None
+    if out is not None:
+        try:
+            sys.stdout.write(json.dumps(out) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+    sys.exit(0)
