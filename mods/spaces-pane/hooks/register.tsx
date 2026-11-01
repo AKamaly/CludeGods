@@ -750,6 +750,8 @@ export const register: Register = on => {
                   </Button>
                 </Box>
                 <Text dimColor size="footnote">{plural(s.pages, 'page')}</Text>
+                <Button key={`open-space-go-${s.slug}`} label="Open ›" variant="secondary"
+                  onPress={() => void go({ space: s.slug, page: '' })} />
               </Box>
               <Text dimColor size="footnote" wrap="truncate-end">
                 {s.slug === MEMORY
@@ -832,6 +834,8 @@ export const register: Register = on => {
                     </Button>
                   </Box>
                   <Text dimColor size="caption">{ago(now - x.editedMs)}</Text>
+                  <Button key={`open-page-go-${x.slug}`} label="Open ›" variant="secondary"
+                    onPress={() => void go({ space: s.slug, page: x.slug })} />
                 </Box>
                 {line || parent ? (
                   <Text dimColor size="footnote" wrap="truncate-end">
@@ -959,6 +963,8 @@ export const register: Register = on => {
                     </Button>
                   </Box>
                   <Text dimColor size="caption">{ago(now - c.editedMs)}</Text>
+                  <Button key={`open-subpage-go-${c.slug}`} label="Open ›" variant="secondary"
+                    onPress={() => void go({ space: s.slug, page: c.slug })} />
                 </Box>
               ))}
             </Box>
