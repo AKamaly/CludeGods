@@ -297,25 +297,25 @@ flowchart LR
 
   ears -- "heard_*.jsonl" --> listen["listen.py<br/>echo gate + barge-in"]
   listen -- "USER: ... lines" --> monitor["Monitor tool"]
-  monitor --> call["the call session<br/>(Claude Code, colleague skill)"]
-  call -- "call say" --> mouth
+  monitor --> session["the call session<br/>(Claude Code, colleague skill)"]
+  session -- "call say" --> mouth
   mouth --> spk([Speakers / headphones])
   listen -. "call hush on barge-in" .-> mouth
 
-  call -- "PreToolUse" --> narrate["narrate hook"]
+  session -- "PreToolUse" --> narrate["narrate hook"]
   narrate -- "call say" --> mouth
 
-  call -- "PermissionRequest" --> permit["permit hook"]
+  session -- "PermissionRequest" --> permit["permit hook"]
   permit -- "permit/&lt;id&gt;.json" --> pill["CallPill"]
   pill -- "click writes &lt;id&gt;.answer" --> permit
   ears -- "heard log (state)" --> pill
-  pill -- "mute / stop" --> call
+  pill -- "mute / stop" --> session
 
   pane["Workers pane mod"] <--> reg[("~/.voicemode/call/workers.json")]
-  call <--> reg
+  session <--> reg
   pane -- "send task / open" --> workers["worker chats"]
   pane -- "requests/*.json" --> listen
-  call -- "start_session / SendMessage" --> workers
+  session -- "start_session / SendMessage" --> workers
   pane -- "scheduled wake / Run now" --> workers
   workers -- "outbox/*.jsonl" --> pane
   pane -- "outbox-say" --> mouth
