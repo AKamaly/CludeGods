@@ -23,7 +23,7 @@ Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Voic
 
 <table><tr><td>
 
-<img src="docs/media/hero.gif" alt="CludeGods: the app, a voice call, approving with a click, and a worker checking in" width="960" />
+<img src="docs/media/hero.gif" alt="CludeGods: the app, a voice call, approving with a click, and a worker checking in" width="100%" />
 
 </td></tr></table>
 
@@ -49,7 +49,7 @@ transcript of what you say goes to Claude, the same as anything you type into th
 
 <table><tr><td>
 
-<img src="docs/media/app-scene.jpg" alt="Claude desktop app with a chat, the Workers pane, and the call card" width="860" />
+<img src="docs/media/app-scene.jpg" alt="Claude desktop app with a chat, the Workers pane, and the call card" width="100%" />
 
 </td></tr></table>
 
@@ -96,7 +96,7 @@ plays, and if it is you, the speech is cut and your words go straight to the ses
 
 <table><tr><td>
 
-<img src="docs/media/call.jpg" alt="The call card in the Thinking state" width="860" />
+<img src="docs/media/call.jpg" alt="The call card in the Thinking state" width="100%" />
 
 </td></tr></table>
 
@@ -120,7 +120,7 @@ Type a task into a card and press Enter to send it to that chat; click the name 
 
 <table><tr><td>
 
-<img src="docs/media/workers.jpg" alt="Diagram: Research, Scribe, Scout, and Sales connected through the Workers pane" width="860" />
+<img src="docs/media/workers.jpg" alt="Diagram: Research, Scribe, Scout, and Sales connected through the Workers pane" width="100%" />
 
 </td></tr></table>
 
@@ -138,7 +138,7 @@ is the only thing that answers it. A spoken "yes, go ahead" is ignored.
 
 <table><tr><td>
 
-<img src="docs/media/approve.jpg" alt="A permission card for npm run deploy:staging with Deny and Allow buttons" width="860" />
+<img src="docs/media/approve.jpg" alt="A permission card for npm run deploy:staging with Deny and Allow buttons" width="100%" />
 
 </td></tr></table>
 
@@ -157,7 +157,7 @@ is sent until you type yes in the worker's own chat. Details in
 
 <table><tr><td>
 
-<img src="docs/media/check-in.jpg" alt="Scribe's card at 09:00 with two drafts that need a yes" width="860" />
+<img src="docs/media/check-in.jpg" alt="Scribe's card at 09:00 with two drafts that need a yes" width="100%" />
 
 </td></tr></table>
 
@@ -176,7 +176,7 @@ anything you type.
 
 <table><tr><td>
 
-<img src="docs/media/open-source.jpg" alt="Open source. Local voice. Safe by design." width="860" />
+<img src="docs/media/open-source.jpg" alt="Open source. Local voice. Safe by design." width="100%" />
 
 </td></tr></table>
 
