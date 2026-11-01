@@ -32,8 +32,8 @@ _The app scene, a call with a barge-in, a permission approved with a click, and 
 ## Overview
 
 CludeGods is a small set of parts that sit on top of Claude Code and
-[VoiceMode](https://github.com/mbailey/voicemode). You type `/colleague`, a small orb
-appears in the corner, and you talk to your Claude Code session the way you would to
+[VoiceMode](https://github.com/mbailey/voicemode). You type `/colleague`, a small call
+card with the colleague god appears in the corner, and you talk to your Claude Code session the way you would to
 someone sitting next to you. Over on the right, a Workers pane shows your standing worker
 chats, each with a task box.
 
@@ -58,9 +58,10 @@ The parts:
 - **`colleague` skill**: a live voice call with your Claude Code session. An
   always-on mic streams your words in, Claude answers out loud without blocking its own
   work, and you can cut in at any time.
-- **CallPill**: a floating macOS status card with a live voice orb, mute and stop
-  controls, and the only place outside the app where a permission prompt can be approved,
-  by a physical click.
+- **CallPill**: a floating macOS call card. The god on the call (the colleague, or the
+  worker you put on) listens, thinks and talks with you, the line being spoken shows under
+  it, and mic and stop buttons sit below. It is also the only place outside the app where
+  a permission prompt can be approved, by a physical click.
 - **Hooks**: `narrate` says each step out loud as it happens; `permit` routes permission
   prompts to the pill.
 - **Workers pane mod**: a pane beside the chat with your standing worker chats as cards,
@@ -91,8 +92,8 @@ a task into Scribe's box and press Enter.
 ### Hop on a call with Claude
 
 `/colleague` starts the ears (always-on capture with Silero VAD and Whisper), the mouth (a
-non-blocking speech queue), and CallPill. The orb moves through Listening, You, Thinking,
-and Claude. Talk over Claude and it stops: each partial transcript is checked while a line
+non-blocking speech queue), and CallPill. The god on the call card moves through Listening, You, Thinking,
+and talking, with the line being spoken as its caption. Talk over Claude and it stops: each partial transcript is checked while a line
 plays, and if it is you, the speech is cut and your words go straight to the session.
 
 <div align="center">
@@ -155,7 +156,7 @@ _Their names. Their voices. Their hours._
 ### Approve with a click, never by voice
 
 The mic hears the whole room, so voice can never approve anything. When Claude asks for a
-permission, CallPill shows the request beside the orb with Deny and Allow, and a mouse click
+permission, CallPill shows the request beside the call card with Deny and Allow, and a mouse click
 is the only thing that answers it. A spoken "yes, go ahead" is ignored.
 
 <div align="center">
@@ -227,7 +228,7 @@ never open to a `read` or `drafts` worker.
 ### Local voice
 
 Whisper (speech to text), Silero VAD (voice activity), Kokoro through mlx-audio (the voice),
-and the Metal orb all run on your Mac, managed by VoiceMode. Your audio stays on the
+and CallPill all run on your Mac, managed by VoiceMode. Your audio stays on the
 machine. The transcript of what you say goes to Claude as part of the session, like
 anything you type.
 
@@ -297,8 +298,8 @@ tools (`xcode-select --install`).
    scripts/build-pill.sh ~/.claude/skills/colleague/bin
    ```
 
-   The first time the pill runs, macOS asks for microphone access (it reads the level so the
-   orb moves with your voice; nothing is recorded).
+   CallPill never opens the microphone itself; it follows the call through VoiceMode's
+   log. The ears ask for microphone access the first time a call starts.
 
 5. **Add the hooks.** Merge `config/settings.example.json` into `~/.claude/settings.json`
    (keep any hooks you already have). It registers `narrate` on `PreToolUse` and `permit` on
@@ -436,15 +437,32 @@ blocks a tool.
 
 `permit` is a `PermissionRequest` hook. If CallPill is not running it does nothing and the
 app behaves as usual. If it is, it writes the request to `~/.voicemode/call/permit/<id>.json`
-and waits up to 50 seconds for `<id>.answer`. CallPill shows the request in a panel beside
-the orb with Deny and Allow. A mouse click is the only thing that writes the answer. On a
+and waits up to 50 seconds for `<id>.answer`. CallPill shows the request in a card beside
+the call card with Deny and Allow. A mouse click is the only thing that writes the answer. On a
 timeout the hook prints nothing and the normal in-app dialog takes over.
 
-CallPill (`pill.swift`) is a native AppKit and Metal app: the orb from
-`design/orb.html` ported to a Metal shader, states for Listening, You, Thinking, Claude and
-Mic off, hover controls for Mute and Stop, scroll or pinch to resize. It can also list
-sessions waiting on you from `~/.voicemode/call/pending/*.json` with an Open button per
-row (see [Waiting sessions](#waiting-sessions-optional)).
+CallPill (`pill.swift`) is a native AppKit app with no dependencies. The god is a sprite
+strip from `skills/colleague/bin/gods/` stepped on a CALayer (about 1.5% CPU), mapped to
+the call: Listening is idle, You is listen, Thinking is work, Claude talking is talk, and a
+finished reply plays one happy loop. `~/.voicemode/call/focus` names the worker on the
+call, and the card switches to that worker's god and name. Light and dark follow the
+system. Mic and stop buttons are always visible; a compact mode folds the card to the god
+and the buttons; scroll or pinch to resize. It can also list sessions waiting on you from
+`~/.voicemode/call/pending/*.json` with an Open button per row (see
+[Waiting sessions](#waiting-sessions-optional)). `pill --snapshot out.png` draws every
+state into one image without opening a window.
+
+<div align="center">
+
+<table><tr><td>
+
+<img src="docs/media/callpill.jpg" alt="CallPill states: listening, talking, you, thinking, muted, a permission card, a worker on the call, and the waiting list" width="100%" />
+
+</td></tr></table>
+
+</div>
+
+_Every CallPill state from `pill --snapshot`: the call card, the permission card, Scribe on the call, and the waiting list._
 
 #### `mods/workers-pane`
 
@@ -507,7 +525,7 @@ the latency.
 
 #### `skills/colleague/design/`
 
-`orb.html` is the WebGL reference for the orb; `workers.html` is the pane mockup. Open
+`orb.html` is the WebGL orb the first CallPill used; `workers.html` is the pane mockup. Open
 either in a browser.
 
 ## Proactive workers
@@ -595,7 +613,7 @@ will mishear.
 
 - Your Mac and the Claude desktop app must be on. Nothing here runs in the cloud, apart from
   the Claude Code session itself, which receives your transcripts like any typed message.
-- macOS on Apple Silicon only (Metal, AppKit, mlx-audio).
+- macOS on Apple Silicon only (AppKit, mlx-audio).
 - On laptop speakers, a barge-in needs at least two content words that are not in Claude's
   own line. On headphones two words of any kind are enough.
 - The Workers pane uses desktop app mod surfaces (panes, the footer launcher, SVG). In the

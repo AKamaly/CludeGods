@@ -1,196 +1,309 @@
-// pill: a small floating status pill for the voice call, with the voice orb from
-// design/orb.html (the approved prototype). The orb is the prototype's WebGL fragment
-// shader ported 1:1 to Metal and drawn in an MTKView at display rate.
+// pill: CallPill, the floating call card for the voice call (CludeGods v0.2).
 //
-// Reads the VoiceMode heard log (~/.voicemode/logs/conversations/heard_*.jsonl) and shows
-// one of: Listening, You (he is talking), Thinking, Claude (speaking), Mic off.
-// While the call is live it also reads the Mac's own mic (AVAudioEngine tap, RMS per buffer)
-// so the orb moves with his voice. If the mic cannot be read (no permission, no device), it
-// falls back to the prototype's simulated voice envelope.
-// The timer counts from the ears' last `listen-started` event.
-// Layout: a 96 x 116 vertical card (orb, label) at the top-right by default; the call timer
-// is off (all-day sessions), CALLPILL_TIMER=on adds it back as a third row (96 x 132);
-// CALLPILL_LAYOUT=horizontal brings back the 180 x 48 pill at the top centre.
-// Always on top, on every Space, draggable. `call start` launches it, `call stop` quits it.
+// The launch film's call card, native: a white rounded card (the dark card in Dark Mode) with
+// an orange dot and the speaker's name, the god in the middle, one caption line under it, and
+// two round buttons, mic and stop. Permission requests grow a card to its LEFT. Always on top,
+// on every Space, draggable; `call start` launches it, `call stop` quits it.
 //
-// Build:     scripts/build-pill.sh (from the repo root) does all of this:
-//            swiftc -O pill.swift -o pill -framework Metal -framework MetalKit
-// Bundle:    cp pill CallPill.app/Contents/MacOS/CallPill   (plus an Info.plist with NSMicrophoneUsageDescription)
-//            codesign -f -s - -i dev.cludegods.callpill -r='designated => identifier "dev.cludegods.callpill"' CallPill.app
-//            (ad-hoc, but with a fixed designated requirement, so TCC keeps the mic grant across rebuilds)
-// Snapshot:  ./pill --snapshot out.png        (renders every phase to a PNG, no mic, no window;
-//            bottom row: hovered, muted, muted+hovered, hovered at 1.75x, muted at 0.75x)
-// Hover:     Mute (`call mute`/`call unmute`) and Stop (`call stopwork`) fade in over the label.
-//            ~/.voicemode/call/muted present = label Muted, Mic off orb, red mic-slash badge.
-// Waiting:   a chevron (top-left corner, on hover; stays up in amber while anything waits) opens a
-//            list under the card of sessions waiting on a permission decision or an answer, read
-//            from ~/.voicemode/call/pending/*.json (written by an optional Notification hook; see README).
-//            Each row has Open, which opens that session's claude:// link and nothing else. The
-//            pill NEVER answers a prompt: Allow stays a click in the Claude app, and no voice
-//            command reaches this list. Snapshot reads CALLPILL_PENDING_DIR (default: the real dir).
+// The god:   sprite strips from bin/gods/<kind>-<state>.png + index.json (rendered from the
+//            film's gods.js; each a horizontal strip of square frames). Animated by stepping the
+//            CALayer contentsRect at the strip's fps: no Metal, no drawing per frame.
+//            listening -> idle, you talking -> listen, thinking -> work, Claude talking -> talk,
+//            a reply just finished -> happy (one loop). Kind is `colleague`, unless
+//            ~/.voicemode/call/focus names a worker: then that worker's "god" (and "name" for the
+//            title) from workers.json; no "god": derived from its "avatar" colour. Missing strips
+//            leave the space empty and are retried every 2 s (no stand-in character is drawn).
+// State:     the VoiceMode heard log (~/.voicemode/logs/conversations/heard_*.jsonl): mouth
+//            `saying` (its text is the caption) and `said`, mic `partial`/`turn` (You), ears
+//            `listen-started`/`listen-stopped` (Mic off). Thinking follows bin/listen.py's verdicts
+//            (~/.voicemode/call/accepted), not raw mic turns: on speakers most raw turns are echo.
+//            ~/.voicemode/call/muted present = Muted (red mic-slash on the mic button).
+// Buttons:   mic = `call mute` / `call unmute`; stop = `call stopwork`. Always visible.
+// Compact:   the arrows button (top-right, on hover) folds the card to just the god + mic/stop,
+//            and back. Kept in UserDefaults.
+// Resize:    scroll or pinch over the card, 0.6x...1.75x, top-right anchored, kept in UserDefaults.
+// Timer:     off (the call runs all day). CALLPILL_TIMER=on shows it top-right, mono.
+// Waiting:   a chevron (header, on hover; stays up in amber while anything waits) opens a list
+//            under the card of sessions waiting on a decision or an answer, read from
+//            ~/.voicemode/call/pending/*.json (written by an optional Notification hook; see README). Each
+//            row has Open, which opens that session's claude:// link and nothing else. The list
+//            NEVER answers a prompt. CALLPILL_PENDING_DIR overrides the directory.
 // Permits:   bin/permit (the PermissionRequest hook) writes ~/.voicemode/call/permit/<id>.json and
-//            waits for <id>.answer. While any exist, a panel grows LEFT of the card (the card does
-//            not move): session, tool, summary, Deny and Allow (accent orange). Oldest first,
-//            "+N more". A mouse click on a button is the ONLY writer of <id>.answer (atomic); no
-//            keyboard path, no voice path, and clicks are ignored for 0.6 s after a request
-//            appears. The orb shows Thinking while one waits. Requests whose hook process has
-//            exited are dropped. Snapshot reads CALLPILL_PERMIT_DIR, else built-in fakes.
-// Resize:    scroll or pinch over the card, 0.75x...1.75x, top-right anchored, kept in UserDefaults.
-// Debug:     open -g CallPill.app --args --log /path/level.log   (10 Hz mic level trace)
+//            waits for <id>.answer. While any exist, a card grows LEFT of the call card (the call
+//            card does not move): "Claude wants to run", the command in a mono box (other tools:
+//            the tool name and its main argument), Deny and Allow. Oldest first, "+N more". A mouse
+//            click on a button is the ONLY writer of <id>.answer (atomic); no keyboard path, no
+//            voice path, and clicks are ignored for 0.6 s after a request appears. Then
+//            "Allowed" / "Denied" for a moment and the card leaves. Requests whose hook process has
+//            exited are dropped. CALLPILL_PERMIT_DIR overrides the directory.
+// Theme:     follows the system appearance; CALLPILL_APPEARANCE=light|dark forces one.
+//
+// Build:     swiftc -O pill.swift -o pill        (AppKit, QuartzCore, ImageIO; nothing else)
+// Bundle:    scripts/build-pill.sh does the rest: copy into CallPill.app/Contents/MacOS/CallPill
+//            and ad-hoc sign with a fixed identifier and designated requirement, so macOS keeps the
+//            app's grants across rebuilds.
+// Snapshot:  ./pill --snapshot out.png   (every state, light and dark, into one PNG; no window)
+// Demo:      CALLPILL_DEMO=<listening|you|thinking|claude|muted|off|happy> ./pill   (a fixed state for
+//            screenshots: never reads the logs, never runs `call`, saves nothing). Extras:
+//            CALLPILL_DEMO_LINE (caption), CALLPILL_DEMO_EXPAND=1 (list open), CALLPILL_DEMO_HOVER=1,
+//            CALLPILL_DEMO_COMPACT=1, CALLPILL_DEMO_AT=right,top (inset from the screen's top-right),
+//            CALLPILL_CALL_DIR (read focus, workers.json, muted, pending/ and permit/ from there).
+// Tests:     CALLPILL_CALL_DIR and CALLPILL_LOG_DIR (the heard_*.jsonl directory) also work outside
+//            demo mode, to drive every state from fake files.
+// Debug:     open -g CallPill.app --args --log /path/state.log   (10 Hz state trace)
 
 import AppKit
-import AVFoundation
-import CoreAudio
-import AudioToolbox
-import Metal
-import MetalKit
-import simd
+import QuartzCore
+import ImageIO
 
-// MARK: - Shader (ported from the WebGL reference in design/orb.html)
+// MARK: - Paths and environment
 
-let orbShaderSource = """
-#include <metal_stdlib>
-using namespace metal;
+let env = ProcessInfo.processInfo.environment
+let home = FileManager.default.homeDirectoryForCurrentUser
 
-struct U {
-  float2 res;
-  float radius, phase, breathPhase, breath, level, swirl, glow, halo, haloGain, silk, core, life, light, pad;
-  float4 c[4];
-};
-struct VOut { float4 pos [[position]]; };
+func expand(_ p: String) -> URL { URL(fileURLWithPath: (p as NSString).expandingTildeInPath) }
 
-vertex VOut orb_vs(uint vid [[vertex_id]]) {
-  float2 p[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
-  VOut o; o.pos = float4(p[vid], 0.0, 1.0); return o;
+/// ~/.voicemode/call, or CALLPILL_CALL_DIR (demo and tests).
+let callDir: URL = env["CALLPILL_CALL_DIR"].map(expand) ?? home.appendingPathComponent(".voicemode/call")
+
+// MARK: - Palette (SPEC §1, the film's claude-ui.js values)
+
+func rgb(_ v: UInt32, _ a: CGFloat = 1) -> NSColor {
+    NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
+            blue: CGFloat(v & 0xFF) / 255, alpha: a)
 }
 
-// GLSL mod() is floor-based; keep it that way for negative lattice coordinates.
-static float2 mod289(float2 x) { return x - floor(x / 289.0) * 289.0; }
-static float3 mod289(float3 x) { return x - floor(x / 289.0) * 289.0; }
-static float3 permute(float3 x) { return mod289(((x * 34.0) + 1.0) * x); }
-static float snoise(float2 v) {
-  const float4 C = float4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
-  float2 i = floor(v + dot(v, C.yy));
-  float2 x0 = v - i + dot(i, C.xx);
-  float2 i1 = (x0.x > x0.y) ? float2(1.0, 0.0) : float2(0.0, 1.0);
-  float4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1;
-  i = mod289(i);
-  float3 p = permute(permute(i.y + float3(0.0, i1.y, 1.0)) + i.x + float3(0.0, i1.x, 1.0));
-  float3 m = max(0.5 - float3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), 0.0);
-  m = m * m; m = m * m;
-  float3 x = 2.0 * fract(p * C.www) - 1.0;
-  float3 h = abs(x) - 0.5;
-  float3 ox = floor(x + 0.5);
-  float3 a0 = x - ox;
-  m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
-  float3 g; g.x = a0.x * x0.x + h.x * x0.y; g.yz = a0.yz * x12.xz + h.yz * x12.yw;
-  return 130.0 * dot(m, g);
-}
-static float max3(float3 c) { return max(max(c.r, c.g), c.b); }
+struct Theme {
+    let isDark: Bool
+    let cardTop: NSColor, cardBottom: NSColor, border: NSColor, border2: NSColor
+    let text: NSColor, sub: NSColor, faint: NSColor, side: NSColor
+    let accent: NSColor, accentSoft: NSColor, green: NSColor, amber: NSColor, red: NSColor
+    let micFill: NSColor, micStroke: NSColor, mutedFill: NSColor, mutedStroke: NSColor
+    let stopFill: NSColor, stopStroke: NSColor, stopIcon: NSColor
+    let buttonFill: NSColor, glassFill: NSColor, glassStroke: NSColor, pressed: NSColor
 
-fragment float4 orb_fs(VOut in [[stage_in]], constant U& u [[buffer(0)]]) {
-  // GL convention: origin bottom-left, y up.
-  float2 uv = float2(in.pos.x / u.res.x, 1.0 - in.pos.y / u.res.y);
-  float2 p = uv * 2.0 - 1.0;
-  float ph = u.phase;
-  float3 C0 = u.c[0].rgb, C1 = u.c[1].rgb, C2 = u.c[2].rgb, C3 = u.c[3].rgb;
-  float R = u.radius * (1.0 + u.breath * sin(u.breathPhase) + 0.09 * u.level);
-  float r = length(p);
-  float2 q = p / R;
-  float d = length(q);
+    static let light = Theme(
+        isDark: false,
+        cardTop: .white, cardBottom: .white, border: rgb(0xe8e6dc), border2: rgb(0xdedcd1),
+        text: rgb(0x1f1e1d), sub: rgb(0x73726c), faint: rgb(0x9a988f), side: rgb(0xf5f4ef),
+        accent: rgb(0xc96442), accentSoft: rgb(0xfbe9e5), green: rgb(0x2f8f5b), amber: rgb(0xb7791f), red: rgb(0xc2412d),
+        micFill: .white, micStroke: rgb(0xdedcd1), mutedFill: rgb(0xfbe9e5), mutedStroke: rgb(0xf1cfc6),
+        stopFill: rgb(0xfbe9e5), stopStroke: rgb(0xf1cfc6), stopIcon: rgb(0xc2412d),
+        buttonFill: .white, glassFill: rgb(0xf5f4ef), glassStroke: rgb(0xe8e6dc), pressed: NSColor(white: 0, alpha: 0.07))
 
-  float sw = u.swirl * 1.4 * (1.0 - smoothstep(0.0, 1.2, d));
-  float cs = cos(sw), sn = sin(sw);
-  float2 qs = float2(cs * q.x - sn * q.y, sn * q.x + cs * q.y);
+    static let dark = Theme(
+        isDark: true,
+        cardTop: rgb(0x1b1b24), cardBottom: rgb(0x121219), border: NSColor(white: 1, alpha: 0.10),
+        border2: NSColor(white: 1, alpha: 0.16),
+        text: rgb(0xf4f3ef), sub: rgb(0xebebf5, 0.62), faint: rgb(0xebebf5, 0.40), side: NSColor(white: 1, alpha: 0.06),
+        accent: rgb(0xc96442), accentSoft: rgb(0xc96442, 0.24), green: rgb(0x4cb782), amber: rgb(0xe0a43a), red: rgb(0xef5a4c),
+        micFill: NSColor(white: 1, alpha: 0.08), micStroke: NSColor(white: 1, alpha: 0.14),
+        mutedFill: rgb(0xef5a4c, 0.18), mutedStroke: rgb(0xef5a4c, 0.40),
+        stopFill: rgb(0xe5484d), stopStroke: rgb(0xe5484d), stopIcon: .white,
+        buttonFill: NSColor(white: 1, alpha: 0.06), glassFill: NSColor(white: 1, alpha: 0.08),
+        glassStroke: NSColor(white: 1, alpha: 0.12), pressed: NSColor(white: 1, alpha: 0.12))
 
-  float2 warp = float2(snoise(qs * 1.3 + float2(ph * 0.21, -ph * 0.17)),
-                       snoise(qs * 1.3 + float2(4.7 - ph * 0.19, 2.1 + ph * 0.23)));
-  float2 w = qs + warp * (0.18 + 0.22 * u.level + 0.10 * u.swirl);
-
-  float3 acc = float3(0.0);
-  for (int i = 0; i < 4; i++) {
-    float fi = float(i);
-    float dirn = (fmod(fi, 2.0) < 0.5) ? 1.0 : -0.8;
-    float t = ph * (0.55 + 0.17 * fi) * dirn + fi * 1.7;
-    float rad = 0.40 + 0.16 * sin(ph * 0.43 + fi * 2.3) + 0.10 * u.level;
-    float2 c = rad * float2(cos(t), sin(t * 1.07 + fi * 0.6));
-    float s = 0.42 + 0.08 * sin(ph * 0.61 + fi * 1.9) + 0.14 * u.level;
-    float2 dv = w - c;
-    acc += u.c[i].rgb * exp(-dot(dv, dv) / (s * s));
-  }
-  float ang = ph * 0.12;
-  float sf = snoise(w * 0.8 + float2(ph * 0.07, -ph * 0.05)) + 0.45 * dot(w, float2(cos(ang), sin(ang)));
-  float silk = 0.5 + 0.5 * sin(5.0 * sf + ph * 0.6);
-  float silkF = silk * silk;
-  acc *= mix(1.0, 0.55 + 1.1 * silkF, u.silk);
-  acc += 0.25 * (C0 + C1 + C2 + C3) * 0.22 * exp(-d * d * 1.2);
-  acc += mix(float3(1.0), 0.5 * (C0 + C1), 0.5) * exp(-d * d * 3.5) * u.level * u.core;
-  acc *= mix(1.0, 0.8, smoothstep(0.55, 1.0, d));
-
-  float3 glow = 1.0 - exp(-acc * u.glow);
-  float lum = dot(glow, float3(0.299, 0.587, 0.114));
-  glow = clamp(mix(float3(lum), glow, 1.3), 0.0, 1.0);
-  float gA = max3(glow);
-
-  float3 base = mix(float3(0.035, 0.04, 0.065), float3(0.975, 0.975, 0.985), u.light);
-  float bA = mix(0.82, 0.60, u.light);
-  float3 orbP = glow + base * bA * (1.0 - gA);
-  float orbA = gA + bA * (1.0 - gA);
-
-  float2 hp = q - float2(-0.32, 0.42);
-  float spec = exp(-dot(hp, hp) * 5.0) * 0.20;
-  float rim = smoothstep(0.78, 1.0, d) * 0.22;
-  float3 rimC = mix(float3(1.0), 0.5 * (C1 + C2), 0.5);
-  float3 add = (float3(spec) + rimC * rim) * mix(1.0, 0.6, u.light) * u.life;
-  orbP += add; orbA = clamp(orbA + max3(add), 0.0, 1.0);
-
-  float aa = 1.8 / (R * u.res.y * 0.5);
-  float disc = 1.0 - smoothstep(1.0 - aa - 0.015, 1.0 + aa, d);
-  orbP *= disc; orbA *= disc;
-
-  float3 hc = 0.25 * (C0 + C1 + C2 + C3);
-  hc = hc / max(max3(hc), 1e-3);
-  float hw = R * (0.28 + 0.35 * u.level);
-  float hd = max(r - R * 0.92, 0.0);
-  float hI = (u.halo + u.haloGain * u.level) * exp(-powr(hd / hw, 1.3));
-  hI *= 1.0 - smoothstep(0.82, 1.0, r);
-  hI = min(hI * mix(1.0, 0.85, u.light), 0.9);
-  float sh = u.light * 0.10 * exp(-max(r - R, 0.0) / (0.12 * R)) * (1.0 - smoothstep(0.82, 1.0, r));
-  float3 haloP = hc * hI;
-  float haloA = clamp(hI + sh * (1.0 - hI), 0.0, 1.0);
-
-  float3 outP = orbP + haloP * (1.0 - orbA);
-  float outA = orbA + haloA * (1.0 - orbA);
-
-  float n = fract(sin(dot(in.pos.xy, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
-  outP += n / 255.0; outA = clamp(outA + n / 255.0, 0.0, 1.0);
-  return float4(clamp(outP, 0.0, outA), outA);
-}
-"""
-
-// MARK: - States (the prototype's STATES table, values verbatim)
-
-func hex(_ s: String) -> SIMD3<Float> {
-    let v = UInt32(s.dropFirst(), radix: 16) ?? 0
-    return SIMD3(Float((v >> 16) & 0xFF) / 255, Float((v >> 8) & 0xFF) / 255, Float(v & 0xFF) / 255)
-}
-
-/// Every eased scalar of the orb, in the prototype's KEYS order.
-struct Params {
-    var speed, levelSpeed, swirl, glow, halo, haloGain, breath, breathRate, silk, core, life: Float
-    var you, amb, tts, pulse: Float
-    var c: [SIMD3<Float>]
-
-    mutating func ease(to t: Params, _ a: Float) {
-        speed += (t.speed - speed) * a; levelSpeed += (t.levelSpeed - levelSpeed) * a
-        swirl += (t.swirl - swirl) * a; glow += (t.glow - glow) * a
-        halo += (t.halo - halo) * a; haloGain += (t.haloGain - haloGain) * a
-        breath += (t.breath - breath) * a; breathRate += (t.breathRate - breathRate) * a
-        silk += (t.silk - silk) * a; core += (t.core - core) * a; life += (t.life - life) * a
-        you += (t.you - you) * a; amb += (t.amb - amb) * a; tts += (t.tts - tts) * a; pulse += (t.pulse - pulse) * a
-        for i in 0..<4 { c[i] += (t.c[i] - c[i]) * a }
+    static func of(_ a: NSAppearance) -> Theme {
+        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
     }
 }
+
+// MARK: - Drawing helpers (every view is flipped: y grows down, like the film's CSS)
+
+func attr(_ s: String, _ font: NSFont, _ c: NSColor, align: NSTextAlignment = .left,
+          wrap: NSLineBreakMode = .byTruncatingTail) -> NSAttributedString {
+    let ps = NSMutableParagraphStyle()
+    ps.alignment = align
+    ps.lineBreakMode = wrap
+    return NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: c, .paragraphStyle: ps])
+}
+
+/// One line of text, vertically centred on `midY`, clipped to `width`.
+func drawLine(_ s: NSAttributedString, x: CGFloat, midY: CGFloat, width: CGFloat) {
+    let h = ceil(s.size().height)
+    s.draw(with: NSRect(x: x, y: midY - h / 2, width: max(0, width), height: h),
+           options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+}
+
+func drawSymbol(_ name: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, center: NSPoint) {
+    let cfg = NSImage.SymbolConfiguration(pointSize: size, weight: weight)
+        .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+    guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) else { return }
+    let s = img.size
+    img.draw(in: NSRect(x: center.x - s.width / 2, y: center.y - s.height / 2, width: s.width, height: s.height),
+             from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+}
+
+/// The card body: white, 1 px border (dark: the film's dark gradient, top to bottom).
+func paintCardBody(_ b: NSRect, radius: CGFloat, theme t: Theme) {
+    let p = NSBezierPath(roundedRect: b.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
+    if t.isDark {
+        NSGradient(starting: t.cardTop, ending: t.cardBottom)?.draw(in: p, angle: 90)   // flipped: 90 = top -> bottom
+    } else {
+        t.cardTop.setFill(); p.fill()
+    }
+    t.border.setStroke()
+    p.lineWidth = 1
+    p.stroke()
+}
+
+/// A small outlined or filled text button (Deny / Allow / Open), the film's .cui-btn.
+func paintTextButton(_ r: NSRect, _ label: String, primary: Bool, pressed: Bool, theme t: Theme, k: CGFloat) {
+    let p = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 7 * k, yRadius: 7 * k)
+    if primary {
+        (pressed ? (t.accent.blended(withFraction: 0.18, of: .black) ?? t.accent) : t.accent).setFill()
+        p.fill()
+    } else {
+        t.buttonFill.setFill(); p.fill()
+        if pressed { t.pressed.setFill(); p.fill() }
+        t.border2.setStroke(); p.lineWidth = 1; p.stroke()
+    }
+    let s = attr(label, .systemFont(ofSize: 12.5 * k, weight: .medium), primary ? .white : t.text, align: .center)
+    drawLine(s, x: r.minX, midY: r.midY, width: r.width)
+}
+
+// MARK: - Gods (sprite strips rendered by track A from the film's gods.js)
+
+enum GodState: String, CaseIterable { case idle, talk, listen, work, happy }
+let godKinds: Set<String> = ["colleague", "research", "scribe", "scout", "sales", "herald"]
+
+final class Sprites {
+    static let shared = Sprites()
+    private(set) var fps: Double = 12
+    /// index.json `box`: the frame is `box` x the sphere's diameter, sphere centred.
+    private(set) var box: CGFloat = 1.6
+    private var metaLoaded = false
+    private var cache: [String: CGImage] = [:]
+
+    /// CALLPILL_GODS_DIR, else `gods/` next to the app (bin/CallPill.app -> bin/gods) or next to
+    /// the bare binary, else the installed skill's bin/gods.
+    var dir: URL {
+        if let e = env["CALLPILL_GODS_DIR"] { return expand(e) }
+        let b = Bundle.main.bundleURL
+        let beside = (b.pathExtension == "app" ? b.deletingLastPathComponent() : b).appendingPathComponent("gods")
+        if FileManager.default.fileExists(atPath: beside.path) { return beside }
+        return home.appendingPathComponent(".claude/skills/colleague/bin/gods")
+    }
+
+    private func loadMeta() {
+        guard let d = try? Data(contentsOf: dir.appendingPathComponent("index.json")),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+        if let f = (o["fps"] as? NSNumber)?.doubleValue, f >= 1, f <= 60 { fps = f }
+        if let b = (o["box"] as? NSNumber)?.doubleValue, b >= 1, b <= 4 { box = CGFloat(b) }
+        metaLoaded = true
+    }
+
+    /// The strip for `kind`/`state`, or nil while it is not on disk. Only one kind's strips stay
+    /// in memory (a strip is a few MB decoded).
+    func strip(_ kind: String, _ state: GodState) -> CGImage? {
+        let key = "\(kind)-\(state.rawValue)"
+        if let c = cache[key] { return c }
+        let url = dir.appendingPathComponent(key + ".png")
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+              img.height > 0, img.width >= img.height else { return nil }
+        if !metaLoaded { loadMeta() }
+        for k in cache.keys where !k.hasPrefix(kind + "-") { cache[k] = nil }
+        cache[key] = img
+        return img
+    }
+
+    static func frameCount(_ img: CGImage) -> Int { max(1, img.width / img.height) }
+
+    static func frame(_ img: CGImage, _ i: Int) -> CGImage? {
+        let h = img.height
+        return img.cropping(to: CGRect(x: (i % frameCount(img)) * h, y: 0, width: h, height: h))
+    }
+}
+
+/// The god: one CALayer showing one frame of a strip; a timer steps contentsRect at the strip's fps.
+/// The view's bounds are the SPHERE; the sprite layer is `box` times that, centred on it, and
+/// overhangs the view (halo, accessories).
+final class GodView: NSView {
+    private let sprite = CALayer()
+    private(set) var image: CGImage?
+    private var frames = 1
+    private(set) var index = 0
+    private var timer: Timer?
+    private var lastTry = Date.distantPast
+
+    var kind = "colleague" { didSet { if kind != oldValue { load(fade: true) } } }
+    var state: GodState = .idle { didSet { if state != oldValue { load(fade: true) } } }
+    var dim = false { didSet { if dim != oldValue { sprite.opacity = dim ? 0.5 : 1 } } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        sprite.contentsGravity = .resizeAspect
+        sprite.magnificationFilter = .linear
+        sprite.minificationFilter = .linear
+        sprite.actions = ["contents": NSNull(), "contentsRect": NSNull(), "bounds": NSNull(),
+                          "position": NSNull(), "frame": NSNull(), "opacity": NSNull()]
+        layer?.addSublayer(sprite)
+        load(fade: false)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ p: NSPoint) -> NSView? { nil }   // clicks fall through: the card drags
+    override func layout() {
+        super.layout()
+        sprite.frame = spriteRect
+    }
+    override func setFrameSize(_ s: NSSize) {
+        super.setFrameSize(s)
+        sprite.frame = spriteRect
+    }
+
+    /// The strip frame's rect in this view's coordinates.
+    var spriteRect: NSRect {
+        let o = (Sprites.shared.box - 1) / 2
+        return bounds.insetBy(dx: -bounds.width * o, dy: -bounds.height * o)
+    }
+
+    func start() {
+        guard timer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / Sprites.shared.fps, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func load(fade: Bool) {
+        lastTry = Date()
+        let img = Sprites.shared.strip(kind, state)
+        if fade, img != nil, image != nil {
+            let t = CATransition()
+            t.type = .fade
+            t.duration = 0.18
+            sprite.add(t, forKey: "swap")
+        }
+        image = img
+        frames = img.map(Sprites.frameCount) ?? 1
+        index = 0
+        sprite.contents = img
+        sprite.frame = spriteRect           // index.json (and its box) may have just arrived
+        applyFrame()
+        if img != nil, timer != nil, abs(timer!.timeInterval - 1.0 / Sprites.shared.fps) > 0.001 {
+            timer?.invalidate(); timer = nil; start()   // index.json arrived with another fps
+        }
+    }
+
+    private func tick() {
+        guard image != nil else {
+            if Date().timeIntervalSince(lastTry) > 2 { load(fade: false) }   // strips not rendered yet
+            return
+        }
+        index = (index + 1) % frames
+        applyFrame()
+    }
+
+    private func applyFrame() {
+        let w = 1 / CGFloat(frames)
+        sprite.contentsRect = CGRect(x: CGFloat(index) * w, y: 0, width: w, height: 1)
+    }
+}
+
+// MARK: - Call states
 
 enum Phase: CaseIterable {
     case listening, you, thinking, claude, off, muted
@@ -200,255 +313,366 @@ enum Phase: CaseIterable {
         case .listening: return "Listening"
         case .you: return "You"
         case .thinking: return "Thinking"
-        case .claude: return "Claude"
+        case .claude: return "Speaking"
         case .off: return "Mic off"
         case .muted: return "Muted"
         }
     }
 
-    var params: Params {
+    var god: GodState {
         switch self {
-        case .listening:
-            return Params(speed: 0.45, levelSpeed: 0.6, swirl: 0.35, glow: 1.35, halo: 0.14, haloGain: 0.25,
-                          breath: 0.035, breathRate: 1.15, silk: 0.6, core: 0.15, life: 1.0,
-                          you: 0, amb: 0.35, tts: 0, pulse: 0,
-                          c: ["#4FB3FF", "#6E6BFF", "#5BE1FF", "#B58CFF"].map(hex))
-        case .you:
-            return Params(speed: 0.75, levelSpeed: 2.4, swirl: 0.55, glow: 1.6, halo: 0.16, haloGain: 0.45,
-                          breath: 0.02, breathRate: 1.6, silk: 0.8, core: 0.45, life: 1.0,
-                          you: 1, amb: 0, tts: 0, pulse: 0,
-                          c: ["#2EE6A6", "#18C7D9", "#7CF29A", "#3FA9FF"].map(hex))
-        case .thinking:
-            return Params(speed: 0.42, levelSpeed: 0.5, swirl: 1.6, glow: 1.45, halo: 0.16, haloGain: 0.20,
-                          breath: 0.03, breathRate: 1.9, silk: 1.0, core: 0.10, life: 1.0,
-                          you: 0, amb: 0, tts: 0, pulse: 0.35,
-                          c: ["#FFB020", "#FF8A1F", "#FFD45A", "#FF6A4D"].map(hex))
-        case .claude:
-            return Params(speed: 0.65, levelSpeed: 2.0, swirl: 0.5, glow: 1.6, halo: 0.16, haloGain: 0.40,
-                          breath: 0.02, breathRate: 1.4, silk: 0.8, core: 0.40, life: 1.0,
-                          you: 0, amb: 0, tts: 1, pulse: 0,
-                          c: ["#FF7A1A", "#FF4E3A", "#FFB547", "#FF5E8A"].map(hex))
-        case .off:
-            return Params(speed: 0.06, levelSpeed: 0.0, swirl: 0.2, glow: 0.6, halo: 0.06, haloGain: 0.0,
-                          breath: 0.008, breathRate: 0.6, silk: 0.3, core: 0.0, life: 0.35,
-                          you: 0, amb: 0, tts: 0, pulse: 0,
-                          c: ["#FF3B30", "#7A1424", "#FF6B5E", "#4A1020"].map(hex))
-        case .muted:   // `call mute`: the Mic off look, verbatim
-            return Phase.off.params
+        case .listening, .off, .muted: return .idle
+        case .you: return .listen
+        case .thinking: return .work
+        case .claude: return .talk
+        }
+    }
+
+    static func named(_ s: String) -> Phase? {
+        switch s.lowercased() {
+        case "listening", "idle", "happy": return .listening
+        case "you", "listen": return .you
+        case "thinking", "work": return .thinking
+        case "claude", "talk", "speaking": return .claude
+        case "off": return .off
+        case "muted": return .muted
+        default: return nil
         }
     }
 }
 
-// MARK: - Simulated voice envelopes (the prototype's speechGen, used when no real signal)
+// MARK: - Card geometry (base units, y from the top; everything is drawn at base x `k`)
 
-final class SpeechGen {
-    struct Opts { var talk, pause, syl, amp: ClosedRange<Float>; var emph, floor: Float }
-    let o: Opts
-    var t: Float = 0, segEnd: Float, speaking = false, sylStart: Float = 0, sylEnd: Float = 0, amp: Float = 0
-    init(_ o: Opts) { self.o = o; segEnd = Float.random(in: 0.2...0.6) }
+struct CardGeo {
+    let compact: Bool
+    static let full = NSSize(width: 220, height: 250)
+    static let small = NSSize(width: 124, height: 148)
+    static let radius: CGFloat = 16
 
-    func next(_ dt: Float) -> Float {
-        t += dt
-        if t > segEnd {
-            speaking.toggle()
-            segEnd = t + Float.random(in: speaking ? o.talk : o.pause)
-            sylEnd = t
+    var size: NSSize { compact ? CardGeo.small : CardGeo.full }
+    /// The sphere. Its diameter is 0.36 x the card width, as in the film's call card
+    /// (claude-ui.js: avatarSize = 0.36 x min(w, h) on a 300 x 340 card); the sprite frame around
+    /// it is `box` x this, so the halo sits just under the header.
+    var god: NSRect { compact ? NSRect(x: 33, y: 31, width: 58, height: 58) : NSRect(x: 70, y: 60, width: 80, height: 80) }
+    var caption: NSRect { NSRect(x: 14, y: 156, width: 192, height: 40) }
+    var mic: NSRect { compact ? NSRect(x: 27, y: 106, width: 30, height: 30) : NSRect(x: 68, y: 200, width: 36, height: 36) }
+    var stop: NSRect { compact ? NSRect(x: 67, y: 106, width: 30, height: 30) : NSRect(x: 116, y: 200, width: 36, height: 36) }
+    var chevron: NSRect { compact ? NSRect(x: 7, y: 7, width: 20, height: 20) : NSRect(x: 164, y: 9, width: 20, height: 20) }
+    var toggle: NSRect { compact ? NSRect(x: 97, y: 7, width: 20, height: 20) : NSRect(x: 188, y: 9, width: 20, height: 20) }
+    var headerMidY: CGFloat { 19 }
+}
+
+// MARK: - Buttons
+
+/// The two round buttons: mic (white, thin border; muted: red mic-slash) and stop (soft red
+/// circle, red square). One paint routine for the live view and the snapshot.
+final class RoundButton: NSView {
+    enum Kind { case mic, stop }
+    let kind: Kind
+    var muted = false { didSet { if muted != oldValue { needsDisplay = true } } }
+    var theme = Theme.light { didSet { needsDisplay = true } }
+    var action: (() -> Void)?
+    private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
+
+    init(kind: Kind, tip: String) {
+        self.kind = kind
+        super.init(frame: .zero)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        toolTip = tip
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func setFrameSize(_ s: NSSize) { super.setFrameSize(s); needsDisplay = true }
+    override func hitTest(_ p: NSPoint) -> NSView? {
+        guard let sv = superview else { return nil }
+        let q = convert(p, from: sv)
+        let r = min(bounds.width, bounds.height) / 2
+        return hypot(q.x - bounds.midX, q.y - bounds.midY) <= r ? self : nil
+    }
+    override func mouseDown(with e: NSEvent) { pressed = true }
+    override func mouseDragged(with e: NSEvent) { pressed = bounds.contains(convert(e.locationInWindow, from: nil)) }
+    override func mouseUp(with e: NSEvent) {
+        let inside = bounds.contains(convert(e.locationInWindow, from: nil))
+        pressed = false
+        if inside { action?() }
+    }
+    override func draw(_ dirty: NSRect) {
+        RoundButton.paint(in: bounds, kind: kind, muted: muted, theme: theme, pressed: pressed)
+    }
+
+    static func paint(in b: NSRect, kind: Kind, muted: Bool, theme t: Theme, pressed: Bool) {
+        let d = min(b.width, b.height)
+        let c = NSRect(x: b.midX - d / 2, y: b.midY - d / 2, width: d, height: d).insetBy(dx: 0.5, dy: 0.5)
+        let p = NSBezierPath(ovalIn: c)
+        p.lineWidth = 1
+        switch kind {
+        case .mic:
+            (muted ? t.mutedFill : t.micFill).setFill(); p.fill()
+            (muted ? t.mutedStroke : t.micStroke).setStroke(); p.stroke()
+            drawSymbol(muted ? "mic.slash" : "mic", size: d * 0.38, weight: .regular,
+                       color: muted ? t.red : t.text, center: NSPoint(x: b.midX, y: b.midY))
+        case .stop:
+            t.stopFill.setFill(); p.fill()
+            t.stopStroke.setStroke(); p.stroke()
+            let s = (d * 0.27).rounded()
+            let sq = NSRect(x: b.midX - s / 2, y: b.midY - s / 2, width: s, height: s)
+            t.stopIcon.setFill()
+            NSBezierPath(roundedRect: sq, xRadius: s * 0.2, yRadius: s * 0.2).fill()
         }
-        if !speaking { return o.floor * (0.6 + 0.4 * Float.random(in: 0...1)) }
-        if t >= sylEnd {
-            sylStart = t; sylEnd = t + Float.random(in: o.syl)
-            amp = Float.random(in: o.amp) * (Float.random(in: 0...1) < o.emph ? 1.25 : 1)
-        }
-        let x = (t - sylStart) / (sylEnd - sylStart)
-        return min(1, amp * pow(sin(.pi * min(1, x)), 0.6))
+        if pressed { t.pressed.setFill(); p.fill() }
     }
 }
 
-// MARK: - Orb model: the prototype's frame() loop, minus the drawing
+/// Small round header buttons (waiting-list chevron, compact toggle). Shown on hover.
+final class HeadButton: NSView {
+    var symbol: String { didSet { if symbol != oldValue { needsDisplay = true } } }
+    var tint: NSColor? { didSet { needsDisplay = true } }
+    var theme = Theme.light { didSet { needsDisplay = true } }
+    var action: (() -> Void)?
+    private(set) var shown = false
+    private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
 
-final class OrbModel {
-    var target: Phase = .listening
-    var lightTarget: Float = 0
-    private(set) var cur = Phase.listening.params
-    private(set) var light: Float = 0
-    private(set) var phase: Float = 0, breathPhase: Float = 0, level: Float = 0
-    private var clockT: Float = 0, ambT: Float = 0
-    private let userSim = SpeechGen(.init(talk: 1.2...3.6, pause: 0.35...1.3, syl: 0.09...0.26, amp: 0.3...0.95, emph: 0.15, floor: 0.03))
-    private let ttsSim = SpeechGen(.init(talk: 2.4...5.0, pause: 0.22...0.55, syl: 0.15...0.21, amp: 0.55...0.82, emph: 0.08, floor: 0.02))
+    init(symbol: String, tip: String?) {
+        self.symbol = symbol
+        super.init(frame: .zero)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        toolTip = tip
+        alphaValue = 0
+        isHidden = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
 
-    static let tauState: Float = 0.35, attack: Float = 0.045, release: Float = 0.20
-
-    func snapTo(_ p: Phase, light l: Float) { target = p; cur = p.params; light = l; lightTarget = l }
-
-    /// `mic` is the live, mapped mic level (0...1), or nil when the meter is not delivering.
-    func advance(_ dtIn: Float, mic: Float?) {
-        let dt = min(0.05, dtIn)
-        let a = 1 - exp(-dt / OrbModel.tauState)
-        cur.ease(to: target.params, a)
-        light += (lightTarget - light) * a
-
-        clockT += dt
-        let user = mic ?? userSim.next(dt)
-        let amb: Float
-        if let m = mic { amb = m } else { ambT += dt; amb = 0.06 + 0.04 * sin(ambT * 1.7) + 0.03 * sin(ambT * 4.1 + 1.3) }
-        let tts = ttsSim.next(dt)
-        let pulse = 0.5 + 0.5 * sin(clockT * 2.4)
-        let raw = min(1, cur.you * user + cur.amb * amb + cur.tts * tts + cur.pulse * pulse)
-        let tau = raw > level ? OrbModel.attack : OrbModel.release
-        level += (raw - level) * (1 - exp(-dt / tau))
-
-        phase += dt * (cur.speed + cur.levelSpeed * level)
-        breathPhase += dt * cur.breathRate
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func hitTest(_ p: NSPoint) -> NSView? { shown ? super.hitTest(p) : nil }
+    override func setFrameSize(_ s: NSSize) { super.setFrameSize(s); needsDisplay = true }
+    override func mouseDown(with e: NSEvent) { pressed = true }
+    override func mouseDragged(with e: NSEvent) { pressed = bounds.contains(convert(e.locationInWindow, from: nil)) }
+    override func mouseUp(with e: NSEvent) {
+        let inside = bounds.contains(convert(e.locationInWindow, from: nil))
+        pressed = false
+        if inside { action?() }
     }
 
-    /// Uniform block, laid out to match `struct U` in the shader (128 bytes).
-    func uniforms(res: SIMD2<Float>, radius: Float) -> [Float] {
-        var u: [Float] = [res.x, res.y, radius, phase, breathPhase, cur.breath, level, cur.swirl, cur.glow,
-                          cur.halo, cur.haloGain, cur.silk, cur.core, cur.life, light, 0]
-        for c in cur.c { u += [c.x, c.y, c.z, 0] }
-        return u
+    func show(_ on: Bool, animated: Bool) {
+        guard on != shown else { return }
+        shown = on
+        if !animated { alphaValue = on ? 1 : 0; isHidden = !on; return }
+        if on { isHidden = false }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.18
+            self.animator().alphaValue = on ? 1 : 0
+        }, completionHandler: { [weak self] in
+            guard let self = self else { return }
+            if !self.shown { self.isHidden = true }
+        })
+    }
+
+    override func draw(_ dirty: NSRect) {
+        HeadButton.paint(in: bounds, symbol: symbol, theme: theme, tint: tint, pressed: pressed)
+    }
+
+    static func paint(in b: NSRect, symbol: String, theme t: Theme, tint: NSColor?, pressed: Bool) {
+        let d = min(b.width, b.height)
+        let p = NSBezierPath(ovalIn: NSRect(x: b.midX - d / 2, y: b.midY - d / 2, width: d, height: d).insetBy(dx: 0.5, dy: 0.5))
+        t.glassFill.setFill(); p.fill()
+        if pressed { t.pressed.setFill(); p.fill() }
+        t.glassStroke.setStroke(); p.lineWidth = 1; p.stroke()
+        drawSymbol(symbol, size: d * 0.42, weight: .semibold, color: tint ?? t.sub, center: NSPoint(x: b.midX, y: b.midY))
     }
 }
 
-// MARK: - Metal renderer
+// MARK: - Caption (one line under the god: what is being said, else the state)
 
-final class OrbRenderer {
-    let device: MTLDevice
-    let queue: MTLCommandQueue
-    let pipeline: MTLRenderPipelineState
+final class CaptionView: NSView {
+    private(set) var text = ""
+    private(set) var spoken = false
+    var theme = Theme.light { didSet { needsDisplay = true } }
+    var k: CGFloat = 1 { didSet { needsDisplay = true } }
 
-    init?() {
-        guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else { return nil }
-        do {
-            let lib = try dev.makeLibrary(source: orbShaderSource, options: nil)
-            let d = MTLRenderPipelineDescriptor()
-            d.vertexFunction = lib.makeFunction(name: "orb_vs")
-            d.fragmentFunction = lib.makeFunction(name: "orb_fs")
-            d.colorAttachments[0].pixelFormat = .bgra8Unorm
-            pipeline = try dev.makeRenderPipelineState(descriptor: d)
-        } catch {
-            FileHandle.standardError.write(Data("orb shader: \(error)\n".utf8)); return nil
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var isFlipped: Bool { true }
+    override func hitTest(_ p: NSPoint) -> NSView? { nil }
+
+    func set(_ t: String, spoken s: Bool, animated: Bool) {
+        guard t != text || s != spoken else { return }
+        if animated, let l = layer {
+            let tr = CATransition()
+            tr.type = .fade
+            tr.duration = 0.2
+            l.add(tr, forKey: "caption")
         }
-        device = dev; queue = q
+        text = t
+        spoken = s
+        needsDisplay = true
     }
 
-    func encode(_ cb: MTLCommandBuffer, _ pass: MTLRenderPassDescriptor, _ u: [Float]) {
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        pass.colorAttachments[0].storeAction = .store
-        guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
-        enc.setRenderPipelineState(pipeline)
-        u.withUnsafeBytes { enc.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        enc.endEncoding()
+    override func draw(_ dirty: NSRect) { CaptionView.paint(in: bounds, text: text, spoken: spoken, theme: theme, k: k) }
+
+    /// Spoken lines in the text colour, state words in sub; up to two lines, centred.
+    static func paint(in b: NSRect, text: String, spoken: Bool, theme t: Theme, k: CGFloat) {
+        let font = NSFont.systemFont(ofSize: 13 * k, weight: spoken ? .regular : .medium)
+        let ps = NSMutableParagraphStyle()
+        ps.alignment = .center
+        ps.lineBreakMode = .byWordWrapping
+        let s = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: spoken ? t.text : t.sub,
+                                                               .paragraphStyle: ps])
+        let opts: NSString.DrawingOptions = [.usesLineFragmentOrigin, .truncatesLastVisibleLine]
+        let lh = ceil(NSLayoutManager().defaultLineHeight(for: font))
+        let need = ceil(s.boundingRect(with: NSSize(width: b.width, height: 10_000), options: opts).height)
+        let h = min(need, lh * 2, b.height)
+        s.draw(with: NSRect(x: b.minX, y: b.midY - h / 2, width: b.width, height: h), options: opts)
     }
 }
 
-// MARK: - The orb view (MTKView, display rate)
+// MARK: - The call card
 
-final class OrbView: MTKView, MTKViewDelegate {
-    let model = OrbModel()
-    let renderer: OrbRenderer
-    var micLevel: () -> Float? = { nil }
-    static let radius: Float = 0.64        // sphere = 0.64 x glow box (54 pt in 84 vertical, 28 in 44 horizontal)
-    private var last: CFTimeInterval = 0
+final class CardView: NSView {
+    private(set) var geo = CardGeo(compact: false)
+    private(set) var k: CGFloat = 1
+    private(set) var theme = Theme.light
+    let god = GodView(frame: .zero)
+    let caption = CaptionView(frame: .zero)
+    let mic = RoundButton(kind: .mic, tip: "Mute")
+    let stop = RoundButton(kind: .stop, tip: "Stop")
+    let chevron = HeadButton(symbol: "chevron.down", tip: "Waiting sessions")
+    let toggle = HeadButton(symbol: "arrow.down.right.and.arrow.up.left", tip: "Smaller")
+    private var tracking: NSTrackingArea?
 
-    init(frame: NSRect, renderer: OrbRenderer) {
-        self.renderer = renderer
-        super.init(frame: frame, device: renderer.device)
-        colorPixelFormat = .bgra8Unorm
-        colorspace = CGColorSpace(name: CGColorSpace.sRGB)   // hex used directly, no linearisation
-        clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        framebufferOnly = true
-        preferredFramesPerSecond = 60
-        layer?.isOpaque = false
-        delegate = self
+    var name = "Claude" { didSet { if name != oldValue { needsDisplay = true } } }
+    var timerText: String? { didSet { if timerText != oldValue { needsDisplay = true } } }
+    var muted = false {
+        didSet { if muted != oldValue { mic.muted = muted; mic.toolTip = muted ? "Unmute" : "Mute" } }
     }
-    required init(coder: NSCoder) { fatalError() }
+    var pendingCount = 0 { didSet { if pendingCount != oldValue { updateControls(animated: true) } } }
+    var expanded = false { didSet { if expanded != oldValue { updateControls(animated: true) } } }
+    var forceHover = false { didSet { updateControls(animated: false) } }
+    private(set) var hovered = false { didSet { if hovered != oldValue { updateControls(animated: true) } } }
 
+    var onMute: ((Bool) -> Void)?       // the state to switch to (true = mute)
+    var onStop: (() -> Void)?
+    var onZoom: ((CGFloat) -> Void)?    // additive change to the target scale
+    var onExpand: (() -> Void)?         // toggle the waiting list
+    var onCompact: (() -> Void)?        // toggle the compact card
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        for v in [god, caption, mic, stop, chevron, toggle] as [NSView] { addSubview(v) }
+        mic.action = { [weak self] in guard let self = self else { return }; self.onMute?(!self.muted) }
+        stop.action = { [weak self] in self?.onStop?() }
+        chevron.action = { [weak self] in self?.onExpand?() }
+        toggle.action = { [weak self] in self?.onCompact?() }
+        applyTheme()
+        configure(k: 1, compact: false)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { true }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func sc(_ r: NSRect) -> NSRect { NSRect(x: r.minX * k, y: r.minY * k, width: r.width * k, height: r.height * k) }
 
-    func draw(in view: MTKView) {
-        let now = CACurrentMediaTime()
-        let dt = last == 0 ? 1.0 / 60 : now - last
-        last = now
-        model.advance(Float(dt), mic: micLevel())
-        guard let pass = currentRenderPassDescriptor, let drawable = currentDrawable,
-              let cb = renderer.queue.makeCommandBuffer() else { return }
-        let ds = drawableSize
-        renderer.encode(cb, pass, model.uniforms(res: SIMD2(Float(ds.width), Float(ds.height)), radius: OrbView.radius))
-        cb.present(drawable)
-        cb.commit()
+    /// Lay the card out at scale `k` inside the current bounds (the panel's pixel-rounded size).
+    func configure(k: CGFloat, compact: Bool) {
+        self.k = k
+        geo = CardGeo(compact: compact)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        god.frame = sc(geo.god)
+        caption.frame = sc(geo.caption)
+        caption.isHidden = compact
+        caption.k = k
+        mic.frame = sc(geo.mic)
+        stop.frame = sc(geo.stop)
+        chevron.frame = sc(geo.chevron)
+        toggle.frame = sc(geo.toggle)
+        CATransaction.commit()
+        toggle.symbol = compact ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left"
+        toggle.toolTip = compact ? "Bigger" : "Smaller"
+        needsDisplay = true
+        updateControls(animated: false)
     }
-}
 
-// MARK: - The pill (vertical card by default, horizontal pill behind CALLPILL_LAYOUT)
+    func applyTheme() {
+        theme = Theme.of(effectiveAppearance)
+        mic.theme = theme; stop.theme = theme; chevron.theme = theme; toggle.theme = theme; caption.theme = theme
+        updateControls(animated: false)
+        needsDisplay = true
+    }
 
-struct Theme {
-    let fg: NSColor, fg2: NSColor, border: NSColor, light: Float
-    static let dark = Theme(fg: NSColor(srgbRed: 0xf5 / 255.0, green: 0xf5 / 255.0, blue: 0xf7 / 255.0, alpha: 1),
-                            fg2: NSColor(srgbRed: 235 / 255.0, green: 235 / 255.0, blue: 245 / 255.0, alpha: 0.55),
-                            border: NSColor(white: 1, alpha: 0.14), light: 0)
-    static let light = Theme(fg: NSColor(srgbRed: 0x1d / 255.0, green: 0x1d / 255.0, blue: 0x1f / 255.0, alpha: 1),
-                             fg2: NSColor(srgbRed: 60 / 255.0, green: 60 / 255.0, blue: 67 / 255.0, alpha: 0.6),
-                             border: NSColor(white: 0, alpha: 0.08), light: 1)
-    static func of(_ a: NSAppearance) -> Theme {
-        a.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight]).map { $0 == .darkAqua || $0 == .vibrantDark } ?? true
-            ? .dark : .light
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTheme()
     }
-}
 
-/// Two layouts, same orb. Vertical (the default) is a small tall card: orb on top, label,
-/// then the call timer. Horizontal is the original 180 x 48 pill. `CALLPILL_LAYOUT=horizontal`
-/// switches back. Geometry mirrors `.pill` / `.pill.vert` in design/orb.html (y measured from
-/// the top there, from the bottom here).
-enum PillLayout {
-    case horizontal, vertical
+    // hover: the header buttons fade in
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
+    }
+    override func mouseEntered(with e: NSEvent) { hovered = true }
+    override func mouseExited(with e: NSEvent) { hovered = false }
+    func refreshHover() {
+        guard let w = window else { return }
+        hovered = bounds.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil))
+    }
 
-    static let current: PillLayout =
-        ProcessInfo.processInfo.environment["CALLPILL_LAYOUT"]?.lowercased() == "horizontal" ? .horizontal : .vertical
+    func updateControls(animated: Bool) {
+        let show = hovered || forceHover
+        chevron.symbol = expanded ? "chevron.up" : "chevron.down"
+        chevron.tint = pendingCount > 0 ? theme.amber : nil
+        chevron.toolTip = pendingCount == 0 ? "Nothing waiting" : pendingCount == 1 ? "1 session waiting" : "\(pendingCount) sessions waiting"
+        chevron.show(show || pendingCount > 0 || expanded, animated: animated)
+        toggle.show(show, animated: animated)
+        needsDisplay = true   // the timer gives way to the header buttons
+    }
 
-    /// The call timer is off by default: the call runs all day. CALLPILL_TIMER=on shows it.
-    static let showTimer = ProcessInfo.processInfo.environment["CALLPILL_TIMER"] == "on"
-    /// Card height: 132 with the timer row, 116 without it.
-    var H: CGFloat { self == .vertical ? (PillLayout.showTimer ? 132 : 116) : 48 }
-    var size: NSSize { self == .vertical ? NSSize(width: 96, height: H) : NSSize(width: 180, height: 48) }
-    var cornerRadius: CGFloat { 24 }
-    /// The orb's glow box. Shader radius stays 0.64 in both, so the sphere is 0.64 x the box.
-    var orbRect: NSRect {
-        self == .vertical ? NSRect(x: 6, y: H - 6 - 84, width: 84, height: 84) : NSRect(x: 2, y: 2, width: 44, height: 44)
+    // resize with the mouse
+    override func scrollWheel(with e: NSEvent) {
+        guard e.momentumPhase.isEmpty else { return }   // finger on the glass only, no coasting
+        let dy = e.isDirectionInvertedFromDevice ? -e.scrollingDeltaY : e.scrollingDeltaY
+        guard dy != 0 else { return }
+        onZoom?(e.hasPreciseScrollingDeltas ? dy * 0.005 : max(-0.15, min(0.15, dy * 0.05)))
     }
-    /// Label column: x, width, and the vertical centre of the active label.
-    var labelX: CGFloat { self == .vertical ? 6 : 52 }
-    var labelWidth: CGFloat { self == .vertical ? 84 : 180 - 52 - 54 }
-    var labelMidY: CGFloat { self == .vertical ? H - (81 + 9.5) : 24 }
-    var labelAlign: CATextLayerAlignmentMode { self == .vertical ? .center : .left }
-    var timerFontSize: CGFloat { self == .vertical ? 11 : 11.5 }
-    var timerMidY: CGFloat { self == .vertical ? H - (101 + 8) : 24 }
-    var timerX: CGFloat { self == .vertical ? 0 : 180 - 16 - 60 }
-    var timerWidth: CGFloat { self == .vertical ? 96 : 60 }
-    var timerAlign: CATextLayerAlignmentMode { self == .vertical ? .center : .right }
-    /// Hover controls. Vertical: two 26 pt buttons over the label row, clear of the sphere.
-    /// Horizontal: on the right, over the timer.
-    var muteRect: NSRect {
-        self == .vertical ? NSRect(x: 48 - 16 - 13, y: labelMidY - 13, width: 26, height: 26)
-                          : NSRect(x: 180 - 12 - 28 - 6 - 28, y: 10, width: 28, height: 28)
+    override func magnify(with e: NSEvent) { onZoom?(e.magnification * k) }
+
+    override func draw(_ dirty: NSRect) {
+        let headerBusy = hovered || forceHover || pendingCount > 0 || expanded
+        CardView.paint(in: bounds, geo: geo, theme: theme, k: k, name: name, timer: headerBusy ? nil : timerText)
     }
-    var stopRect: NSRect {
-        self == .vertical ? NSRect(x: 48 + 16 - 13, y: labelMidY - 13, width: 26, height: 26)
-                          : NSRect(x: 180 - 12 - 28, y: 10, width: 28, height: 28)
-    }
-    /// Muted badge: top-right corner, outside the sphere, inside the rounded corner.
-    var badgeRect: NSRect {
-        self == .vertical ? NSRect(x: 96 - 20 - 9, y: H - 20 - 9, width: 18, height: 18)
-                          : NSRect(x: 34, y: 30, width: 14, height: 14)
-    }
-    /// Waiting-list chevron: the badge's mirror, top-left corner, clear of the sphere.
-    var expandRect: NSRect {
-        self == .vertical ? NSRect(x: 9, y: H - 20 - 9, width: 20, height: 20)
-                          : NSRect(x: 34, y: 4, width: 14, height: 14)
+
+    /// Body, then (full card only) the header: orange dot + name, timer right when enabled.
+    static func paint(in b: NSRect, geo: CardGeo, theme t: Theme, k: CGFloat, name: String, timer: String?) {
+        paintCardBody(b, radius: CardGeo.radius * k, theme: t)
+        guard !geo.compact else { return }
+        let mid = geo.headerMidY * k
+        let d = 7 * k
+        t.accent.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 15 * k, y: mid - d / 2, width: d, height: d)).fill()
+        var right = b.width - 14 * k
+        if let tm = timer {
+            let s = attr(tm, .monospacedDigitSystemFont(ofSize: 11.5 * k, weight: .regular), t.sub, align: .right)
+            let w = ceil(s.size().width)
+            drawLine(s, x: right - w, midY: mid, width: w + 1)
+            right -= w + 8 * k
+        }
+        let n = attr(name, .systemFont(ofSize: 12.5 * k, weight: .medium), t.text)
+        drawLine(n, x: 28 * k, midY: mid, width: right - 28 * k)
     }
 }
 
@@ -461,10 +685,7 @@ struct PendingItem: Equatable {
     let link: String
     let at: Date
 
-    static let defaultDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".voicemode/call/pending")
-    static var dir: URL {
-        ProcessInfo.processInfo.environment["CALLPILL_PENDING_DIR"].map { URL(fileURLWithPath: $0) } ?? defaultDir
-    }
+    static var dir: URL { env["CALLPILL_PENDING_DIR"].map(expand) ?? callDir.appendingPathComponent("pending") }
 
     /// The only thing the pill ever does with a record: open the session in the Claude app.
     /// Anything that is not a plain claude:// session link is refused.
@@ -482,7 +703,7 @@ struct PendingItem: Equatable {
     }
 
     /// Records newest first. Skipped: older than a day, or the session already moved on
-    /// (its transcript was written after the record: Allow was pressed, or the user answered).
+    /// (its transcript was written after the record: Allow was pressed, or it was answered).
     static func load(from dir: URL = PendingItem.dir, now: Date = Date()) -> [PendingItem] {
         let fm = FileManager.default
         let files = ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
@@ -509,16 +730,15 @@ struct PendingItem: Equatable {
     }
 }
 
-/// The expanded list under the card. Like GlassButton, one paint routine shared by the live
-/// view and the snapshot. Rows show the session, the waiting message and an Open button.
-/// There is deliberately no Allow: Open takes the user to the session; they decide there.
+/// The list under the card. Rows: the session, the waiting message, Open. There is
+/// deliberately no Allow here: Open takes you to the session, you decide there.
 final class PendingListView: NSView {
-    static let width: CGFloat = 264, header: CGFloat = 30, rowH: CGFloat = 60, foot: CGFloat = 8, more: CGFloat = 20
-    static let maxRows = 6
+    static let width: CGFloat = 264, header: CGFloat = 32, rowH: CGFloat = 58, foot: CGFloat = 8, more: CGFloat = 20
+    static let maxRows = 6, radius: CGFloat = 14
     static let openSize = NSSize(width: 52, height: 24)
 
     var items: [PendingItem] = [] { didSet { needsDisplay = true } }
-    var theme = Theme.dark { didSet { needsDisplay = true } }
+    var theme = Theme.light { didSet { needsDisplay = true } }
     var k: CGFloat = 1 { didSet { needsDisplay = true } }
     var onOpen: ((PendingItem) -> Void)?
     private var pressed: Int? { didSet { if pressed != oldValue { needsDisplay = true } } }
@@ -529,12 +749,12 @@ final class PendingListView: NSView {
     static func size(for n: Int, k: CGFloat) -> NSSize { NSSize(width: width * k, height: height(for: n) * k) }
 
     static func openRect(_ i: Int, in b: NSRect, k: CGFloat) -> NSRect {
-        let top = b.maxY - (header + CGFloat(i) * rowH) * k
-        return NSRect(x: b.maxX - (12 + openSize.width) * k, y: top - (rowH / 2 + openSize.height / 2) * k,
+        let top = b.minY + (header + CGFloat(i) * rowH) * k
+        return NSRect(x: b.maxX - (12 + openSize.width) * k, y: top + (rowH - openSize.height) / 2 * k,
                       width: openSize.width * k, height: openSize.height * k)
     }
 
-    override var isFlipped: Bool { false }
+    override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); theme = Theme.of(effectiveAppearance) }
@@ -555,62 +775,40 @@ final class PendingListView: NSView {
         PendingListView.paint(in: bounds, items: items, theme: theme, k: k, pressed: pressed, now: Date())
     }
 
-    static func paint(in b: NSRect, items: [PendingItem], theme: Theme, k: CGFloat, pressed: Int?, now: Date) {
-        let dark = theme.light < 0.5
+    static func paint(in b: NSRect, items: [PendingItem], theme t: Theme, k: CGFloat, pressed: Int?, now: Date) {
+        paintCardBody(b, radius: radius * k, theme: t)
         let pad = 14 * k
-        func text(_ s: String, _ size: CGFloat, _ w: NSFont.Weight, _ c: NSColor, wrap: Bool = false, align: NSTextAlignment = .left) -> NSAttributedString {
-            let ps = NSMutableParagraphStyle()
-            ps.lineBreakMode = wrap ? .byWordWrapping : .byTruncatingTail
-            ps.alignment = align
-            return NSAttributedString(string: s, attributes: [.font: NSFont.systemFont(ofSize: size * k, weight: w),
-                                                              .foregroundColor: c, .paragraphStyle: ps])
-        }
-        // header
-        let hTop = b.maxY - header * k
-        let head = text("Waiting on you", 11, .semibold, theme.fg2)
-        head.draw(in: NSRect(x: b.minX + pad, y: hTop + (header * k - head.size().height) / 2 - 1 * k, width: 160 * k, height: head.size().height))
+        let hMid = b.minY + header * k / 2
+        drawLine(attr("Waiting on you", .systemFont(ofSize: 11.5 * k, weight: .semibold), t.sub), x: b.minX + pad, midY: hMid, width: 160 * k)
         if !items.isEmpty {
-            let n = text("\(items.count)", 11, .semibold, GlassButton.amber, align: .right)
-            n.draw(in: NSRect(x: b.maxX - pad - 40 * k, y: hTop + (header * k - n.size().height) / 2 - 1 * k, width: 40 * k, height: n.size().height))
+            drawLine(attr("\(items.count)", .systemFont(ofSize: 11.5 * k, weight: .semibold), t.amber, align: .right),
+                     x: b.maxX - pad - 40 * k, midY: hMid, width: 40 * k)
         }
         if items.isEmpty {
-            let e = text("Nothing waiting", 12, .medium, theme.fg2, align: .center)
-            e.draw(in: NSRect(x: b.minX, y: hTop - (rowH * k + e.size().height) / 2, width: b.width, height: e.size().height))
+            drawLine(attr("Nothing waiting", .systemFont(ofSize: 12 * k, weight: .medium), t.faint, align: .center),
+                     x: b.minX, midY: b.minY + (header + rowH / 2) * k, width: b.width)
             return
         }
-        let sep = dark ? NSColor(white: 1, alpha: 0.08) : NSColor(white: 0, alpha: 0.07)
         for (i, it) in items.prefix(maxRows).enumerated() {
-            let top = b.maxY - (header + CGFloat(i) * rowH) * k
-            sep.setFill()
-            NSRect(x: b.minX + pad, y: top - 0.5, width: b.width - 2 * pad, height: 0.5).fill()
+            let top = b.minY + (header + CGFloat(i) * rowH) * k
+            t.border.setFill()
+            NSRect(x: b.minX + pad, y: top - 0.5, width: b.width - 2 * pad, height: 1).fill()
             let open = openRect(i, in: b, k: k)
             let textW = open.minX - 10 * k - (b.minX + pad)
-            // title + age on one line, message (two lines) under it
-            let age = text(it.age(now), 10.5, .medium, theme.fg2, align: .right)
+            let age = attr(it.age(now), .systemFont(ofSize: 10.5 * k, weight: .regular), t.faint, align: .right)
             let ageW = ceil(age.size().width)
-            let tl = text(it.title, 12.5, .semibold, theme.fg)
-            let th = ceil(tl.size().height)
-            let tY = top - 9 * k - th
-            tl.draw(in: NSRect(x: b.minX + pad, y: tY, width: textW - ageW - 6 * k, height: th))
-            age.draw(in: NSRect(x: b.minX + pad + textW - ageW, y: tY + 1 * k, width: ageW, height: th))
-            let msg = text(it.message, 11, .regular, theme.fg2, wrap: true)
-            let mH = 29 * k
-            msg.draw(with: NSRect(x: b.minX + pad, y: tY - 2 * k - mH, width: textW, height: mH),
+            let tl = attr(it.title, .systemFont(ofSize: 12.5 * k, weight: .semibold), t.text)
+            let tMid = top + 17 * k
+            drawLine(tl, x: b.minX + pad, midY: tMid, width: textW - ageW - 6 * k)
+            drawLine(age, x: b.minX + pad + textW - ageW, midY: tMid, width: ageW + 1)
+            let msg = attr(it.message, .systemFont(ofSize: 11 * k, weight: .regular), t.sub, wrap: .byWordWrapping)
+            msg.draw(with: NSRect(x: b.minX + pad, y: top + 26 * k, width: textW, height: 28 * k),
                      options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
-            // Open: glass capsule, same fill as the hover buttons
-            let cap = NSBezierPath(roundedRect: open.insetBy(dx: 0.5, dy: 0.5), xRadius: open.height / 2, yRadius: open.height / 2)
-            let down = pressed == i
-            (dark ? NSColor(white: 1, alpha: down ? 0.30 : 0.17) : NSColor(white: 0, alpha: down ? 0.16 : 0.07)).setFill()
-            cap.fill()
-            (dark ? NSColor(white: 1, alpha: 0.22) : NSColor(white: 0, alpha: 0.12)).setStroke()
-            cap.lineWidth = 0.5
-            cap.stroke()
-            let o = text(it.openURL == nil ? "No link" : "Open", 11.5, .semibold, it.openURL == nil ? theme.fg2 : theme.fg, align: .center)
-            o.draw(in: NSRect(x: open.minX, y: open.midY - o.size().height / 2, width: open.width, height: o.size().height))
+            paintTextButton(open, it.openURL == nil ? "No link" : "Open", primary: false, pressed: pressed == i, theme: t, k: k * 0.92)
         }
         if items.count > maxRows {
-            let m = text("+\(items.count - maxRows) more", 11, .medium, theme.fg2, align: .center)
-            m.draw(in: NSRect(x: b.minX, y: b.maxY - (header + CGFloat(maxRows) * rowH + more) * k + 3 * k, width: b.width, height: m.size().height))
+            drawLine(attr("+\(items.count - maxRows) more", .systemFont(ofSize: 11 * k, weight: .medium), t.sub, align: .center),
+                     x: b.minX, midY: b.minY + (header + CGFloat(maxRows) * rowH + more / 2) * k, width: b.width)
         }
     }
 }
@@ -626,21 +824,46 @@ struct PermitItem: Equatable {
     let title: String
     let cwd: String
     let tool: String
+    let short: String
     let summary: String
     let mono: Bool
     let pid: Int32
     let created: Date
 
-    static let defaultDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".voicemode/call/permit")
-    static var dir: URL {
-        ProcessInfo.processInfo.environment["CALLPILL_PERMIT_DIR"].map { URL(fileURLWithPath: $0) } ?? defaultDir
-    }
-    static let orange = NSColor(srgbRed: 0xf2 / 255.0, green: 0x6a / 255.0, blue: 0x1b / 255.0, alpha: 1)   // accent #f26a1b
+    static var dir: URL { env["CALLPILL_PERMIT_DIR"].map(expand) ?? callDir.appendingPathComponent("permit") }
 
     var heading: String {
         if !title.isEmpty { return title }
         if !cwd.isEmpty { return (cwd as NSString).lastPathComponent }
         return "Claude Code"
+    }
+
+    static func tilde(_ s: String) -> String {
+        let h = home.path
+        return s.replacingOccurrences(of: h + "/", with: "~/")
+    }
+
+    /// What the card shows: the title, an optional faint comment line, the box text, and whether
+    /// the box gets a "$ " prompt. Bash: "Claude wants to run" + the command (its description as
+    /// a `# ...` line). Other tools: "Claude wants to use <tool>" + the main argument.
+    var display: (title: String, comment: String?, body: String, prompt: Bool) {
+        if tool == "Bash" {
+            if !short.isEmpty, summary.hasPrefix(short + "\n") {
+                return ("Claude wants to run", short, String(summary.dropFirst(short.count + 1)), true)
+            }
+            return ("Claude wants to run", nil, summary.isEmpty ? short : summary, true)
+        }
+        if tool.hasPrefix("mcp__") {
+            let parts = tool.components(separatedBy: "__")
+            let fn = parts.count >= 3 ? parts[2...].joined(separator: "__") : tool
+            let server = parts.count >= 3 ? parts[1] : ""
+            var lines = summary.components(separatedBy: "\n")
+            if let first = lines.first, first.hasPrefix(fn) { lines.removeFirst() }   // "name (server)" is the title now
+            let body = lines.joined(separator: "\n")
+            return ("Claude wants to use \(fn)", server.isEmpty ? nil : server, body.isEmpty ? "(no arguments)" : body, false)
+        }
+        let body = PermitItem.tilde(summary.isEmpty ? short : summary)
+        return ("Claude wants to use \(tool)", nil, body.isEmpty ? tool : body, false)
     }
 
     /// Requests oldest first. A request whose hook process is gone (answered in the app,
@@ -665,7 +888,7 @@ struct PermitItem: Equatable {
             }
             out.append(PermitItem(id: stem, sessionId: (o["session_id"] as? String) ?? "",
                                   title: (o["title"] as? String) ?? "", cwd: (o["cwd"] as? String) ?? "",
-                                  tool: (o["tool_name"] as? String) ?? "Tool",
+                                  tool: (o["tool_name"] as? String) ?? "Tool", short: (o["short"] as? String) ?? "",
                                   summary: (o["summary"] as? String) ?? "", mono: (o["mono"] as? Bool) ?? true,
                                   pid: pid, created: created))
         }
@@ -679,59 +902,77 @@ struct PermitItem: Equatable {
     }
 }
 
-/// The permission panel, left of the card: session, tool, the summary (up to 4 lines, mono
-/// for commands), Deny and Allow. One paint routine shared by the live view and the snapshot.
-/// Clicks only count once the request has been on screen for `armDelay`, so a new request
-/// sliding in under the pointer cannot catch a click meant for the previous one.
+/// The permission card (the film's .cui-perm): terminal tile + "Claude wants to run", the mono
+/// command box, the session on the left of the footer, Deny (outlined) and Allow (accent) on the
+/// right; after a click "Allowed" (green) or "Denied" (sub). Clicks count only once the request
+/// has been on screen for `armDelay`, so a new request sliding in under the pointer cannot catch
+/// a click meant for the previous one.
 final class PermitView: NSView {
-    static let width: CGFloat = 300, pad: CGFloat = 14, header: CGFloat = 32, toolRow: CGFloat = 16
-    static let boxPad: CGFloat = 8, gap: CGFloat = 12, buttonH: CGFloat = 28, foot: CGFloat = 14, maxLines = 4
+    static let width: CGFloat = 300, pad: CGFloat = 14, tile: CGFloat = 26, gap1: CGFloat = 10
+    static let boxPadX: CGFloat = 10, boxPadY: CGFloat = 8, gap2: CGFloat = 12, buttonH: CGFloat = 28, maxLines = 6
+    static let radius: CGFloat = 14
     static let armDelay: TimeInterval = 0.6
 
-    var item: PermitItem? { didSet { if item?.id != oldValue?.id { armedAt = Date().addingTimeInterval(PermitView.armDelay) }; needsDisplay = true } }
+    var item: PermitItem? {
+        didSet {
+            if item?.id != oldValue?.id { armedAt = Date().addingTimeInterval(PermitView.armDelay); result = nil }
+            needsDisplay = true
+        }
+    }
     var more = 0 { didSet { needsDisplay = true } }
-    var theme = Theme.dark { didSet { needsDisplay = true } }
+    var result: Bool? { didSet { needsDisplay = true } }   // set after a click: true Allowed, false Denied
+    var theme = Theme.light { didSet { needsDisplay = true } }
     var k: CGFloat = 1 { didSet { needsDisplay = true } }
     var onAnswer: ((PermitItem, Bool) -> Void)?   // true = allow
     private var armedAt = Date.distantPast
     private var pressed: Bool? { didSet { if pressed != oldValue { needsDisplay = true } } }   // true = Allow held
 
-    static func summaryFont(_ mono: Bool, _ k: CGFloat) -> NSFont {
-        mono ? NSFont.monospacedSystemFont(ofSize: 11 * k, weight: .regular) : NSFont.systemFont(ofSize: 11.5 * k, weight: .regular)
-    }
-    static func summaryText(_ it: PermitItem, _ c: NSColor, _ k: CGFloat) -> NSAttributedString {
+    static func monoFont(_ k: CGFloat) -> NSFont { .monospacedSystemFont(ofSize: 11.5 * k, weight: .regular) }
+    static func lineH(_ k: CGFloat) -> CGFloat { ceil(NSLayoutManager().defaultLineHeight(for: monoFont(k)) * 1.12) }
+
+    static func boxText(_ it: PermitItem, _ t: Theme, _ k: CGFloat) -> NSAttributedString {
+        let d = it.display
         let ps = NSMutableParagraphStyle()
-        ps.lineBreakMode = it.mono ? .byCharWrapping : .byWordWrapping
-        return NSAttributedString(string: it.summary.isEmpty ? it.tool : it.summary,
-                                  attributes: [.font: summaryFont(it.mono, k), .foregroundColor: c, .paragraphStyle: ps])
+        ps.lineBreakMode = .byCharWrapping
+        ps.minimumLineHeight = lineH(k)
+        ps.maximumLineHeight = lineH(k)
+        let f = monoFont(k)
+        let s = NSMutableAttributedString()
+        func add(_ str: String, _ c: NSColor) {
+            s.append(NSAttributedString(string: str, attributes: [.font: f, .foregroundColor: c, .paragraphStyle: ps]))
+        }
+        if let c = d.comment, !c.isEmpty { add("# " + c + "\n", t.faint) }
+        if d.prompt { add("$ ", t.faint) }
+        add(d.body, t.text)
+        return s
     }
-    static func lineH(_ mono: Bool, _ k: CGFloat) -> CGFloat {
-        let f = summaryFont(mono, k)
-        return ceil(NSLayoutManager().defaultLineHeight(for: f))
-    }
-    /// Summary text height: measured, capped at maxLines.
-    static func summaryH(_ it: PermitItem, k: CGFloat) -> CGFloat {
-        let w = (width - 2 * pad - 2 * boxPad) * k
-        let r = summaryText(it, .white, k).boundingRect(with: NSSize(width: w, height: 10_000), options: [.usesLineFragmentOrigin])
-        let lh = lineH(it.mono, k)
+
+    static func textW(_ k: CGFloat) -> CGFloat { (width - 2 * pad - 2 * boxPadX) * k }
+
+    /// Box text height: measured, capped at maxLines.
+    static func textH(_ it: PermitItem, k: CGFloat) -> CGFloat {
+        let r = boxText(it, .light, k).boundingRect(with: NSSize(width: textW(k), height: 10_000), options: [.usesLineFragmentOrigin])
+        let lh = lineH(k)
         return min(max(lh, ceil(r.height)), lh * CGFloat(maxLines))
     }
     static func size(for it: PermitItem, k: CGFloat) -> NSSize {
-        NSSize(width: width * k, height: (header + toolRow + 4 + 2 * boxPad + gap + buttonH + foot) * k + summaryH(it, k: k))
+        NSSize(width: width * k, height: (pad + tile + gap1 + 2 * boxPadY + gap2 + buttonH + pad) * k + textH(it, k: k))
     }
     static func buttonRect(allow: Bool, in b: NSRect, k: CGFloat) -> NSRect {
-        let w = (b.width - 2 * pad * k - 8 * k) / 2
-        let x = allow ? b.maxX - pad * k - w : b.minX + pad * k
-        return NSRect(x: x, y: b.minY + foot * k, width: w, height: buttonH * k)
+        let w: CGFloat = 62 * k, h = buttonH * k
+        let y = b.maxY - (pad + buttonH) * k
+        let allowX = b.maxX - pad * k - w
+        return NSRect(x: allow ? allowX : allowX - 8 * k - w, y: y, width: w, height: h)
     }
 
-    override var isFlipped: Bool { false }
+    override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var acceptsFirstResponder: Bool { false }   // no keyboard path to Allow
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); theme = Theme.of(effectiveAppearance) }
 
     private func button(at e: NSEvent) -> Bool? {
+        guard result == nil else { return nil }
         let p = convert(e.locationInWindow, from: nil)
         if PermitView.buttonRect(allow: true, in: bounds, k: k).contains(p) { return true }
         if PermitView.buttonRect(allow: false, in: bounds, k: k).contains(p) { return false }
@@ -742,508 +983,90 @@ final class PermitView: NSView {
     override func mouseUp(with e: NSEvent) {
         let hit = button(at: e)
         defer { pressed = nil }
-        guard let it = item, let p = pressed, hit == p, Date() >= armedAt else { return }
+        guard let it = item, let p = pressed, hit == p, Date() >= armedAt, result == nil else { return }
         onAnswer?(it, p)
     }
 
     override func draw(_ dirty: NSRect) {
         guard let it = item else { return }
-        PermitView.paint(in: bounds, item: it, more: more, theme: theme, k: k, pressed: pressed)
+        PermitView.paint(in: bounds, item: it, more: more, result: result, theme: theme, k: k, pressed: pressed)
     }
 
-    static func paint(in b: NSRect, item it: PermitItem, more: Int, theme: Theme, k: CGFloat, pressed: Bool?) {
-        let dark = theme.light < 0.5
+    static func paint(in b: NSRect, item it: PermitItem, more: Int, result: Bool?, theme t: Theme, k: CGFloat, pressed: Bool?) {
+        paintCardBody(b, radius: radius * k, theme: t)
         let p = pad * k
-        func text(_ s: String, _ size: CGFloat, _ w: NSFont.Weight, _ c: NSColor, align: NSTextAlignment = .left) -> NSAttributedString {
-            let ps = NSMutableParagraphStyle()
-            ps.lineBreakMode = .byTruncatingTail
-            ps.alignment = align
-            return NSAttributedString(string: s, attributes: [.font: NSFont.systemFont(ofSize: size * k, weight: w),
-                                                              .foregroundColor: c, .paragraphStyle: ps])
-        }
-        // header: session title, "+N more" on the right
-        let hTop = b.maxY - header * k
-        var moreW: CGFloat = 0
+        let d = it.display
+        // header: terminal tile + title, "+N more" right
+        let tileR = NSRect(x: b.minX + p, y: b.minY + p, width: tile * k, height: tile * k)
+        t.accentSoft.setFill()
+        NSBezierPath(roundedRect: tileR, xRadius: 7 * k, yRadius: 7 * k).fill()
+        drawSymbol(it.tool == "Bash" ? "apple.terminal" : "wrench.and.screwdriver", size: 12.5 * k, weight: .regular,
+                   color: t.accent, center: NSPoint(x: tileR.midX, y: tileR.midY))
+        var right = b.maxX - p
         if more > 0 {
-            let m = text("+\(more) more", 11, .semibold, GlassButton.amber, align: .right)
-            moreW = ceil(m.size().width)
-            m.draw(in: NSRect(x: b.maxX - p - moreW, y: hTop + (header * k - m.size().height) / 2 - 1 * k, width: moreW, height: m.size().height))
+            let m = attr("+\(more) more", .systemFont(ofSize: 11 * k, weight: .semibold), t.amber, align: .right)
+            let w = ceil(m.size().width)
+            drawLine(m, x: right - w, midY: tileR.midY, width: w + 1)
+            right -= w + 8 * k
         }
-        let t = text(it.heading, 12.5, .semibold, theme.fg)
-        t.draw(in: NSRect(x: b.minX + p, y: hTop + (header * k - t.size().height) / 2 - 1 * k,
-                          width: b.width - 2 * p - (moreW > 0 ? moreW + 8 * k : 0), height: t.size().height))
-        let sep = dark ? NSColor(white: 1, alpha: 0.08) : NSColor(white: 0, alpha: 0.07)
-        sep.setFill()
-        NSRect(x: b.minX + p, y: hTop - 0.5, width: b.width - 2 * p, height: 0.5).fill()
-        // tool row
-        let tool = text("Permission \u{00B7} \(it.tool)", 11, .semibold, theme.fg2)
-        let toolY = hTop - 6 * k - toolRow * k
-        tool.draw(in: NSRect(x: b.minX + p, y: toolY + (toolRow * k - tool.size().height) / 2, width: b.width - 2 * p, height: tool.size().height))
-        // summary box
-        let sh = summaryH(it, k: k)
-        let boxTop = toolY - 4 * k + 2 * k
-        let box = NSRect(x: b.minX + p, y: boxTop - sh - 2 * boxPad * k, width: b.width - 2 * p, height: sh + 2 * boxPad * k)
-        let bp = NSBezierPath(roundedRect: box, xRadius: 8 * k, yRadius: 8 * k)
-        (dark ? NSColor(white: 1, alpha: 0.06) : NSColor(white: 0, alpha: 0.04)).setFill()
-        bp.fill()
-        // the text rect reaches 4 pt into the bottom padding so the last line is never clipped away
-        let tr = box.insetBy(dx: boxPad * k, dy: boxPad * k)
-        summaryText(it, theme.fg, k).draw(with: NSRect(x: tr.minX, y: tr.minY - 4 * k, width: tr.width, height: tr.height + 4 * k),
-                                          options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
-        // Deny (glass) and Allow (accent orange)
+        let title = attr(d.title, .systemFont(ofSize: 13.5 * k, weight: .semibold), t.text)
+        drawLine(title, x: tileR.maxX + 9 * k, midY: tileR.midY, width: right - tileR.maxX - 9 * k)
+        // command box
+        let th = textH(it, k: k)
+        let box = NSRect(x: b.minX + p, y: tileR.maxY + gap1 * k, width: b.width - 2 * p, height: th + 2 * boxPadY * k)
+        let bp = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 8 * k, yRadius: 8 * k)
+        t.side.setFill(); bp.fill()
+        t.border2.setStroke(); bp.lineWidth = 1; bp.stroke()
+        boxText(it, t, k).draw(with: NSRect(x: box.minX + boxPadX * k, y: box.minY + boxPadY * k, width: textW(k), height: th),
+                               options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+        // footer
         let deny = buttonRect(allow: false, in: b, k: k), allow = buttonRect(allow: true, in: b, k: k)
-        let r = deny.height / 2
-        let dp = NSBezierPath(roundedRect: deny.insetBy(dx: 0.5, dy: 0.5), xRadius: r, yRadius: r)
-        (dark ? NSColor(white: 1, alpha: pressed == false ? 0.30 : 0.14) : NSColor(white: 0, alpha: pressed == false ? 0.16 : 0.06)).setFill()
-        dp.fill()
-        (dark ? NSColor(white: 1, alpha: 0.22) : NSColor(white: 0, alpha: 0.12)).setStroke()
-        dp.lineWidth = 0.5
-        dp.stroke()
-        let dl = text("Deny", 12.5, .semibold, theme.fg, align: .center)
-        dl.draw(in: NSRect(x: deny.minX, y: deny.midY - dl.size().height / 2, width: deny.width, height: dl.size().height))
-        let ap = NSBezierPath(roundedRect: allow, xRadius: r, yRadius: r)
-        (pressed == true ? PermitItem.orange.blended(withFraction: 0.2, of: .black) ?? PermitItem.orange : PermitItem.orange).setFill()
-        ap.fill()
-        let al = text("Allow", 12.5, .semibold, .white, align: .center)
-        al.draw(in: NSRect(x: allow.minX, y: allow.midY - al.size().height / 2, width: allow.width, height: al.size().height))
+        if let r = result {
+            let c = r ? t.green : t.sub
+            let x = b.minX + p
+            drawSymbol(r ? "checkmark" : "xmark", size: 11.5 * k, weight: .semibold, color: c, center: NSPoint(x: x + 7 * k, y: allow.midY))
+            drawLine(attr(r ? "Allowed" : "Denied", .systemFont(ofSize: 13 * k, weight: .medium), c), x: x + 19 * k, midY: allow.midY, width: 160 * k)
+        } else {
+            drawLine(attr(it.heading, .systemFont(ofSize: 11 * k, weight: .regular), t.faint),
+                     x: b.minX + p, midY: allow.midY, width: deny.minX - 10 * k - (b.minX + p))
+            paintTextButton(deny, "Deny", primary: false, pressed: pressed == false, theme: t, k: k)
+            paintTextButton(allow, "Allow", primary: true, pressed: pressed == true, theme: t, k: k)
+        }
     }
 }
 
-/// The hover controls and the muted badge. One drawing routine, shared by the live view and
-/// the snapshot, so the PNG shows exactly what the card draws. Drawn as vectors at the
-/// current size (SF Symbols at a computed point size), so they stay crisp at every scale.
-final class GlassButton: NSView {
-    static let red = NSColor(srgbRed: 1, green: 0x45 / 255.0, blue: 0x3a / 255.0, alpha: 1)   // systemRed, dark
-    static let amber = NSColor(srgbRed: 1, green: 0xB0 / 255.0, blue: 0x20 / 255.0, alpha: 1)  // Thinking's #FFB020
+// MARK: - Demo mode (fixed state, for screenshots)
 
-    var symbol: String { didSet { if symbol != oldValue { needsDisplay = true } } }
-    var tint: NSColor? { didSet { needsDisplay = true } }
-    var theme = Theme.dark { didSet { needsDisplay = true } }
-    var action: (() -> Void)?
-    /// The badge is only a sign: it never takes a click, so the card under it still drags.
-    var interactive = true
-    private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
+struct Demo {
+    let phase: Phase
+    let happy: Bool
+    let line: String?
+    let expand: Bool
+    let hover: Bool
+    let compact: Bool?
+    let at: NSPoint?   // inset of the card's top-right corner from the screen's visible top-right
 
-    init(symbol: String, tip: String?) {
-        self.symbol = symbol
-        super.init(frame: .zero)
-        wantsLayer = true
-        layerContentsRedrawPolicy = .onSetNeedsDisplay
-        toolTip = tip
-        alphaValue = 0
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var isFlipped: Bool { false }
-    override var mouseDownCanMoveWindow: Bool { false }          // a click here never drags the card
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func hitTest(_ p: NSPoint) -> NSView? { interactive && alphaValue > 0.01 ? super.hitTest(p) : nil }
-    override func setFrameSize(_ s: NSSize) { super.setFrameSize(s); needsDisplay = true }
-
-    override func mouseDown(with e: NSEvent) { pressed = true }
-    override func mouseDragged(with e: NSEvent) { pressed = bounds.contains(convert(e.locationInWindow, from: nil)) }
-    override func mouseUp(with e: NSEvent) {
-        let inside = bounds.contains(convert(e.locationInWindow, from: nil))
-        pressed = false
-        if inside { action?() }
-    }
-
-    override func draw(_ dirty: NSRect) {
-        GlassButton.paint(in: bounds, symbol: symbol, theme: theme, tint: tint, pressed: pressed)
-    }
-
-    static func paint(in b: NSRect, symbol: String, theme: Theme, tint: NSColor?, pressed: Bool) {
-        let d = min(b.width, b.height)
-        let circle = NSRect(x: b.midX - d / 2, y: b.midY - d / 2, width: d, height: d).insetBy(dx: 0.5, dy: 0.5)
-        let path = NSBezierPath(ovalIn: circle)
-        let dark = theme.light < 0.5
-        (dark ? NSColor(white: 1, alpha: pressed ? 0.30 : 0.17) : NSColor(white: 0, alpha: pressed ? 0.16 : 0.07)).setFill()
-        path.fill()
-        (dark ? NSColor(white: 1, alpha: 0.22) : NSColor(white: 0, alpha: 0.12)).setStroke()
-        path.lineWidth = 0.5
-        path.stroke()
-        let cfg = NSImage.SymbolConfiguration(pointSize: d * 0.42, weight: .semibold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [tint ?? theme.fg]))
-        guard let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
-        else { return }
-        let s = img.size
-        img.draw(in: NSRect(x: b.midX - s.width / 2, y: b.midY - s.height / 2, width: s.width, height: s.height))
-    }
+    static let current: Demo? = {
+        guard let p = env["CALLPILL_DEMO"], !p.isEmpty else { return nil }
+        let at = env["CALLPILL_DEMO_AT"].flatMap { s -> NSPoint? in
+            let v = s.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            return v.count == 2 ? NSPoint(x: v[0], y: v[1]) : nil
+        }
+        return Demo(phase: Phase.named(p) ?? .listening, happy: p.lowercased() == "happy",
+                    line: env["CALLPILL_DEMO_LINE"], expand: env["CALLPILL_DEMO_EXPAND"] == "1",
+                    hover: env["CALLPILL_DEMO_HOVER"] == "1",
+                    compact: env["CALLPILL_DEMO_COMPACT"].map { $0 == "1" }, at: at)
+    }()
 }
 
-final class PillView: NSView {
-    static let layout = PillLayout.current
-    static let size = layout.size
-    static let minScale: CGFloat = 0.75, maxScale: CGFloat = 1.75
-    let orb: OrbView
-    let muteButton = GlassButton(symbol: "mic.fill", tip: "Mute")
-    let stopButton = GlassButton(symbol: "stop.fill", tip: "Stop")
-    let badge = GlassButton(symbol: "mic.slash.fill", tip: nil)
-    let expandButton = GlassButton(symbol: "chevron.down", tip: "Waiting sessions")
-    private var labels: [Phase: CATextLayer] = [:]
-    private let labelBox = CALayer()
-    private let timer = CATextLayer()
-    private var theme = Theme.dark
-    /// Everything is laid out at base size x `k`, fonts and symbols included, so nothing is
-    /// ever a bitmap stretched to fit.
-    private(set) var k: CGFloat = 1
-    private var labelFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
-    private var timerFont = NSFont.monospacedDigitSystemFont(ofSize: PillView.layout.timerFontSize, weight: .medium)
-    private var timerText = "0:00"
-    private var tracking: NSTrackingArea?
-
-    var onMute: ((Bool) -> Void)?       // argument: the state to switch to (true = mute)
-    var onStop: (() -> Void)?
-    var onZoom: ((CGFloat) -> Void)?    // additive change to the target scale
-    var onExpand: (() -> Void)?         // toggle the waiting list
-
-    /// Sessions waiting on the user. Above zero, the chevron stays up in amber even unhovered.
-    var pendingCount = 0 {
-        didSet { if pendingCount != oldValue { updateControls(animated: true) } }
-    }
-    var expanded = false {
-        didSet { if expanded != oldValue { updateControls(animated: true) } }
-    }
-
-    var phase: Phase = .listening {
-        didSet { if phase != oldValue { orb.model.target = phase; layoutLabels(animated: true) } }
-    }
-    var muted = false {
-        didSet { if muted != oldValue { updateControls(animated: true) } }
-    }
-    private(set) var hovered = false {
-        didSet { if hovered != oldValue { updateControls(animated: true) } }
-    }
-
-    init(renderer: OrbRenderer) {
-        let L = PillView.layout
-        orb = OrbView(frame: L.orbRect, renderer: renderer)
-        super.init(frame: NSRect(origin: .zero, size: PillView.size))
-        wantsLayer = true
-        layer?.cornerRadius = L.cornerRadius
-        layer?.borderWidth = 0.5
-        addSubview(orb)
-        labelBox.frame = bounds
-        layer?.addSublayer(labelBox)
-        for p in Phase.allCases {
-            let t = CATextLayer()
-            t.alignmentMode = L.labelAlign
-            t.truncationMode = .none
-            t.opacity = 0
-            labels[p] = t
-            labelBox.addSublayer(t)
-        }
-        timer.alignmentMode = L.timerAlign
-        timer.isHidden = !PillLayout.showTimer
-        layer?.addSublayer(timer)
-        badge.interactive = false
-        badge.tint = GlassButton.red
-        for b in [badge, muteButton, stopButton, expandButton] { addSubview(b) }
-        expandButton.action = { [weak self] in self?.onExpand?() }
-        muteButton.action = { [weak self] in guard let self = self else { return }; self.onMute?(!self.muted) }
-        stopButton.action = { [weak self] in self?.onStop?() }
-        applyTheme(animated: false)
-        orb.model.snapTo(.listening, light: theme.light)
-        layoutLabels(animated: false)
-        layoutControls()
-        updateControls(animated: false)
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var mouseDownCanMoveWindow: Bool { true }
-    override var isFlipped: Bool { false }
-
-    // MARK: hover
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let t = tracking { removeTrackingArea(t) }
-        let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                               owner: self, userInfo: nil)
-        addTrackingArea(t)
-        tracking = t
-    }
-    override func mouseEntered(with e: NSEvent) { hovered = true }
-    override func mouseExited(with e: NSEvent) { hovered = false }
-    /// After a resize or a move the pointer may be inside without an `entered` event.
-    func refreshHover() {
-        guard let w = window else { return }
-        hovered = bounds.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil))
-    }
-
-    // MARK: resize with the mouse
-
-    override func scrollWheel(with e: NSEvent) {
-        guard e.momentumPhase.isEmpty else { return }   // finger on the glass only, no coasting
-        let dy = e.isDirectionInvertedFromDevice ? -e.scrollingDeltaY : e.scrollingDeltaY   // + = swipe up / wheel up
-        guard dy != 0 else { return }
-        onZoom?(e.hasPreciseScrollingDeltas ? dy * 0.005 : max(-0.15, min(0.15, dy * 0.05)))
-    }
-    override func magnify(with e: NSEvent) { onZoom?(e.magnification * k) }
-
-    // MARK: layout
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        applyTheme(animated: true)
-    }
-
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        let s = window?.backingScaleFactor ?? 2
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        labels.values.forEach { $0.contentsScale = s }
-        timer.contentsScale = s
-        CATransaction.commit()
-    }
-
-    /// Re-lay the card at scale `k` inside `size` (the panel's pixel-rounded content size).
-    func setScale(_ k: CGFloat, size: NSSize) {
-        self.k = k
-        let L = PillView.layout
-        labelFont = NSFont.systemFont(ofSize: 13 * k, weight: .semibold)
-        timerFont = NSFont.monospacedDigitSystemFont(ofSize: L.timerFontSize * k, weight: .medium)
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        frame = NSRect(origin: .zero, size: size)
-        layer?.cornerRadius = L.cornerRadius * k
-        labelBox.frame = bounds
-        orb.frame = sc(L.orbRect)
-        CATransaction.commit()
-        applyTheme(animated: false)
-        layoutLabels(animated: false)
-        layoutControls()
-    }
-
-    private func sc(_ r: NSRect) -> NSRect {
-        NSRect(x: r.minX * k, y: r.minY * k, width: r.width * k, height: r.height * k)
-    }
-
-    private func layoutControls() {
-        let L = PillView.layout
-        muteButton.frame = sc(L.muteRect)
-        stopButton.frame = sc(L.stopRect)
-        badge.frame = sc(L.badgeRect)
-        expandButton.frame = sc(L.expandRect)
-    }
-
-    /// Hover: the buttons fade in over the label row (.2 s), the label fades out. Muted and
-    /// not hovered: a small red mic-slash badge in the top-right corner stays up.
-    private func updateControls(animated: Bool) {
-        muteButton.symbol = muted ? "mic.slash.fill" : "mic.fill"
-        muteButton.tint = muted ? GlassButton.red : nil
-        muteButton.toolTip = muted ? "Unmute" : "Mute"
-        expandButton.symbol = expanded ? "chevron.up" : "chevron.down"
-        expandButton.tint = pendingCount > 0 ? GlassButton.amber : nil
-        expandButton.toolTip = pendingCount == 0 ? "Nothing waiting" : pendingCount == 1 ? "1 session waiting" : "\(pendingCount) sessions waiting"
-        let show = hovered
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = animated ? 0.2 : 0
-            ctx.allowsImplicitAnimation = true
-            muteButton.animator().alphaValue = show ? 1 : 0
-            stopButton.animator().alphaValue = show ? 1 : 0
-            badge.animator().alphaValue = muted && !show ? 1 : 0
-            expandButton.animator().alphaValue = show || pendingCount > 0 || expanded ? 1 : 0
-        }
-        CATransaction.begin()
-        CATransaction.setDisableActions(!animated)
-        CATransaction.setAnimationDuration(0.2)
-        labelBox.opacity = show ? 0 : 1
-        timer.opacity = show ? 0 : 1
-        CATransaction.commit()
-    }
-
-    func setTimer(_ s: String) {
-        guard s != timerText else { return }
-        timerText = s
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        timer.string = attributed(s, font: timerFont, color: theme.fg2, kern: 0)
-        CATransaction.commit()
-    }
-
-    private func attributed(_ s: String, font: NSFont, color: NSColor, kern: CGFloat) -> NSAttributedString {
-        NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color, .kern: kern])
-    }
-
-    private func applyTheme(animated: Bool) {
-        theme = Theme.of(effectiveAppearance)
-        orb.model.lightTarget = theme.light
-        CATransaction.begin(); CATransaction.setDisableActions(!animated); CATransaction.setAnimationDuration(0.35)
-        layer?.borderColor = theme.border.cgColor
-        for (p, t) in labels {
-            t.string = attributed(p.label, font: labelFont, color: theme.fg, kern: -0.13 * k)   // -0.01em
-        }
-        timer.string = attributed(timerText, font: timerFont, color: theme.fg2, kern: 0)
-        CATransaction.commit()
-        for b in [muteButton, stopButton, badge, expandButton] { b.theme = theme }
-    }
-
-    /// CSS: the active label centred in its box, the others 15% of their line box lower
-    /// (translateY -35% vs -50%) and transparent; opacity and transform ease .35 s.
-    private func layoutLabels(animated: Bool) {
-        let L = PillView.layout
-        let mid = L.labelMidY * k
-        let line = ceil(labelFont.ascender - labelFont.descender)
-        let drop: CGFloat = 0.15 * 13 * k * 1.45
-        CATransaction.begin()
-        CATransaction.setDisableActions(!animated)
-        CATransaction.setAnimationDuration(0.35)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .default))   // CSS `ease`
-        for (p, t) in labels {
-            let on = p == phase
-            t.frame = NSRect(x: L.labelX * k, y: mid - line / 2 - (on ? 0 : drop), width: L.labelWidth * k, height: line)
-            t.opacity = on ? 1 : 0
-        }
-        let tl = ceil(timerFont.ascender - timerFont.descender)
-        timer.frame = NSRect(x: L.timerX * k, y: L.timerMidY * k - tl / 2, width: L.timerWidth * k, height: tl)
-        CATransaction.commit()
-    }
-}
-
-// MARK: - Mic level meter
-
-/// Taps the Mac's built-in mic (never the AirPods: opening their mic drops them to call
-/// quality). A second tap on a device the ears already hold is fine on macOS.
-final class MicMeter {
-    private var engine: AVAudioEngine?
-    private var observer: NSObjectProtocol?
-    private let lock = NSLock()
-    private var _level: Float = 0
-    private var _lastBuffer: CFTimeInterval = 0
-    private(set) var deviceName: String?
-    private var wantName: String?
-    private(set) var status = "idle"
-    var running: Bool { engine != nil }
-
-    /// Latest normalised level 0...1, or nil if no buffer arrived in the last second.
-    var level: Float? {
-        lock.lock(); defer { lock.unlock() }
-        return CACurrentMediaTime() - _lastBuffer < 1.0 ? _level : nil
-    }
-
-    func start(preferring name: String?) {
-        wantName = name
-        guard !running else { return }
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: begin()
-        case .notDetermined:
-            status = "asking"
-            AVCaptureDevice.requestAccess(for: .audio) { ok in
-                DispatchQueue.main.async { if ok { self.begin() } else { self.status = "denied" } }
-            }
-        default: status = "denied"; return   // denied: the orb falls back to the simulated envelope
-        }
-    }
-
-    func stop() {
-        if let o = observer { NotificationCenter.default.removeObserver(o); observer = nil }
-        guard let e = engine else { return }
-        e.inputNode.removeTap(onBus: 0)
-        e.stop()
-        engine = nil
-        deviceName = nil
-    }
-
-    /// A fresh engine per start: reusing one after a device or config change leaves a stale
-    /// tap format, and installTap then throws an Objective-C exception Swift cannot catch.
-    private func begin() {
-        guard !running else { return }
-        guard let dev = MicMeter.pickDevice(preferring: wantName) else { status = "no-device"; return }
-        let e = AVAudioEngine()
-        let input = e.inputNode
-        guard let au = input.audioUnit else { return }
-        var id = dev.id
-        let st = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                      &id, UInt32(MemoryLayout<AudioDeviceID>.size))
-        guard st == noErr else { status = "set-device \(st)"; return }
-        let hw = input.inputFormat(forBus: 0)
-        guard hw.sampleRate > 0, hw.channelCount > 0 else { status = "no-format"; return }
-        input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buf, _ in
-            guard let self = self, let ch = buf.floatChannelData?[0] else { return }
-            let n = Int(buf.frameLength)
-            guard n > 0 else { return }
-            var sum: Float = 0
-            for i in 0..<n { sum += ch[i] * ch[i] }
-            let rms = (sum / Float(n)).squareRoot()
-            let db = 20 * log10(rms + 1e-9)
-            let norm = max(0, min(1, (db + 55) / 40))   // prototype: -55 dBFS -> 0, -15 dBFS -> 1
-            self.lock.lock()
-            self._level = norm
-            self._lastBuffer = CACurrentMediaTime()
-            self.lock.unlock()
-        }
-        e.prepare()
-        do { try e.start() } catch { input.removeTap(onBus: 0); status = "start: \(error.localizedDescription)"; return }
-        status = "running \(Int(hw.sampleRate))Hz"
-        engine = e
-        deviceName = dev.name
-        // Switching the device fires a config change by itself; only rebuild if buffers stopped.
-        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: e,
-                                                          queue: .main) { [weak self] _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                guard let self = self, self.running, self.level == nil else { return }
-                self.stop(); self.start(preferring: self.wantName)
-            }
-        }
-    }
-
-    // Core Audio device lookup: the ears' device by name, else the built-in mic. Never Bluetooth.
-    static func pickDevice(preferring name: String?) -> (id: AudioDeviceID, name: String)? {
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
-                                              mScope: kAudioObjectPropertyScopeGlobal,
-                                              mElement: kAudioObjectPropertyElementMain)
-        var size: UInt32 = 0
-        let sys = AudioObjectID(kAudioObjectSystemObject)
-        guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr else { return nil }
-        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &ids) == noErr else { return nil }
-        let inputs = ids.filter(hasInput).map { (id: $0, name: deviceName($0), transport: transport($0)) }
-        let bt: Set<UInt32> = [kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE]
-        if let name = name, let d = inputs.first(where: { $0.name == name && !bt.contains($0.transport) }) {
-            return (d.id, d.name)
-        }
-        if let d = inputs.first(where: { $0.transport == kAudioDeviceTransportTypeBuiltIn }) { return (d.id, d.name) }
-        return nil
-    }
-
-    private static func hasInput(_ id: AudioDeviceID) -> Bool {
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams,
-                                              mScope: kAudioDevicePropertyScopeInput,
-                                              mElement: kAudioObjectPropertyElementMain)
-        var size: UInt32 = 0
-        return AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr && size > 0
-    }
-
-    private static func deviceName(_ id: AudioDeviceID) -> String {
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName,
-                                              mScope: kAudioObjectPropertyScopeGlobal,
-                                              mElement: kAudioObjectPropertyElementMain)
-        var name: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &name) == noErr,
-              let cf = name?.takeRetainedValue() else { return "" }
-        return cf as String
-    }
-
-    private static func transport(_ id: AudioDeviceID) -> UInt32 {
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
-                                              mScope: kAudioObjectPropertyScopeGlobal,
-                                              mElement: kAudioObjectPropertyElementMain)
-        var t: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &t)
-        return t
-    }
-}
-
-// MARK: - App: log reader + panel
+// MARK: - App: log reader + panels
 
 final class Pill: NSObject, NSApplicationDelegate {
-    let panel = NSPanel(contentRect: NSRect(origin: .zero, size: PillView.size),
+    let panel = NSPanel(contentRect: NSRect(origin: .zero, size: CardGeo.full),
                         styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
-    var view: PillView!
-    let meter = MicMeter()
-    let logDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".voicemode/logs/conversations")
+    var view: CardView!
+    let demo = Demo.current
+    let logDir = env["CALLPILL_LOG_DIR"].map(expand) ?? home.appendingPathComponent(".voicemode/logs/conversations")
     var trace: FileHandle?
     let iso: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
@@ -1254,26 +1077,32 @@ final class Pill: NSObject, NSApplicationDelegate {
     var buffer = ""
     var lastPartial = Date.distantPast
     var speaking = false
+    var line = ""                               // the line being spoken (mouth `saying` text)
     var thinking = false
     // Thinking follows the listener's verdicts (bin/listen.py touches ~/.voicemode/call/accepted
     // for each turn it passes on), not raw mic turns: on speakers most raw turns are my own echo.
     var sayingAt = Date()                       // launch counts as a reply, so old verdicts are ignored
     var thinkingSince = Date.distantPast
     var saidAt = Date.distantPast
-    let acceptedURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".voicemode/call/accepted")
-    let deviceURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".voicemode/call/device")
+    var happyFor = Date.distantPast             // the `said` that last earned a happy beat
+    var happyUntil = Date.distantPast
+    let acceptedURL = callDir.appendingPathComponent("accepted")
+    let deviceURL = callDir.appendingPathComponent("device")
+    let focusURL = callDir.appendingPathComponent("focus")
+    let workersURL = callDir.appendingPathComponent("workers.json")
     var micOff = false
-    var micDevice: String?
     var callStart = Date()
     // `call mute` / `call unmute` own this flag file; the pill only reads it (and shows the
     // click's result right away for 2 s, until the file catches up).
-    let mutedURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".voicemode/call/muted")
+    let mutedURL = callDir.appendingPathComponent("muted")
     var muteClick: (state: Bool, at: Date)?
-    // Card scale, 0.75...1.75, anchored top-right, persisted.
-    var bg: NSVisualEffectView!
+    var demoMuted = false
+    // Card scale and compact flag, anchored top-right, persisted (new keys: the card is new).
     var scale: CGFloat = 1, scaleTarget: CGFloat = 1
+    var compact = false
     var zoomTimer: Timer?
-    static let scaleKey = "cardScale"
+    static let scaleKey = "callCardScale", compactKey = "callCardCompact"
+    static let minScale: CGFloat = 0.6, maxScale: CGFloat = 1.75
     // Waiting list: a child panel under the card, so it follows the card when dragged.
     var pending: [PendingItem] = []
     var listPanel: NSPanel?
@@ -1283,10 +1112,13 @@ final class Pill: NSObject, NSApplicationDelegate {
     var answered: Set<String> = []
     var permitPanel: NSPanel?
     var permitView: PermitView?
+    var holding = false                         // "Allowed" / "Denied" is on screen for a moment
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        guard let renderer = OrbRenderer() else { NSApp.terminate(nil); return }
-        view = PillView(renderer: renderer)
+        if let a = env["CALLPILL_APPEARANCE"]?.lowercased(), a == "dark" || a == "light" {
+            NSApp.appearance = NSAppearance(named: a == "dark" ? .darkAqua : .aqua)
+        }
+        view = CardView(frame: NSRect(origin: .zero, size: CardGeo.full))
 
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
@@ -1294,41 +1126,33 @@ final class Pill: NSObject, NSApplicationDelegate {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
+        panel.contentView = view
 
-        // Frosted vibrancy background (CSS: blur 30, saturate 180%, tinted, 0.5 px border).
-        let bg = NSVisualEffectView(frame: NSRect(origin: .zero, size: PillView.size))
-        bg.material = .hudWindow
-        bg.blendingMode = .behindWindow
-        bg.state = .active
-        bg.wantsLayer = true
-        bg.layer?.cornerRadius = PillView.layout.cornerRadius
-        bg.layer?.masksToBounds = true
-        panel.contentView = bg
-        self.bg = bg
-        bg.addSubview(view)
-        view.orb.micLevel = { [weak self] in self?.meter.level }
         view.onMute = { [weak self] on in self?.setMuted(on) }
-        view.onStop = { Pill.runCall("stopwork") }
+        view.onStop = { [weak self] in self?.runCall("stopwork") }
         view.onZoom = { [weak self] d in self?.zoom(by: d) }
         view.onExpand = { [weak self] in self?.setExpanded(!(self?.view.expanded ?? false)) }
+        view.onCompact = { [weak self] in guard let self = self else { return }; self.setCompact(!self.compact) }
 
-        let saved = UserDefaults.standard.double(forKey: Pill.scaleKey)
-        scale = saved > 0 ? max(PillView.minScale, min(PillView.maxScale, CGFloat(saved))) : 1
+        if demo == nil {
+            let saved = UserDefaults.standard.double(forKey: Pill.scaleKey)
+            scale = saved > 0 ? max(Pill.minScale, min(Pill.maxScale, CGFloat(saved))) : 1
+            compact = UserDefaults.standard.bool(forKey: Pill.compactKey)
+        } else {
+            compact = demo?.compact ?? false
+        }
         scaleTarget = scale
         if let screen = NSScreen.main {
             let f = screen.visibleFrame
             let S = scaledSize(scale, backing: screen.backingScaleFactor)
             panel.setContentSize(S)
             applyScale()
-            switch PillView.layout {
-            case .vertical:     // top-right, 16 pt in from both edges
-                panel.setFrameOrigin(NSPoint(x: f.maxX - S.width - 16, y: f.maxY - S.height - 16))
-            case .horizontal:   // top centre, as before
-                panel.setFrameOrigin(NSPoint(x: f.midX - S.width / 2, y: f.maxY - S.height - 12))
-            }
+            let inset = demo?.at ?? NSPoint(x: 16, y: 16)   // top-right, 16 pt in from both edges
+            panel.setFrameOrigin(NSPoint(x: f.maxX - S.width - inset.x, y: f.maxY - S.height - inset.y))
         }
         panel.orderFrontRegardless()
         panel.invalidateShadow()
+        view.god.start()
 
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--log"), i + 1 < args.count {
@@ -1336,37 +1160,50 @@ final class Pill: NSObject, NSApplicationDelegate {
             trace = FileHandle(forWritingAtPath: args[i + 1])
         }
 
-        micDevice = recentMicDevice()
-        if let t = lastListenStarted() { callStart = t }
-        openNewest(fromEnd: true)
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in self.tick() }
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in self.keepMeter() }
-        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in self.refreshPending() }
+        if demo == nil {
+            if let t = lastListenStarted() { callStart = t }
+            openNewest(fromEnd: true)
+        } else {
+            view.forceHover = demo?.hover ?? false
+        }
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshPending(); self?.refreshFocus() }
+        refreshFocus()
         refreshPending()
         render()
-        keepMeter()
+        if demo?.expand == true { setExpanded(true) }
     }
 
-    /// Run the meter only while the call's mic is live; restart it if it went quiet.
-    func keepMeter() {
-        if micOff { meter.stop(); return }
-        if meter.running && meter.level == nil { meter.stop() }
-        meter.start(preferring: micDevice)
+    // MARK: who is on the call (focus file + workers.json)
+
+    /// The worker's god kind: its "god", else derived from its "avatar" colour (SPEC §3). The same
+    /// table, in the same order, as bin/listen.py's god_of, so the face and the voice agree.
+    static let avatarGod: [(String, String)] = [("purple", "research"), ("violet", "research"), ("blue", "scribe"),
+                                                ("green", "scout"), ("orange", "sales"), ("red", "sales"), ("yellow", "herald")]
+    static func godKind(_ w: [String: Any]) -> String {
+        if let g = w["god"] as? String, godKinds.contains(g) { return g }
+        let a = ((w["avatar"] as? String) ?? "").lowercased()
+        return avatarGod.first { a.contains($0.0) }?.1 ?? "colleague"
     }
 
-    /// The device the ears are using, from the newest mic line in the last 64 KB of the log.
-    func recentMicDevice() -> String? {
-        guard let newest = newestLog(), let fh = try? FileHandle(forReadingFrom: newest) else { return nil }
-        defer { try? fh.close() }
-        let size = (try? fh.seekToEnd()) ?? 0
-        try? fh.seek(toOffset: size > 65536 ? size - 65536 : 0)
-        let text = String(decoding: fh.readDataToEndOfFile(), as: UTF8.self)
-        for line in text.split(separator: "\n").reversed() {
-            if let o = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-               o["source"] as? String == "mic", let d = o["device"] as? String { return d }
+    func refreshFocus() {
+        let key = ((try? String(contentsOf: focusURL, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var kind = "colleague", name = "Claude"
+        if !key.isEmpty {
+            name = key.prefix(1).uppercased() + key.dropFirst()
+            if let d = try? Data(contentsOf: workersURL),
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+               let ws = o["workers"] as? [[String: Any]],
+               let w = ws.first(where: { ($0["key"] as? String) == key }) {
+                if let n = w["name"] as? String, !n.isEmpty { name = n }
+                kind = Pill.godKind(w)
+            }
         }
-        return nil
+        view.name = name
+        view.god.kind = kind
     }
+
+    // MARK: the heard log
 
     /// Call start: the ears' last `listen-started` event, newest log first.
     func lastListenStarted() -> Date? {
@@ -1401,40 +1238,43 @@ final class Pill: NSObject, NSApplicationDelegate {
     }
 
     func tick() {
-        openNewest(fromEnd: false)
-        if let path = path, let fh = try? FileHandle(forReadingFrom: path) {
-            try? fh.seek(toOffset: offset)
-            let data = fh.readDataToEndOfFile()
-            try? fh.close()
-            offset += UInt64(data.count)
-            buffer += String(decoding: data, as: UTF8.self)
-            while let nl = buffer.firstIndex(of: "\n") {
-                let line = String(buffer[..<nl])
-                buffer.removeSubrange(...nl)
-                handle(line)
+        if demo == nil {
+            openNewest(fromEnd: false)
+            if let path = path, let fh = try? FileHandle(forReadingFrom: path) {
+                try? fh.seek(toOffset: offset)
+                let data = fh.readDataToEndOfFile()
+                try? fh.close()
+                offset += UInt64(data.count)
+                buffer += String(decoding: data, as: UTF8.self)
+                while let nl = buffer.firstIndex(of: "\n") {
+                    let line = String(buffer[..<nl])
+                    buffer.removeSubrange(...nl)
+                    handle(line)
+                }
             }
         }
         refreshPermits()
         render()
-        let s = max(0, Int(Date().timeIntervalSince(callStart)))
-        view.setTimer(String(format: "%d:%02d", s / 60, s % 60))
+        if PillTimer.on {
+            let s = max(0, Int(Date().timeIntervalSince(demo == nil ? callStart : Date().addingTimeInterval(-187))))
+            view.timerText = s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
+                                       : String(format: "%d:%02d", s / 60, s % 60)
+        }
         if let t = trace {
-            let lv = meter.level.map { String(format: "%.3f", $0) } ?? "nil"
-            let line = String(format: "%.2f level=%@ orb=%.3f phase=%@ dev=%@ st=%@\n", Date().timeIntervalSince1970,
-                              lv, view.orb.model.level, view.phase.label, meter.deviceName ?? "-", meter.status)
-            t.write(Data(line.utf8))
+            let l = String(format: "%.2f caption=%@ god=%@-%@ muted=%d permits=%d pending=%d\n", Date().timeIntervalSince1970,
+                           view.caption.text, view.god.kind, view.god.state.rawValue, view.muted ? 1 : 0, permits.count, pending.count)
+            t.write(Data(l.utf8))
         }
     }
 
-    func handle(_ line: String) {
-        guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+    func handle(_ raw: String) {
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
               let kind = obj["kind"] as? String else { return }
         let source = obj["source"] as? String
-        if source == "mic", let d = obj["device"] as? String, d != micDevice {
-            micDevice = d; meter.stop(); keepMeter()
-        }
         switch (kind, source) {
-        case ("saying", "mouth"): speaking = true; thinking = false; sayingAt = Date()
+        case ("saying", "mouth"):
+            speaking = true; thinking = false; sayingAt = Date()
+            line = ((obj["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         case ("said", "mouth"): speaking = false; saidAt = Date()
         case ("partial", "mic"):
             // on speakers the mic hears my tail for a few seconds after I stop: not him
@@ -1443,10 +1283,10 @@ final class Pill: NSObject, NSApplicationDelegate {
         case ("event", _):
             let ev = obj["event"] as? String
             if ev == "listen-started" {
-                micOff = false; keepMeter()
+                micOff = false
                 if let ts = obj["ts"] as? String, let d = iso.date(from: ts) { callStart = d }
             }
-            if ev == "listen-stopped" { micOff = true; speaking = false; thinking = false; keepMeter() }
+            if ev == "listen-stopped" { micOff = true; speaking = false; thinking = false }
         default: break
         }
     }
@@ -1456,10 +1296,12 @@ final class Pill: NSObject, NSApplicationDelegate {
         return name.range(of: "airpods|headphone|headset|buds|beats", options: [.regularExpression, .caseInsensitive]) != nil
     }
 
-    // MARK: hover controls
+    // MARK: buttons
 
     /// `call <arg>` through a login shell (PATH), off the main thread, output discarded.
-    static func runCall(_ arg: String) {
+    /// Never in demo mode.
+    func runCall(_ arg: String) {
+        guard demo == nil else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -1473,12 +1315,14 @@ final class Pill: NSObject, NSApplicationDelegate {
     }
 
     func setMuted(_ on: Bool) {
+        if demo != nil { demoMuted = on; render(); return }
         muteClick = (on, Date())
-        Pill.runCall(on ? "mute" : "unmute")
+        runCall(on ? "mute" : "unmute")
         render()
     }
 
     var isMuted: Bool {
+        if demo != nil { return demoMuted || demo?.phase == .muted }
         if let c = muteClick, Date().timeIntervalSince(c.at) < 2 { return c.state }
         return FileManager.default.fileExists(atPath: mutedURL.path)
     }
@@ -1495,31 +1339,29 @@ final class Pill: NSObject, NSApplicationDelegate {
         }
     }
 
+    func makeChildPanel(_ v: NSView) -> NSPanel {
+        let p = NSPanel(contentRect: .zero, styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
+        p.level = .statusBar
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        p.becomesKeyOnlyIfNeeded = true
+        v.wantsLayer = true
+        p.contentView = v
+        return p
+    }
+
     func setExpanded(_ on: Bool) {
         view.expanded = on
         if on {
-            let lv = listView ?? PendingListView(frame: .zero)
-            lv.onOpen = { [weak self] it in self?.open(it) }
-            let lp = listPanel ?? NSPanel(contentRect: .zero, styleMask: [.nonactivatingPanel, .borderless],
-                                          backing: .buffered, defer: false)
             if listPanel == nil {
-                lp.level = .statusBar
-                lp.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-                lp.isOpaque = false
-                lp.backgroundColor = .clear
-                lp.hasShadow = true
-                lp.becomesKeyOnlyIfNeeded = true
-                let fx = NSVisualEffectView()
-                fx.material = .hudWindow
-                fx.blendingMode = .behindWindow
-                fx.state = .active
-                fx.wantsLayer = true
-                fx.layer?.masksToBounds = true
-                fx.layer?.borderWidth = 0.5
-                fx.addSubview(lv)
-                lp.contentView = fx
-                listPanel = lp; listView = lv
+                let lv = PendingListView(frame: .zero)
+                lv.onOpen = { [weak self] it in self?.open(it) }
+                listPanel = makeChildPanel(lv)
+                listView = lv
             }
+            guard let lp = listPanel, let lv = listView else { return }
             lv.items = pending
             lv.theme = Theme.of(lv.effectiveAppearance)
             positionList()
@@ -1534,22 +1376,18 @@ final class Pill: NSObject, NSApplicationDelegate {
     /// Under the card, right edges aligned (the card lives top-right); above it when there is
     /// no room below; always inside the screen.
     func positionList() {
-        guard let lp = listPanel, let lv = listView, let fx = lp.contentView else { return }
+        guard let lp = listPanel, let lv = listView else { return }
         let S = PendingListView.size(for: pending.count, k: scale)
         let f = panel.frame
         let vis = (panel.screen ?? NSScreen.main)?.visibleFrame ?? f
         var x = f.maxX - S.width
         x = max(vis.minX + 8, min(vis.maxX - S.width - 8, x))
-        // below the card, and below the permission panel too while one is up
+        // below the card, and below the permission card too while one is up
         var bottom = f.minY
         if let pp = permitPanel, pp.isVisible, !permits.isEmpty { bottom = min(bottom, pp.frame.minY) }
         var y = bottom - 8 - S.height
         if y < vis.minY + 8 { y = f.maxY + 8 }
         lp.setFrame(NSRect(x: x, y: y, width: S.width, height: S.height), display: true)
-        fx.frame = NSRect(origin: .zero, size: S)
-        fx.layer?.cornerRadius = 16 * scale
-        fx.layer?.borderColor = Theme.of(fx.effectiveAppearance).border.cgColor
-        lv.frame = fx.bounds
         lv.k = scale
         lp.invalidateShadow()
     }
@@ -1557,6 +1395,7 @@ final class Pill: NSObject, NSApplicationDelegate {
     // MARK: permission requests (answered only by a click on Allow / Deny)
 
     func refreshPermits() {
+        guard !holding else { return }        // "Allowed" / "Denied" stays up for its moment
         let all = PermitItem.load()
         answered.formIntersection(all.map { $0.id })        // forget ids whose hook has finished
         let items = all.filter { !answered.contains($0.id) }
@@ -1572,32 +1411,16 @@ final class Pill: NSObject, NSApplicationDelegate {
         }
         if hadAny != !items.isEmpty { refreshPending() }
         if view.expanded { positionList() }
-        render()
     }
 
     func showPermit(_ it: PermitItem, more: Int) {
-        let pv = permitView ?? PermitView(frame: .zero)
-        let pp = permitPanel ?? NSPanel(contentRect: .zero, styleMask: [.nonactivatingPanel, .borderless],
-                                        backing: .buffered, defer: false)
         if permitPanel == nil {
-            pp.level = .statusBar
-            pp.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            pp.isOpaque = false
-            pp.backgroundColor = .clear
-            pp.hasShadow = true
-            pp.becomesKeyOnlyIfNeeded = true
-            let fx = NSVisualEffectView()
-            fx.material = .hudWindow
-            fx.blendingMode = .behindWindow
-            fx.state = .active
-            fx.wantsLayer = true
-            fx.layer?.masksToBounds = true
-            fx.layer?.borderWidth = 0.5
-            fx.addSubview(pv)
-            pp.contentView = fx
+            let pv = PermitView(frame: .zero)
             pv.onAnswer = { [weak self] it, allow in self?.answerPermit(it, allow: allow) }
-            permitPanel = pp; permitView = pv
+            permitPanel = makeChildPanel(pv)
+            permitView = pv
         }
+        guard let pp = permitPanel, let pv = permitView else { return }
         pv.item = it
         pv.more = more
         pv.theme = Theme.of(pv.effectiveAppearance)
@@ -1610,45 +1433,47 @@ final class Pill: NSObject, NSApplicationDelegate {
 
     /// Left of the card, tops aligned; on the right only when the card sits at the left edge.
     func positionPermit() {
-        guard let pp = permitPanel, let pv = permitView, let it = pv.item, let fx = pp.contentView else { return }
+        guard let pp = permitPanel, let pv = permitView, let it = pv.item else { return }
         let S = PermitView.size(for: it, k: scale)
         let f = panel.frame
         let vis = (panel.screen ?? NSScreen.main)?.visibleFrame ?? f
-        var x = f.minX - 8 - S.width
-        if x < vis.minX + 8 { x = f.maxX + 8 }
+        var x = f.minX - 10 - S.width
+        if x < vis.minX + 8 { x = f.maxX + 10 }
         var y = f.maxY - S.height
         y = max(vis.minY + 8, y)
         pp.setFrame(NSRect(x: x, y: y, width: S.width, height: S.height), display: true)
-        fx.frame = NSRect(origin: .zero, size: S)
-        fx.layer?.cornerRadius = 16 * scale
-        fx.layer?.borderColor = Theme.of(fx.effectiveAppearance).border.cgColor
-        pv.frame = fx.bounds
         pv.k = scale
         pp.invalidateShadow()
     }
 
     func answerPermit(_ it: PermitItem, allow: Bool) {
-        guard it.answer(allow) else { return }
+        guard !holding, it.answer(allow) else { return }
         answered.insert(it.id)
-        refreshPermits()        // the answered id is filtered out: next request, or collapse
+        holding = true
+        permitView?.result = allow
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            guard let self = self else { return }
+            self.holding = false
+            self.refreshPermits()        // the answered id is filtered out: next request, or the card leaves
+        }
     }
 
     func open(_ it: PendingItem) {
-        guard let url = it.openURL else { return }
+        guard demo == nil, let url = it.openURL else { return }
         NSWorkspace.shared.open(url)
         setExpanded(false)
     }
 
-    // MARK: resize
+    // MARK: size: scale and compact
 
     func scaledSize(_ k: CGFloat, backing bs: CGFloat) -> NSSize {
-        let S = PillView.size
+        let S = CardGeo(compact: compact).size
         return NSSize(width: (S.width * k * bs).rounded() / bs, height: (S.height * k * bs).rounded() / bs)
     }
 
     func zoom(by d: CGFloat) {
-        scaleTarget = max(PillView.minScale, min(PillView.maxScale, scaleTarget + d))
-        UserDefaults.standard.set(Double(scaleTarget), forKey: Pill.scaleKey)
+        scaleTarget = max(Pill.minScale, min(Pill.maxScale, scaleTarget + d))
+        if demo == nil { UserDefaults.standard.set(Double(scaleTarget), forKey: Pill.scaleKey) }
         guard zoomTimer == nil else { return }
         let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.zoomStep() }
         RunLoop.main.add(t, forMode: .common)
@@ -1662,200 +1487,214 @@ final class Pill: NSObject, NSApplicationDelegate {
             scale = scaleTarget
             zoomTimer?.invalidate(); zoomTimer = nil
         }
+        resizeAnchored()
+        if zoomTimer == nil { view.refreshHover() }
+    }
+
+    func setCompact(_ on: Bool) {
+        compact = on
+        if demo == nil { UserDefaults.standard.set(on, forKey: Pill.compactKey) }
+        resizeAnchored()
+        view.refreshHover()
+    }
+
+    /// New size, same top-right corner; children follow.
+    func resizeAnchored() {
         let f = panel.frame
         let S = scaledSize(scale, backing: panel.backingScaleFactor)
         panel.setFrame(NSRect(x: f.maxX - S.width, y: f.maxY - S.height, width: S.width, height: S.height), display: false)
         applyScale()
         if !permits.isEmpty { positionPermit() }
         if view.expanded { positionList() }
-        if zoomTimer == nil { view.refreshHover() }
     }
 
     func applyScale() {
-        bg.layer?.cornerRadius = PillView.layout.cornerRadius * scale
-        view.setScale(scale, size: bg.bounds.size)
+        view.frame = NSRect(origin: .zero, size: panel.frame.size)
+        view.configure(k: scale, compact: compact)
         panel.invalidateShadow()
     }
 
+    // MARK: state -> card
+
     func render() {
-        if let a = (try? FileManager.default.attributesOfItem(atPath: acceptedURL.path))?[.modificationDate] as? Date,
-           a > sayingAt, !thinking {
-            thinking = true; thinkingSince = a
-        }
-        // a reply that only went to the chat never produces 'saying'; do not stay stuck
-        if thinking && Date().timeIntervalSince(thinkingSince) > 45 { thinking = false; sayingAt = Date() }
-        let muted = isMuted
-        view.muted = muted
+        let now = Date()
         let next: Phase
-        if muted { next = .muted }          // `call mute` also stops the ears: Muted wins over Mic off
-        else if micOff { next = .off }
-        else if speaking { next = .claude }
-        else if Date().timeIntervalSince(lastPartial) < 1.5 { next = .you }
-        else if thinking || !permits.isEmpty { next = .thinking }   // a permission request waits
-        else { next = .listening }
-        view.phase = next
-    }
-}
-
-// MARK: - Snapshot mode: every phase through the real Metal shader, into one PNG
-
-func renderOrb(_ r: OrbRenderer, _ m: OrbModel, px: Int, radius: Float) -> CGImage? {
-    let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: px, height: px, mipmapped: false)
-    d.usage = [.renderTarget, .shaderRead]
-    d.storageMode = .shared
-    guard let tex = r.device.makeTexture(descriptor: d), let cb = r.queue.makeCommandBuffer() else { return nil }
-    let pass = MTLRenderPassDescriptor()
-    pass.colorAttachments[0].texture = tex
-    r.encode(cb, pass, m.uniforms(res: SIMD2(Float(px), Float(px)), radius: radius))
-    cb.commit(); cb.waitUntilCompleted()
-    var bytes = [UInt8](repeating: 0, count: px * px * 4)
-    tex.getBytes(&bytes, bytesPerRow: px * 4, from: MTLRegionMake2D(0, 0, px, px), mipmapLevel: 0)
-    guard let ctx = CGContext(data: &bytes, width: px, height: px, bitsPerComponent: 8, bytesPerRow: px * 4,
-                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                              bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-    else { return nil }
-    return ctx.makeImage()
-}
-
-/// One card, drawn the way PillView lays it out at scale `k`: frosted body, orb through the
-/// real shader, label (or the hover buttons), and the muted badge.
-func drawCard(_ ctx: CGContext, _ r: OrbRenderer, _ m: OrbModel, at o: NSPoint, k: CGFloat, px: CGFloat,
-              label: String, hovered: Bool, muted: Bool, pending: Int = 0, expanded: Bool = false) {
-    let L = PillView.layout, S = L.size
-    func sc(_ q: NSRect) -> NSRect { NSRect(x: o.x + q.minX * k, y: o.y + q.minY * k, width: q.width * k, height: q.height * k) }
-    let card = NSBezierPath(roundedRect: NSRect(x: o.x, y: o.y, width: S.width * k, height: S.height * k),
-                            xRadius: L.cornerRadius * k, yRadius: L.cornerRadius * k)
-    NSColor(srgbRed: 30 / 255.0, green: 30 / 255.0, blue: 36 / 255.0, alpha: 0.9).setFill(); card.fill()
-    NSColor(white: 1, alpha: 0.14).setStroke(); card.lineWidth = 0.5; card.stroke()
-    let orb = sc(L.orbRect)
-    if let img = renderOrb(r, m, px: Int(orb.width * px), radius: OrbView.radius) { ctx.draw(img, in: orb) }
-    if hovered {
-        GlassButton.paint(in: sc(L.muteRect), symbol: muted ? "mic.slash.fill" : "mic.fill", theme: .dark,
-                          tint: muted ? GlassButton.red : nil, pressed: false)
-        GlassButton.paint(in: sc(L.stopRect), symbol: "stop.fill", theme: .dark, tint: nil, pressed: false)
-    } else {
-        let f = NSFont.systemFont(ofSize: 13 * k, weight: .semibold)
-        let s = NSAttributedString(string: label, attributes: [.font: f, .foregroundColor: Theme.dark.fg, .kern: -0.13 * k])
-        let sx = L.labelAlign == .center ? L.labelX * k + (L.labelWidth * k - s.size().width) / 2 : L.labelX * k
-        s.draw(at: NSPoint(x: o.x + sx, y: o.y + L.labelMidY * k - s.size().height / 2))
-        if PillLayout.showTimer {
-            let t = NSAttributedString(string: "3:07", attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: L.timerFontSize * k, weight: .medium),
-                                                                   .foregroundColor: Theme.dark.fg2])
-            let tx = L.timerAlign == .center ? L.timerX * k + (L.timerWidth * k - t.size().width) / 2
-                                             : L.timerX * k + L.timerWidth * k - t.size().width
-            t.draw(at: NSPoint(x: o.x + tx, y: o.y + L.timerMidY * k - t.size().height / 2))
+        if let d = demo {
+            next = isMuted ? .muted : d.phase
+        } else {
+            if let a = (try? FileManager.default.attributesOfItem(atPath: acceptedURL.path))?[.modificationDate] as? Date,
+               a > sayingAt, !thinking {
+                thinking = true; thinkingSince = a
+            }
+            // a reply that only went to the chat never produces 'saying'; do not stay stuck
+            if thinking && now.timeIntervalSince(thinkingSince) > 45 { thinking = false; sayingAt = now }
+            if isMuted { next = .muted }          // `call mute` also stops the ears: Muted wins over Mic off
+            else if micOff { next = .off }
+            else if speaking { next = .claude }
+            else if now.timeIntervalSince(lastPartial) < 1.5 { next = .you }
+            else if thinking || !permits.isEmpty { next = .thinking }   // a permission request waits
+            else { next = .listening }
         }
-        if muted { GlassButton.paint(in: sc(L.badgeRect), symbol: "mic.slash.fill", theme: .dark, tint: GlassButton.red, pressed: false) }
-    }
-    if hovered || pending > 0 || expanded {
-        GlassButton.paint(in: sc(L.expandRect), symbol: expanded ? "chevron.up" : "chevron.down", theme: .dark,
-                          tint: pending > 0 ? GlassButton.amber : nil, pressed: false)
+        view.muted = next == .muted
+        // happy: one loop when a reply has ended and the call has gone quiet again
+        if demo == nil, next == .listening, saidAt > happyFor,
+           now.timeIntervalSince(saidAt) >= 0.5, now.timeIntervalSince(saidAt) < 3 {
+            happyFor = saidAt
+            happyUntil = now.addingTimeInterval(24.0 / Sprites.shared.fps)
+        }
+        var gs = next.god
+        if next == .listening && (now < happyUntil || demo?.happy == true) { gs = .happy }
+        view.god.state = gs
+        view.god.dim = next == .off
+        let text: String, spoken: Bool
+        if let l = demo?.line, !l.isEmpty { text = l; spoken = true }
+        else if next == .claude, !line.isEmpty { text = line; spoken = true }
+        else { text = next.label; spoken = false }
+        view.caption.set(text, spoken: spoken, animated: true)
     }
 }
+
+enum PillTimer {
+    /// The call timer is off by default: the call runs all day. CALLPILL_TIMER=on shows it.
+    static let on = env["CALLPILL_TIMER"] == "on"
+}
+
+// MARK: - Snapshot mode: every state, light and dark, into one PNG (no window)
 
 func snapshot(to out: String) {
-    guard let r = OrbRenderer() else { print("no Metal"); return }
-    let scale: CGFloat = 3, pad: CGFloat = 16, big: CGFloat = 120
-    let S = PillView.layout.size
-    let cases: [(Phase, Float?)] = [(.listening, 0.1), (.you, 0.8), (.thinking, nil), (.claude, nil), (.off, nil)]
-    // Extra row: hovered, muted, muted + hovered at 1x, then hovered at max and muted at min scale.
-    let extras: [(Phase, Bool, Bool, CGFloat)] = [(.listening, true, false, 1), (.muted, false, true, 1), (.muted, true, true, 1),
-                                                  (.claude, true, false, PillView.maxScale), (.muted, false, true, PillView.minScale)]
-    let rowH = max(S.height, big) + pad
-    let extraW = extras.reduce(pad) { $0 + S.width * $1.3 + pad }
-    let extraH = S.height * PillView.maxScale + pad
-    // Waiting row: card with the amber chevron, card hovered + expanded, and the list itself.
-    let items = PendingItem.load()
-    let LS = PendingListView.size(for: items.count, k: 1)
-    let waitH = max(S.height, S.height + 8 + LS.height) + pad
-    let waitW = pad + S.width + pad + max(S.width, LS.width) + pad
-    // Permission row (bottom): the card in Thinking with the permission panel grown to its left,
-    // once for a Bash command with two more queued, once for an MCP call. Reads
-    // CALLPILL_PERMIT_DIR when it holds requests, otherwise uses built-in fakes.
-    let now = Date()
-    var permits = PermitItem.load(from: PermitItem.dir, now: now)
-    if permits.isEmpty {
-        permits = [
-            PermitItem(id: "a1", sessionId: "s1", title: "Call pill: answer permission prompts", cwd: "~/.claude",
-                       tool: "Bash", summary: "Rebuild the pill and relaunch it\nswiftc -O pill.swift -o pill -framework Metal -framework MetalKit && cp pill CallPill.app/Contents/MacOS/CallPill && codesign -f -s - -i dev.cludegods.callpill CallPill.app",
-                       mono: true, pid: 0, created: now),
-            PermitItem(id: "a2", sessionId: "s2", title: "", cwd: "~/Projects/example", tool: "Edit",
-                       summary: "~/Projects/example/README.md", mono: true, pid: 0, created: now),
-            PermitItem(id: "a3", sessionId: "s3", title: "", cwd: "/tmp", tool: "Write", summary: "/tmp/x", mono: true, pid: 0, created: now),
-        ]
+    let px: CGFloat = 2, pad: CGFloat = 28, gap: CGFloat = 22
+    struct Placed { let view: NSView; let x: CGFloat; let y: CGFloat; let god: (GodView, Int)? }   // y from the top
+    var placed: [Placed] = []
+    var bands: [(y: CGFloat, h: CGFloat, dark: Bool)] = []
+
+    func card(_ dark: Bool, _ phase: Phase, line: String? = nil, compact: Bool = false, hover: Bool = false,
+              pending: Int = 0, expanded: Bool = false, god: GodState? = nil, kind: String = "colleague",
+              name: String = "Claude") -> CardView {
+        let v = CardView(frame: NSRect(origin: .zero, size: CardGeo(compact: compact).size))
+        v.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        v.applyTheme()
+        v.configure(k: 1, compact: compact)
+        v.name = name
+        v.muted = phase == .muted
+        v.pendingCount = pending
+        v.expanded = expanded
+        v.forceHover = hover
+        v.timerText = PillTimer.on ? "3:07" : nil
+        v.caption.set(line ?? phase.label, spoken: line != nil, animated: false)
+        v.god.kind = kind
+        v.god.state = god ?? phase.god
+        v.god.dim = phase == .off
+        return v
     }
-    let mcp = PermitItem(id: "b1", sessionId: "s4", title: "Weekly newsletter", cwd: "", tool: "mcp__example__schedule_post",
-                         summary: "schedule_post (example)\npost_id: 8f2c1a\nscheduled_at: 2026-11-02T12:00:00Z", mono: false, pid: 0, created: now)
-    let P1 = PermitView.size(for: permits[0], k: 1), P2 = PermitView.size(for: mcp, k: 1)
-    let permitH = max(P1.height, P2.height, S.height) + pad
-    let permitW = pad + P1.width + 8 + S.width + pad + P2.width + 8 + S.width + pad
-    let H0 = rowH * CGFloat(cases.count) + pad + extraH + waitH
-    let W = max(pad + S.width + pad + big + pad, extraW, waitW, permitW), H = H0 + permitH
-    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * scale), pixelsHigh: Int(H * scale),
+    func themed<V: NSView>(_ v: V, _ dark: Bool) -> V { v.appearance = NSAppearance(named: dark ? .darkAqua : .aqua); return v }
+
+    let now = Date()
+    let bash = PermitItem(id: "a1", sessionId: "s1", title: "Fix the failing CI build", cwd: "~/code/app", tool: "Bash",
+                          short: "Push the release branch", summary: "Push the release branch\ngit push origin release/v0.4",
+                          mono: true, pid: 0, created: now)
+    let edit = PermitItem(id: "a2", sessionId: "s2", title: "Release notes", cwd: "~/code/app", tool: "Edit", short: "edit CHANGELOG.md",
+                          summary: home.path + "/code/app/CHANGELOG.md", mono: true, pid: 0, created: now)
+    let mcp = PermitItem(id: "b1", sessionId: "s4", title: "Weekly posts", cwd: "", tool: "mcp__social__schedule_draft",
+                         short: "schedule draft", summary: "schedule_draft (social)\ndraft_id: 8f2c1a\nscheduled_at: 2026-11-02T12:00:00Z",
+                         mono: false, pid: 0, created: now)
+    var items = PendingItem.load()
+    if items.isEmpty {
+        items = [PendingItem(sessionId: "p1", title: "Fix the failing CI build", message: "Claude needs your permission to use Bash",
+                             link: "claude://claude.ai/epitaxy/local_0000", at: now.addingTimeInterval(-120)),
+                 PendingItem(sessionId: "p2", title: "Release notes v2.3", message: "Claude is waiting for your input",
+                             link: "claude://claude.ai/epitaxy/local_0001", at: now.addingTimeInterval(-900))]
+    }
+
+    var y = pad
+    var maxW: CGFloat = 0
+    for dark in [false, true] {
+        let bandTop = y - pad / 2
+        // row 1: the states
+        var x = pad
+        var rowH: CGFloat = 0
+        let row: [CardView] = [
+            card(dark, .listening), card(dark, .claude, line: "Hmm, let me look. Reading the CI log."),
+            card(dark, .you), card(dark, .thinking), card(dark, .muted), card(dark, .listening, god: .happy),
+            card(dark, .listening, compact: true), card(dark, .thinking, compact: true, hover: true, pending: 2),
+        ]
+        for v in row {
+            placed.append(Placed(view: v, x: x, y: y, god: (v.god, 5)))
+            x += v.frame.width + gap
+            rowH = max(rowH, v.frame.height)
+        }
+        maxW = max(maxW, x)
+        y += rowH + gap
+        // row 2: permission cards left of the card, then the waiting list under a hovered card
+        x = pad
+        rowH = 0
+        for (it, more, result) in [(bash, 2, nil), (dark ? mcp : edit, 0, dark ? false : true)] as [(PermitItem, Int, Bool?)] {
+            let pv = themed(PermitView(frame: NSRect(origin: .zero, size: PermitView.size(for: it, k: 1))), dark)
+            pv.theme = dark ? .dark : .light
+            pv.item = it; pv.more = more; pv.result = result
+            placed.append(Placed(view: pv, x: x, y: y, god: nil))
+            let c = card(dark, .thinking, name: it.tool == "Bash" ? "Claude" : "Scribe")
+            if it.tool != "Bash" { c.god.kind = "scribe" }
+            placed.append(Placed(view: c, x: x + pv.frame.width + 10, y: y, god: (c.god, 9)))
+            x += pv.frame.width + 10 + c.frame.width + gap
+            rowH = max(rowH, pv.frame.height, c.frame.height)
+        }
+        let c = card(dark, .listening, hover: true, pending: items.count, expanded: true)
+        let lv = themed(PendingListView(frame: NSRect(origin: .zero, size: PendingListView.size(for: items.count, k: 1))), dark)
+        lv.theme = dark ? .dark : .light
+        lv.items = items
+        let lx = x, cx = lx + lv.frame.width - c.frame.width
+        placed.append(Placed(view: c, x: cx, y: y, god: (c.god, 2)))
+        placed.append(Placed(view: lv, x: lx, y: y + c.frame.height + 8, god: nil))
+        x += lv.frame.width + gap
+        rowH = max(rowH, c.frame.height + 8 + lv.frame.height)
+        maxW = max(maxW, x)
+        y += rowH + pad
+        bands.append((bandTop, y - bandTop - pad / 2, dark))
+    }
+    let W = maxW + pad - gap, H = y
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * px), pixelsHigh: Int(H * px),
                                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     rep.size = NSSize(width: W, height: H)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     let ctx = NSGraphicsContext.current!.cgContext
-    NSColor(srgbRed: 0x0c / 255.0, green: 0x0f / 255.0, blue: 0x1e / 255.0, alpha: 1).setFill()   // prototype wall base
-    NSRect(x: 0, y: 0, width: W, height: H).fill()
-    var px0 = pad
-    for (it, more, PS) in [(permits[0], permits.count - 1, P1), (mcp, 0, P2)] {
-        let top = permitH - pad
-        let pr = NSRect(x: px0, y: top - PS.height, width: PS.width, height: PS.height)
-        let body = NSBezierPath(roundedRect: pr, xRadius: 16, yRadius: 16)
-        NSColor(srgbRed: 30 / 255.0, green: 30 / 255.0, blue: 36 / 255.0, alpha: 0.9).setFill(); body.fill()
-        NSColor(white: 1, alpha: 0.14).setStroke(); body.lineWidth = 0.5; body.stroke()
-        PermitView.paint(in: pr, item: it, more: more, theme: .dark, k: 1, pressed: nil)
-        let m = OrbModel(); m.snapTo(.thinking, light: 0); for _ in 0..<240 { m.advance(1.0 / 60, mic: nil) }
-        drawCard(ctx, r, m, at: NSPoint(x: px0 + PS.width + 8, y: top - S.height), k: 1, px: scale,
-                 label: Phase.thinking.label, hovered: false, muted: false)
-        px0 += PS.width + 8 + S.width + pad
+    // the film's soft background, light band then dark band
+    for (i, b) in bands.enumerated() {
+        let top = i == 0 ? 0 : b.y, bottom = i == bands.count - 1 ? H : b.y + b.h
+        let r = NSRect(x: 0, y: H - bottom, width: W, height: bottom - top)
+        (b.dark ? rgb(0x2a2b35) : rgb(0xeceef7)).setFill()
+        r.fill()
     }
-    ctx.saveGState()
-    ctx.translateBy(x: 0, y: permitH)
-    func model(_ p: Phase, _ mic: Float?) -> OrbModel {
-        let m = OrbModel()
-        m.snapTo(p, light: 0)
-        for _ in 0..<240 { m.advance(1.0 / 60, mic: mic) }
-        return m
-    }
-    for (i, cfg) in cases.enumerated() {
-        let m = model(cfg.0, cfg.1)
-        let y0 = H0 - pad - rowH * CGFloat(i + 1) + pad
-        let py = y0 + (big - S.height) / 2
-        drawCard(ctx, r, m, at: NSPoint(x: pad, y: py), k: 1, px: scale, label: cfg.0.label, hovered: false, muted: false)
-        if let img = renderOrb(r, m, px: Int(big * scale), radius: 0.58) {
-            ctx.draw(img, in: CGRect(x: pad + S.width + pad, y: y0, width: big, height: big))
+    for p in placed {
+        let v = p.view
+        let rr = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(v.frame.width * px), pixelsHigh: Int(v.frame.height * px),
+                                  bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                  colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        rr.size = v.bounds.size
+        v.cacheDisplay(in: v.bounds, to: rr)
+        let dst = CGRect(x: p.x, y: H - p.y - v.frame.height, width: v.frame.width, height: v.frame.height)
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -10), blur: 30, color: NSColor(white: 0, alpha: 0.16).cgColor)
+        if let img = rr.cgImage { ctx.draw(img, in: dst) }
+        ctx.restoreGState()
+        if let (g, i) = p.god, let strip = g.image, let f = Sprites.frame(strip, i) {
+            let sr = g.spriteRect
+            let gr = NSRect(x: g.frame.minX + sr.minX, y: g.frame.minY + sr.minY, width: sr.width, height: sr.height)
+            ctx.saveGState()
+            ctx.setAlpha(g.dim ? 0.5 : 1)
+            ctx.interpolationQuality = .high
+            ctx.draw(f, in: CGRect(x: p.x + gr.minX, y: H - p.y - gr.maxY, width: gr.width, height: gr.height))
+            ctx.restoreGState()
         }
     }
-    var x = pad
-    for e in extras {
-        drawCard(ctx, r, model(e.0, nil), at: NSPoint(x: x, y: waitH + extraH - S.height * e.3), k: e.3, px: scale,
-                 label: e.0.label, hovered: e.1, muted: e.2)
-        x += S.width * e.3 + pad
-    }
-    let wTop = waitH - pad
-    drawCard(ctx, r, model(.listening, 0.1), at: NSPoint(x: pad, y: wTop - S.height), k: 1, px: scale,
-             label: Phase.listening.label, hovered: false, muted: false, pending: items.count)
-    let x2 = pad + S.width + pad
-    let lx = x2 + S.width - LS.width   // right edges aligned, as live
-    let cardX = max(x2, x2 + LS.width - S.width)
-    drawCard(ctx, r, model(.listening, 0.1), at: NSPoint(x: cardX, y: wTop - S.height), k: 1, px: scale,
-             label: Phase.listening.label, hovered: true, muted: false, pending: items.count, expanded: true)
-    let lr = NSRect(x: max(x2, lx), y: wTop - S.height - 8 - LS.height, width: LS.width, height: LS.height)
-    let body = NSBezierPath(roundedRect: lr, xRadius: 16, yRadius: 16)
-    NSColor(srgbRed: 30 / 255.0, green: 30 / 255.0, blue: 36 / 255.0, alpha: 0.9).setFill(); body.fill()
-    NSColor(white: 1, alpha: 0.14).setStroke(); body.lineWidth = 0.5; body.stroke()
-    PendingListView.paint(in: lr, items: items, theme: .dark, k: 1, pressed: nil, now: Date())
-    ctx.restoreGState()
     NSGraphicsContext.restoreGraphicsState()
     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
 }
 
 let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
+    _ = NSApplication.shared
     snapshot(to: args[i + 1])
     exit(0)
 }
