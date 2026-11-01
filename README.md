@@ -21,11 +21,7 @@ Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Voic
 
 <div align="center">
 
-<table><tr><td>
-
 <img src="docs/media/hero.gif" alt="CludeGods: the app, a voice call, approving with a click, and a worker checking in" width="100%" />
-
-</td></tr></table>
 
 **[Watch the full launch film (67 s, silent)](https://github.com/AKamaly/CludeGods/releases/download/v0.1.0/cludegods-film-v1-silent.mp4)** · [Release v0.1.0](https://github.com/AKamaly/CludeGods/releases/tag/v0.1.0)
 
