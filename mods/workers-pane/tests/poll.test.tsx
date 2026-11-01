@@ -185,7 +185,8 @@ test('the open-workers flag opens the pane; with {"outbox": key} it opens that o
     props: { title: 'Workers', isFocused: true, bodyColumns: 46, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   })
   expect(await ui.find({ key: 'outbox-sales' })).toBeDefined()
-  expect((await ui.find({ key: 'card-sales' }))?.props.borderColor).toBe('#c96442')
+  expect((await ui.find({ key: 'card-sales' }))?.props.borderColor).toBe('#3b82f6') // its god's colour (blue: Scribe)
+  expect((await ui.find({ key: 'outboxtab-sales' }))?.props.dimColor).toBe(false)
   await ui.unmount()
 })
 
@@ -225,4 +226,82 @@ test('a worker created here gets the god, voice and tools it was made with, once
   await start($)
   await settle()
   expect(w.writes.filter(x => x.path.endsWith('/workers.json')).length).toBe(1)
+})
+
+// Every 3h, 9:00 to 18:00 Riyadh (UTC+3), Monday to Friday.
+const EVERY = {
+  workers: [
+    { key: 'scout', name: 'Scout', session: 'local_scout-7', transcript: 'scout-cli.jsonl', god: 'scout',
+      charter: 'Watch the repo. Drafts only.', schedule: { days: 'mon-fri', every: '3h', from: '09:00', to: '18:00', tz: 'Asia/Riyadh' } },
+  ],
+}
+const riyadh = (hhmm: string) => Date.parse(`2026-11-02T${hhmm}:00+03:00`)
+
+test('an every-3h schedule claims each slot once, as wakes/<key>-<date>-<HHMM>', async ($, on) => {
+  const w = fresh({ registry: EVERY, now: riyadh('09:05') })
+  const { sends } = world(on, w)
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(1)
+  expect(sends[0]).toMatch(/^Scheduled run \(2026-11-02 09:00 Asia\/Riyadh\): run your charter now/)
+  expect(sends[0]).toContain('Watch the repo. Drafts only.')
+  expect([...w.claimed]).toEqual([`${CALL}/wakes/scout-2026-11-02-0900`])
+  // Later in the same slot: nothing more.
+  w.now = riyadh('11:59')
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(1)
+  // The next slot.
+  w.now = riyadh('12:01')
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(2)
+  expect(sends[1]).toMatch(/^Scheduled run \(2026-11-02 12:00 Asia\/Riyadh\)/)
+  expect([...w.claimed]).toEqual([`${CALL}/wakes/scout-2026-11-02-0900`, `${CALL}/wakes/scout-2026-11-02-1200`])
+  // Past the window's last slot and its grace: nothing.
+  w.now = riyadh('21:30')
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(2)
+})
+
+test('a slot another session already claimed is not woken again', async ($, on) => {
+  const w = fresh({ registry: EVERY, now: riyadh('12:02'), claimed: new Set([`${CALL}/wakes/scout-2026-11-02-1200`]) })
+  const { sends, runs } = world(on, w)
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(0)
+  expect(runs.filter(r => r[0] === '/bin/mkdir' && r[1] !== '-p')).toEqual([['/bin/mkdir', `${CALL}/wakes/scout-2026-11-02-1200`]])
+})
+
+test('back after hours away: one wake for the latest slot, none for the slots it missed', async ($, on) => {
+  const w = fresh({ registry: EVERY, now: riyadh('16:10') })
+  const { sends } = world(on, w)
+  await start($)
+  await settle()
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(1)
+  expect(sends[0]).toMatch(/^Scheduled run \(2026-11-02 15:00 Asia\/Riyadh\)/)
+  expect([...w.claimed]).toEqual([`${CALL}/wakes/scout-2026-11-02-1500`])
+})
+
+test('a paused interval worker is not woken; an undelivered slot retries while it is still due', async ($, on) => {
+  const w = fresh({ registry: { workers: [{ ...EVERY.workers[0], paused: true }] }, now: riyadh('09:05') })
+  const { sends } = world(on, w)
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(0)
+  w.registry = EVERY
+  w.deliver = false
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(1)
+  expect(w.claimed.size).toBe(0) // given back
+  w.deliver = true
+  w.now = riyadh('09:16')
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(2)
+  expect([...w.claimed]).toEqual([`${CALL}/wakes/scout-2026-11-02-0900`])
 })

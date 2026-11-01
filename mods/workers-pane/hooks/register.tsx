@@ -3,13 +3,31 @@ import type { Register, RenderChildren, Timer } from 'claude-code'
 
 import { GOD_KINDS, godSvg } from './gods'
 import type { GodKind } from './gods'
+import {
+  ALL_DAY,
+  END_OF_DAY,
+  EVERY_HOURS,
+  chipLabel,
+  daysLabel,
+  dueSlot,
+  editSchedule,
+  fromOptions,
+  scheduleMode,
+  scheduleSentence,
+  timeOptions,
+  toOptions,
+} from './schedule'
+import type { ScheduleChange } from './schedule'
 import type {
   ActivityStep,
   Decision,
+  EditValue,
   FormState,
   OutboxItem,
   Panel,
   PendingCreate,
+  PendingEdit,
+  PendingEdits,
   RegistryWorker,
   Schedule,
   SentTask,
@@ -17,12 +35,36 @@ import type {
   WorkerStatus,
 } from '../types'
 
+// The schedule's pure functions live in ./schedule; these names stay importable from here.
+export {
+  chipLabel,
+  daysLabel,
+  dueDate,
+  dueSlot,
+  editSchedule,
+  intervalSlots,
+  scheduleDays,
+  scheduleLabel,
+  scheduleSentence,
+} from './schedule'
+
+// The pane draws one card per worker (the launch film's card) while it is narrow; once
+// it is expanded to WIDE_AT columns or more, a list of compact rows beside the selected
+// worker's detail. Either way the selected worker's detail has four tabs: Overview,
+// Outbox, Activity and Settings, and the selected worker's god colours its card or row,
+// badges, chips, tabs and the header's dot (amber stays "needs your yes", green
+// "Working", red the destructive Delete).
+//
 // The standing worker chats come from the call session's registry, read on every
 // poll. `session` is the app's chat id (what SendMessage and the claude:// link
 // take); `transcript` is the CLI transcript the live status and the activity view
 // read. The call session adds workers; the pane edits an entry's own settings (name,
 // god, voice, hours, tools, paused, spaces) key by key, keeping every key it does not
 // know. The model is picked inside the chat, so the pane neither shows nor switches one.
+//
+// Every pick in a worker's settings is drawn at once from the `edits` atom, then written
+// through one queue, so two quick clicks never interleave their read-modify-writes and
+// the last click is what the registry ends with.
 //
 // Every path hangs off $HOME, read through `$.env.get`. The call session opens the
 // pane from the shell with `touch ~/.voicemode/call/open-workers`, so the owner is
@@ -31,9 +73,10 @@ import type {
 // Proactive workers. A worker with a `schedule` is woken by this pane: the only local
 // thing that can put a message into an existing desktop chat is a mod's
 // `$.session.send` (launchd cannot reach a chat, a scheduled task starts a new one).
-// Each wake claims `wakes/<key>-<date>` with an atomic mkdir first, so however many
-// sessions run this poll, a worker is woken once per scheduled day. A paused worker is
-// not woken. A worker appends what it finds and drafts to `outbox/<key>.jsonl`; an
+// A schedule is once a day or every N hours (both shapes in ./schedule). Each wake
+// claims its slot with an atomic mkdir first, `wakes/<key>-<date>` once a day (as it
+// always has) or `wakes/<key>-<date>-<HHMM>` per interval slot, so however many sessions
+// run this poll, a slot wakes the worker once. A paused worker is not woken. A worker appends what it finds and drafts to `outbox/<key>.jsonl`; an
 // Approve or Decline here is recorded in `outbox/<key>.decisions.jsonl` and told to the
 // worker's chat. `outboxSay` speaks one heads-up per new item if a call is live.
 
@@ -108,12 +151,14 @@ const WORKING_WINDOW_MS = 10_000 // a transcript written this recently means a t
 const POLL_MS = 3_000
 
 const CONFIRM_MS = 5_000 // how long an armed Delete waits for its second press
+const EDIT_TTL_MS = 15_000 // a picked setting no write settled is dropped after this (a reload mid-write)
+// From this many body columns the pane draws the list beside the selected worker's
+// detail; under it, one card per worker. The docked pane opens at COLUMNS.
+export const WIDE_AT = 80
 
 // The film's palette (claude-ui.js). Fills are drawn as tints of these, so a card
 // reads the same on the app's light and dark themes; text keeps the theme's own colour.
 const ACCENT = '#c96442'
-const ACCENT_SOFT = '#fbe9e5'
-const SELECTED_BORDER = '#e6c4b6'
 const SUB = '#73726c'
 const GREEN = '#2f8f5b'
 const AMBER = '#b7791f'
@@ -121,9 +166,27 @@ const RED = '#c2412d'
 const BLUE = '#3b6fd8'
 
 /** A hex colour at a low alpha, for a tint behind a card, a chip or a row. */
-function tint(hex: string, alpha: number): string {
+export function tint(hex: string, alpha: number): string {
   const a = Math.round(Math.max(0, Math.min(1, alpha)) * 255).toString(16).padStart(2, '0')
   return `${hex}${a}`
+}
+
+// Each god's accent: a mid shade between its body colours (SPEC section 2) that reads at
+// about 4:1 on the app's light page and on its dark one alike, so a border, a badge's
+// text or an icon in it holds up in both themes. Fills are tints of it over the theme.
+export const GOD_ACCENT: Record<GodKind, string> = {
+  colleague: '#6b78e0', // between #3d4aa0 and #b9c6ff
+  research: '#9061f9', // between #6d28d9 and #a78bfa
+  scribe: '#3b82f6', // between #2563eb and #60a5fa
+  scout: '#578f0e', // between #65a30d and a deeper lime, for the light theme
+  sales: '#ea580c',
+  herald: '#b47a06', // between #ca8a04 and a deeper gold, for the light theme
+}
+
+/** One worker's colours: its god's accent, and the tints drawn from it. */
+export function themeOf(kind: GodKind): { accent: string; soft: string; wash: string; hover: string } {
+  const accent = GOD_ACCENT[kind]
+  return { accent, soft: tint(accent, 0.14), wash: tint(accent, 0.05), hover: tint(accent, 0.5) }
 }
 
 // Thin line icons: paths from Lucide (https://lucide.dev, ISC licence), drawn at a
@@ -158,9 +221,6 @@ function iconSvg(name: IconName, color: string, size: number): string {
 const GOD_LABEL: Record<GodKind, string> = {
   colleague: 'Colleague', research: 'Research', scribe: 'Scribe', scout: 'Scout', sales: 'Sales', herald: 'Herald',
 }
-const GOD_COLOUR: Record<GodKind, string> = {
-  colleague: '#b9c6ff', research: '#a78bfa', scribe: '#60a5fa', scout: '#a3e635', sales: '#fb923c', herald: '#facc15',
-}
 // The v1 colour preset written beside `god`, for readers that only know `avatar`.
 const GOD_AVATAR: Record<GodKind, string> = {
   colleague: 'blue', research: 'violet', scribe: 'blue', scout: 'lime', sales: 'orange', herald: 'gold',
@@ -185,8 +245,17 @@ const DAY_PRESETS: readonly { value: string; label: string }[] = [
   { value: 'daily', label: 'Every day' },
   { value: 'mon,wed,fri', label: 'Mon, Wed, Fri' },
   { value: 'sat,sun', label: 'Weekends' },
-  { value: 'none', label: 'No schedule' },
 ]
+
+/** The Hours control's modes: no schedule, once a day, or every N hours. */
+const MODES: readonly { value: string; label: string }[] = [
+  { value: 'off', label: 'Manual, no schedule' },
+  { value: 'daily', label: 'Once a day' },
+  ...EVERY_HOURS.map(n => ({ value: `${n}h`, label: `Every ${n}h` })),
+]
+
+const TAB_LABEL: Record<Panel, string> = { overview: 'Overview', outbox: 'Outbox', activity: 'Activity', settings: 'Settings' }
+const TABS: readonly Panel[] = ['overview', 'outbox', 'activity', 'settings']
 
 const NAME_RE = /^[\p{L}\p{N} ]{1,24}$/u
 
@@ -206,6 +275,9 @@ const panels = atom({ plugin: 'workers-pane', key: 'panels' } as const, {} as Re
 const deciding = atom({ plugin: 'workers-pane', key: 'deciding' } as const, {}, { shape: 'deciding-1' })
 const pending = atom({ plugin: 'workers-pane', key: 'pending' } as const, {} as Record<string, PendingCreate>, {
   shape: 'pending-1',
+})
+const edits = atom({ plugin: 'workers-pane', key: 'edits' } as const, {} as PendingEdits, {
+  shape: 'edits-1',
 })
 
 type Snapshot = {
@@ -687,90 +759,6 @@ export function declineText(item: Pick<OutboxItem, 'id' | 'title'>): string {
   return `Declined: ${item.title} (${item.id}). Don't do it.`
 }
 
-const DOW = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
-
-/** The weekdays (0 = Sunday) a schedule's `days` names; ranges may wrap (fri-mon). */
-export function scheduleDays(days: string): Set<number> {
-  const s = days.trim().toLowerCase()
-  if (s === 'daily' || s === 'every day' || s === '*') return new Set([0, 1, 2, 3, 4, 5, 6])
-  const out = new Set<number>()
-  for (const part of s.split(',')) {
-    const [a, b] = part.split('-').map(x => DOW.indexOf(x.trim().slice(0, 3)))
-    if (a === undefined || a < 0) continue
-    if (b === undefined) {
-      out.add(a)
-      continue
-    }
-    if (b < 0) continue
-    for (let d = a; ; d = (d + 1) % 7) {
-      out.add(d)
-      if (d === b) break
-    }
-  }
-  return out
-}
-
-/** The wall clock in `tz` at `ms`: its date, weekday and minute of the day. */
-function zoned(ms: number, tz: string): { date: string; dow: number; minutes: number } | undefined {
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-    }).formatToParts(new Date(ms))
-    const get = (t: string) => parts.find(p => p.type === t)?.value ?? ''
-    return {
-      date: `${get('year')}-${get('month')}-${get('day')}`,
-      dow: DOW.indexOf(get('weekday').toLowerCase().slice(0, 3)),
-      minutes: Number(get('hour')) * 60 + Number(get('minute')),
-    }
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * The local date of today's wake if it is due at `ms` (a scheduled day, at or past
- * its time), else undefined. A wake missed while the app was closed or the Mac
- * asleep still fires later that day; a day missed entirely is skipped, not replayed.
- */
-export function dueDate(schedule: Schedule, ms: number): string | undefined {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(schedule.time.trim())
-  if (!m) return undefined
-  const z = zoned(ms, schedule.tz)
-  if (!z || !scheduleDays(schedule.days).has(z.dow)) return undefined
-  return z.minutes >= Number(m[1]) * 60 + Number(m[2]) ? z.date : undefined
-}
-
-/** A schedule's days, as the film writes them: "Mon to Fri", "Daily", "Mon, Wed, Fri". */
-export function daysLabel(days: string): string {
-  const s = days.trim().toLowerCase()
-  if (s === 'daily' || s === 'every day' || s === '*') return 'Daily'
-  const cap = (d: string) => d.trim().charAt(0).toUpperCase() + d.trim().slice(1, 3).toLowerCase()
-  return s
-    .split(',')
-    .map(part => {
-      const [a, b] = part.split('-')
-      return b === undefined ? cap(a ?? '') : `${cap(a ?? '')} to ${cap(b)}`
-    })
-    .join(', ')
-}
-
-/** "9:00" from "09:00". */
-function shortTime(time: string): string {
-  return time.trim().replace(/^0(\d)/, '$1')
-}
-
-/** The schedule chip: "Mon to Fri · 9:00". */
-export function scheduleLabel(schedule: Schedule): string {
-  return `${daysLabel(schedule.days)} · ${shortTime(schedule.time)}`
-}
-
-/** The chip's text: the schedule, "Paused" while paused, "Manual" with none. */
-export function chipLabel(w: Pick<RegistryWorker, 'schedule' | 'paused'>): string {
-  if (w.paused === true) return 'Paused'
-  return w.schedule ? scheduleLabel(w.schedule) : 'Manual'
-}
-
 /** The message that wakes a worker to run its charter; it carries the whole charter. */
 export function wakeText(w: RegistryWorker, why: string): string {
   return [
@@ -884,19 +872,57 @@ function randomId(): string {
   }
 }
 
-/** Half-hour slots for the Hours picker, plus the current time when it is off the grid. */
-function timeOptions(current: string | undefined): { value: string; label: string }[] {
-  const out: { value: string; label: string }[] = []
-  for (let m = 0; m < 24 * 60; m += 30) {
-    const v = `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
-    out.push({ value: v, label: shortTime(v) })
+/**
+ * A worker as the pane draws it: its registry entry with the settings picked in the
+ * pane and not yet written laid over it (a null value removes that key).
+ */
+export function withEdits(w: RegistryWorker, picked: Readonly<Record<string, PendingEdit>> | undefined): RegistryWorker {
+  if (!picked || Object.keys(picked).length === 0) return w
+  const out: Record<string, unknown> = { ...w }
+  for (const [k, e] of Object.entries(picked)) {
+    if (e.value === null) delete out[k]
+    else out[k] = e.value
   }
-  if (current && !out.some(o => o.value === current)) out.unshift({ value: current, label: shortTime(current) })
-  return out
+  return out as RegistryWorker
+}
+
+/** Drops these fields of one worker's picked settings where `isMine` holds; the same object when nothing goes. */
+function dropEdits(old: PendingEdits, key: string, fields: readonly string[], isMine: (field: string) => boolean): PendingEdits {
+  const entry = old[key]
+  if (!entry) return old
+  const left = { ...entry }
+  let isChanged = false
+  for (const f of fields) {
+    if (f in left && isMine(f)) {
+      delete left[f]
+      isChanged = true
+    }
+  }
+  if (!isChanged) return old
+  return Object.keys(left).length === 0 ? withoutKey(old, key) : { ...old, [key]: left }
+}
+
+/** The pane's width in cells: its body's, else the surface's, else what it opens at. */
+export function paneColumns(props: { bodyColumns?: number }, viewport?: { columns?: number }): number {
+  if (typeof props.bodyColumns === 'number' && props.bodyColumns > 0) return props.bodyColumns
+  if (viewport && typeof viewport.columns === 'number' && viewport.columns > 0) return viewport.columns
+  return COLUMNS
 }
 
 export const register: Register = on => {
   let timer: Timer | undefined
+  // Every write of workers.json from this pane runs in turn on this chain: a settings
+  // pick, a delete, a create's fill-in. Each one reads the file afresh, so two never
+  // interleave their read-modify-write, and the last click is the last write.
+  let chain: Promise<unknown> = Promise.resolve()
+  function serial<T>(job: () => Promise<T>): Promise<T> {
+    const run = chain.then(job)
+    chain = run.catch(() => undefined)
+    return run
+  }
+  // The newest pick per "<worker key>\n<field>": a queued write whose pick was overtaken
+  // by a later one for the same field skips that field (last click wins).
+  const ticket = { n: 0, latest: new Map<string, number>() }
   // What is typed per worker, so a status redraw does not wipe a half-typed task or name.
   const drafts = new Map<string, string>()
   const names = new Map<string, string>()
@@ -914,6 +940,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'workers', description: 'Show the Workers pane' })
     void $.ui.open({ id: PANE, title: 'Workers', columns: COLUMNS })
+    // Picks from before a reload have no write left to settle them.
+    await update($, edits, old => (Object.keys(old).length === 0 ? old : {}))
 
     timer?.cancel()
     let openedAt = await $.clock.now()
@@ -937,6 +965,16 @@ export const register: Register = on => {
         // no flag yet
       }
       const snap = await snapshot($ as unknown as Host, p, cache, now)
+      // A pick whose write never settled (the module reloaded mid-write) gives way to
+      // the registry after EDIT_TTL_MS.
+      await update($, edits, old => {
+        let out = old
+        for (const [key, fields] of Object.entries(old)) {
+          const stale = Object.entries(fields).filter(([, v]) => now - v.at > EDIT_TTL_MS).map(([f]) => f)
+          if (stale.length > 0) out = dropEdits(out, key, stale, () => true)
+        }
+        return out
+      })
       // A delete is done once the worker has left the registry.
       if (!snap.error) {
         await update($, removing, old => {
@@ -961,10 +999,10 @@ export const register: Register = on => {
       }
     }
 
-    // Wakes each scheduled, unpaused worker once per due day. `checked` spares the
-    // mkdir on every poll; the mkdir is what makes it once across sessions. A wake
-    // that is not delivered (the chat not running yet) gives the claim back and
-    // retries later.
+    // Wakes each scheduled, unpaused worker once per due slot (a day, or an interval's
+    // slot). `checked` spares the mkdir on every poll; the mkdir is what makes it once
+    // across sessions. A wake that is not delivered (the chat not running yet) gives the
+    // claim back and retries later, while its slot is still due.
     const wakeDue = async (snap: Snapshot, now: number, p: Paths) => {
       const self = await $.session.id().catch(() => '')
       for (const w of snap.workers) {
@@ -972,16 +1010,16 @@ export const register: Register = on => {
         if (w.paused === true) continue
         // The worker's own chat never wakes itself.
         if (self && w.transcript?.split('/').pop() === `${self}.jsonl`) continue
-        const date = dueDate(w.schedule, now)
-        if (!date) continue
-        const id = `${w.key}-${date}`
+        const slot = dueSlot(w.schedule, now)
+        if (!slot) continue
+        const id = `${w.key}-${slot.id}`
         if (checked.has(id) || (retryAt.get(id) ?? 0) > now) continue
         checked.add(id)
         const claimDir = `${p.wakes}/${id}`
         try {
           await $.process.run(['/bin/mkdir', '-p', p.wakes])
           const claim = await $.process.run(['/bin/mkdir', claimDir])
-          if (claim.exitCode !== 0) continue // already woken today, by this or another session
+          if (claim.exitCode !== 0) continue // this slot already woke it, from this or another session
         } catch {
           continue
         }
@@ -990,7 +1028,7 @@ export const register: Register = on => {
         try {
           const result = await $.session.send({
             to: w.session,
-            text: wakeText(w, `Scheduled run (${date} ${w.schedule.time} ${w.schedule.tz})`),
+            text: wakeText(w, `Scheduled run (${slot.date} ${slot.time} ${w.schedule.tz})`),
           })
           isDelivered = result.isDelivered !== false
           reason = result.isDelivered === false ? result.reason : undefined
@@ -1052,7 +1090,7 @@ export const register: Register = on => {
         if (w.god === undefined) patch.god = pc.god
         if (w.voice === undefined) patch.voice = pc.voice
         if (w.tools === undefined) patch.tools = pc.tools
-        if (Object.keys(patch).length > 0) await patchWorker($ as unknown as Host, p, w.key, patch)
+        if (Object.keys(patch).length > 0) await serial(() => patchWorker($ as unknown as Host, p, w.key, patch))
         done.push(name)
       }
       if (done.length > 0) {
@@ -1081,6 +1119,8 @@ export const register: Register = on => {
     // The terminal paints no alpha hex and draws no Svg; tints, icons and gods are for
     // the graphical surfaces.
     const isGraphical = e.surface !== 'terminal'
+    // Wide (the pane expanded): the list of workers beside the selected one's detail.
+    const isWide = paneColumns(e.props, e.viewport) >= WIDE_AT
     const now = await $.clock.now()
     await read($, roster) // subscribe: the poll's signature change redraws the pane
     await read($, rev) // and the pane's own registry writes
@@ -1093,8 +1133,16 @@ export const register: Register = on => {
     const leaving = await read($, removing)
     const open = await read($, panels)
     const busy = await read($, deciding)
+    const picks = await read($, edits)
 
     const refresh = () => update($, rev, n => n + 1)
+
+    // What the pane draws: each worker with its settings picks laid over the registry,
+    // so a radio group's highlight moves on the click, not when the write lands.
+    const live = snap.workers.filter(w => leaving[w.key] === undefined).map(w => withEdits(w, picks[w.key]))
+    // The selected worker: the one last picked, else the first.
+    const current = live.find(w => w.key === picked) ?? live[0]
+    const tabOf = (w: RegistryWorker): Panel => (w.key === current?.key ? (open[w.key] ?? 'overview') : 'overview')
 
     const icon = (name: IconName, color = SUB, size = 13, key?: string) =>
       Svg && isGraphical ? <Svg key={key} source={iconSvg(name, color, size)} alt={name} width={size} height={size} /> : null
@@ -1110,33 +1158,101 @@ export const register: Register = on => {
           {...(isWorking ? { isInteractive: true } : {})}
         />
       ) : (
-        <Text bold color={GOD_COLOUR[kind]}>●</Text>
+        <Text bold color={GOD_ACCENT[kind]}>●</Text>
       )
 
-    const setPanel = (w: RegistryWorker, panel: Panel | undefined) =>
+    const select = (w: RegistryWorker) => update($, selected, old => (old === w.key ? old : w.key))
+
+    const setTab = (w: RegistryWorker, tab: Panel) =>
       update($, panels, old => {
-        if (panel === undefined) return withoutKey(old, w.key)
-        return old[w.key] === panel ? old : { ...old, [w.key]: panel }
+        if (tab === 'overview') return withoutKey(old, w.key)
+        return old[w.key] === tab ? old : { ...old, [w.key]: tab }
       })
 
-    const togglePanel = async (w: RegistryWorker, panel: Panel) => {
-      const isOpen = (await read($, panels))[w.key] === panel
-      await setPanel(w, isOpen ? undefined : panel)
-      return !isOpen
+    // Opening the outbox marks its items seen (.seen.json, the newest item looked at).
+    const markSeen = async (w: RegistryWorker) => {
+      const newest = Math.max(0, ...(snap.outbox[w.key] ?? []).map(atMs))
+      if (newest <= (snap.seen[w.key] ?? 0)) return
+      try {
+        await $.fs.write(p.seen, JSON.stringify({ ...(await readSeen($ as unknown as Host, p)), [w.key]: newest }))
+      } catch {
+        // looked at again next time
+      }
     }
 
-    const patch = async (w: RegistryWorker, change: Record<string, unknown>) => {
-      const err = await patchWorker($ as unknown as Host, p, w.key, change)
-      if (err) {
-        $.ui.toast(`Couldn't save ${w.name}: ${err}`)
-        return false
+    // A tab is a radio: the press selects that worker and shows the tab.
+    const showTab = async (w: RegistryWorker, tab: Panel) => {
+      await select(w)
+      await setTab(w, tab)
+      if (tab === 'outbox') await markSeen(w)
+    }
+
+    // The tab a worker shows right now, read at the press (not the drawing's copy).
+    const tabNow = async (w: RegistryWorker): Promise<Panel> => {
+      const sel = await read($, selected)
+      const isCurrent = sel === w.key || (!live.some(x => x.key === sel) && live[0]?.key === w.key)
+      return isCurrent ? ((await read($, panels))[w.key] ?? 'overview') : 'overview'
+    }
+
+    // The card's Outbox chip: opens that tab, or closes it back to Overview.
+    const toggleFeed = async (w: RegistryWorker) => {
+      if ((await tabNow(w)) === 'outbox') await setTab(w, 'overview')
+      else await showTab(w, 'outbox')
+    }
+
+    // A settings pick: drawn at once from `edits`, then written in turn on the one
+    // queue. `decide` gets the worker as it is at that instant (every earlier pick laid
+    // over the registry) and answers the change, or undefined for none; it runs inside
+    // the atom's compare-and-swap, so two quick clicks see each other. A pick overtaken
+    // by a later pick of the same setting is not written, so the last click is what
+    // workers.json ends with; a failed write drops the pick and the registry shows again.
+    const choose = async (
+      w: RegistryWorker,
+      decide: (now: RegistryWorker) => Record<string, unknown> | undefined,
+    ): Promise<boolean> => {
+      const at = await $.clock.now()
+      let change: Record<string, unknown> | undefined
+      let mine = 0
+      // `update` retries `fn` until its write lands, so `change` and `mine` end as the
+      // attempt that committed; a later pick commits later and draws a larger number.
+      await update($, edits, old => {
+        change = decide(withEdits(w, old[w.key]))
+        if (!change || Object.keys(change).length === 0) return old
+        const picked = change
+        mine = ++ticket.n
+        return {
+          ...old,
+          [w.key]: {
+            ...(old[w.key] ?? {}),
+            ...Object.fromEntries(Object.keys(picked).map(f => [f, { value: (picked[f] ?? null) as EditValue, at }])),
+          },
+        }
+      })
+      const picked: Record<string, unknown> | undefined = change
+      if (!picked || Object.keys(picked).length === 0) return true
+      const fields = Object.keys(picked)
+      // The newest pick per field only ever rises, whatever order these lines run in.
+      for (const f of fields) {
+        const k = `${w.key}\n${f}`
+        if ((ticket.latest.get(k) ?? 0) < mine) ticket.latest.set(k, mine)
       }
-      await refresh()
-      return true
+      const isMine = (f: string) => ticket.latest.get(`${w.key}\n${f}`) === mine
+      return serial(async () => {
+        const due = fields.filter(isMine)
+        if (due.length === 0) return true
+        const err = await patchWorker($ as unknown as Host, p, w.key, Object.fromEntries(due.map(f => [f, picked[f]])))
+        await update($, edits, old => dropEdits(old, w.key, due, isMine))
+        await refresh()
+        if (err) {
+          $.ui.toast(`Couldn't save ${w.name}: ${err}`)
+          return false
+        }
+        return true
+      })
     }
 
     const openChat = async (w: RegistryWorker) => {
-      await update($, selected, old => (old === w.key ? old : w.key))
+      await select(w)
       if (!w.session) {
         $.ui.toast(`${w.name} has no chat yet`)
         return
@@ -1181,18 +1297,6 @@ export const register: Register = on => {
       const result = await $.session.send({ to: w.session, text: wakeText(w, 'Run now, from the Workers pane') })
       const entry = await record(w, 'Run its charter now', result)
       $.ui.toast(entry.isDelivered ? `${w.name} is running its charter` : `${w.name} didn't get it: ${entry.reason ?? 'not delivered'}`)
-    }
-
-    // Opening the outbox marks its items seen (.seen.json, the newest item looked at).
-    const toggleFeed = async (w: RegistryWorker, items: readonly OutboxItem[]) => {
-      const isOpen = await togglePanel(w, 'outbox')
-      const newest = Math.max(0, ...items.map(atMs))
-      if (!isOpen || newest <= (snap.seen[w.key] ?? 0)) return
-      try {
-        await $.fs.write(p.seen, JSON.stringify({ ...(await readSeen($ as unknown as Host, p)), [w.key]: newest }))
-      } catch {
-        // looked at again next time
-      }
     }
 
     const decide = async (w: RegistryWorker, item: OutboxItem, decision: Decision['decision']) => {
@@ -1342,13 +1446,16 @@ export const register: Register = on => {
       // Instant: the card leaves now, and the registry drops it now; the call session
       // archives the chat afterwards in the background.
       await update($, removing, old => ({ ...old, [w.key]: at }))
-      await editRegistry($ as unknown as Host, p, workers => {
-        const idx = workers.findIndex(x => isObject(x) && x.key === w.key)
-        if (idx < 0) return false
-        workers.splice(idx, 1)
-        return true
-      })
-      await setPanel(w, undefined)
+      await serial(() =>
+        editRegistry($ as unknown as Host, p, workers => {
+          const idx = workers.findIndex(x => isObject(x) && x.key === w.key)
+          if (idx < 0) return false
+          workers.splice(idx, 1)
+          return true
+        }),
+      )
+      await setTab(w, 'overview')
+      await update($, edits, old => withoutKey(old, w.key))
       $.ui.toast(`${w.name} removed`)
     }
 
@@ -1405,10 +1512,61 @@ export const register: Register = on => {
       </Box>
     )
 
-    const live = snap.workers.filter(w => leaving[w.key] === undefined)
+    // A radio group: one keyed tile per choice, exactly one drawn picked (its ring and
+    // wash in the accent, its label at full strength; the rest dim). The pick handlers
+    // compare with the worker as it is now, so pressing the picked one writes nothing.
+    type Choice = { value: string; label: string; art?: RenderChildren }
+    const radio = (
+      prefix: string,
+      value: string,
+      choices: readonly Choice[],
+      accent: string,
+      onPick: (value: string) => void,
+      isTile = false,
+    ) => (
+      <Box key={`${prefix}-group`} flexDirection="row" flexWrap="wrap" gap="xs" width="100%">
+        {choices.map(c => {
+          const isOn = c.value === value
+          return (
+            <Box
+              key={`${prefix}-tile-${c.value}`}
+              flexDirection={isTile ? 'column' : 'row'}
+              alignItems="center"
+              borderStyle="round"
+              borderColor={isOn ? accent : undefined}
+              borderDimColor={!isOn}
+              backgroundColor={isOn && isGraphical ? tint(accent, 0.12) : undefined}
+              hover={isGraphical && !isOn ? { borderColor: tint(accent, 0.5), borderDimColor: false } : undefined}
+              paddingX="xs"
+            >
+              {c.art ?? null}
+              <Button key={`${prefix}-${c.value}`} label={c.label} plain dimColor={!isOn} onPress={() => onPick(c.value)} />
+            </Box>
+          )
+        })}
+      </Box>
+    )
+
+    const godChoices = (): Choice[] =>
+      GOD_KINDS.map(kind => ({
+        value: kind,
+        label: GOD_LABEL[kind],
+        art:
+          Svg && isGraphical ? (
+            <Svg source={godSvg(kind, { size: 30, state: 'idle', animated: false, halo: true })} alt={GOD_LABEL[kind]} width={30} height={30} />
+          ) : undefined,
+      }))
+
+    const formGod = isGod(fs.god) ? fs.god : 'scribe'
+    const formAccent = GOD_ACCENT[formGod]
+    const showHint = fs.isTried && !fs.isValid
+
+    // The header's dot carries the selected worker's colour.
+    const headAccent = current ? GOD_ACCENT[godOf(current)] : ACCENT
     const header = (
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center" width="100%">
+      <Box key="header" flexDirection="row" justifyContent="space-between" alignItems="center" width="100%">
         <Box flexDirection="row" gap="xs" alignItems="center">
+          <Text key="header-dot" color={headAccent}>●</Text>
           <Text bold>Workers</Text>
           <Text dimColor size="footnote">
             {`· ${live.length === 1 ? '1 standing chat' : `${live.length} standing chats`}`}
@@ -1424,46 +1582,13 @@ export const register: Register = on => {
       </Box>
     )
 
-    // Six god tiles: the picked one ringed in the accent with a primary label.
-    const godPicker = (prefix: string, current: GodKind, onPick: (kind: GodKind) => void) => (
-      <Box key={`${prefix}-gods`} flexDirection="row" flexWrap="wrap" gap="xs" width="100%">
-        {GOD_KINDS.map(kind => {
-          const isPicked = kind === current
-          return (
-            <Box
-              key={`${prefix}-tile-${kind}`}
-              flexDirection="column"
-              alignItems="center"
-              borderStyle="round"
-              borderColor={isPicked ? ACCENT : undefined}
-              borderDimColor={!isPicked}
-              backgroundColor={isPicked && isGraphical ? tint(ACCENT, 0.06) : undefined}
-              paddingX="xs"
-            >
-              {Svg && isGraphical ? (
-                <Svg source={godSvg(kind, { size: 30, state: 'idle', animated: false, halo: true })} alt={GOD_LABEL[kind]} width={30} height={30} />
-              ) : null}
-              <Button
-                key={`${prefix}-${kind}`}
-                label={GOD_LABEL[kind]}
-                {...(isPicked ? { variant: 'primary' as const } : { plain: true as const })}
-                onPress={() => onPick(kind)}
-              />
-            </Box>
-          )
-        })}
-      </Box>
-    )
-
-    const formGod = isGod(fs.god) ? fs.god : 'scribe'
-    const showHint = fs.isTried && !fs.isValid
     const newForm = fs.isOpen ? (
       <Box
         key="new-form"
         flexDirection="column"
         borderStyle="round"
-        borderColor={ACCENT}
-        backgroundColor={isGraphical ? tint(ACCENT, 0.04) : undefined}
+        borderColor={formAccent}
+        backgroundColor={isGraphical ? tint(formAccent, 0.04) : undefined}
         width="100%"
         paddingX="sm"
         paddingY="sm"
@@ -1492,7 +1617,7 @@ export const register: Register = on => {
               />,
             )
           : null}
-        {godPicker('nw-god', formGod, kind => void setForm({ god: kind }))}
+        {radio('nw-god', formGod, godChoices(), formAccent, kind => void setForm({ god: kind }), true)}
         <Text dimColor size="caption">{`Voice ${DEFAULT_VOICE[formGod]} · drafts only. Change both later in Settings.`}</Text>
         {showHint ? (
           <Text size="footnote" color={RED}>Name, before the comma: 1 to 24 letters, digits or spaces</Text>
@@ -1500,13 +1625,122 @@ export const register: Register = on => {
       </Box>
     ) : null
 
+    const statusOf = (w: RegistryWorker) => {
+      const s = snap.status[w.key]
+      return s?.isNew
+        ? { text: '✦ New', color: BLUE as string | undefined }
+        : s?.isWorking
+          ? { text: '● Working', color: GREEN as string | undefined }
+          : { text: `○ Idle${s?.lastActiveMs ? ` · ${ago(now - s.lastActiveMs)}` : ''}`, color: undefined as string | undefined }
+    }
+
+    const badgeText = (w: RegistryWorker, tag: string, accent: string) =>
+      tag ? (
+        <Text key={`badge-${w.key}`} size="caption" color={accent} backgroundColor={isGraphical ? tint(accent, 0.14) : undefined}>
+          {` ${tag} `}
+        </Text>
+      ) : null
+
+    const askField = (w: RegistryWorker) =>
+      Input
+        ? fill(
+            <Input
+              key={`task-${w.key}`}
+              placeholder={`Ask ${w.name}…`}
+              value={drafts.get(w.key) ?? ''}
+              submitLabel="send"
+              onInput={(value: string) => void drafts.set(w.key, value)}
+              onSubmit={(value: string) => void send(w, value)}
+            />,
+          )
+        : null
+
+    // The hours chip, in the worker's colour (amber while paused): it opens Settings.
+    const hoursChip = (w: RegistryWorker, accent: string) => {
+      const tone = w.paused === true ? AMBER : accent
+      return (
+        <Box
+          key={`hours-chip-${w.key}`}
+          flexDirection="row"
+          alignItems="center"
+          gap="xs"
+          paddingX="xs"
+          backgroundColor={isGraphical ? tint(tone, 0.12) : undefined}
+        >
+          {icon(w.paused === true ? 'pause' : 'clock', tone, 12)}
+          <Button key={`hours-${w.key}`} label={chipLabel(w)} plain onPress={() => void showTab(w, 'settings')} />
+        </Box>
+      )
+    }
+
+    const lastLine = (w: RegistryWorker) => {
+      const last = tasks[w.key]
+      return last ? (
+        <Text key={`last-${w.key}`} dimColor size="footnote" wrap="truncate-end">
+          {`${last.isDelivered ? 'Last' : 'Not delivered'}: ${last.text} · ${ago(now - last.atMs)}`}
+        </Text>
+      ) : null
+    }
+
+    /** When it wakes, in words: the schedule with its days (and zone where there is room). */
+    const hoursAbout = (w: RegistryWorker, withZone: boolean): string => {
+      if (w.paused === true) return 'Paused: no scheduled wakes. Run now still works.'
+      if (!w.schedule) return 'No schedule: it works when you ask.'
+      const sentence = scheduleSentence(w.schedule)
+      return withZone && w.schedule.tz ? `${sentence} (${w.schedule.tz})` : sentence
+    }
+
+    /** What it cannot do yet, or '' when nothing is missing. */
+    const missing = (w: RegistryWorker): string => {
+      if (!w.session) return 'Its chat has not started yet, so it cannot take tasks.'
+      if (w.schedule && !w.charter) return 'It wakes only once it has a charter.'
+      return ''
+    }
+
+    // The tabs of a worker's detail, drawn as a radio: exactly one shows picked.
+    const TAB_KEY: Record<Panel, (key: string) => string> = {
+      overview: k => `overview-${k}`,
+      outbox: k => `outboxtab-${k}`,
+      activity: k => `activity-${k}`,
+      settings: k => `settings-${k}`,
+    }
+    const tabStrip = (w: RegistryWorker, tab: Panel, accent: string, waiting: number) => (
+      <Box key={`tabs-${w.key}`} flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs" width="100%">
+        {TABS.map(t => {
+          const isOn = t === tab
+          return (
+            <Box
+              key={`tabbox-${t}-${w.key}`}
+              flexDirection="row"
+              alignItems="center"
+              borderStyle={isGraphical ? 'round' : undefined}
+              borderColor={isOn ? accent : undefined}
+              borderDimColor={!isOn}
+              backgroundColor={isOn && isGraphical ? tint(accent, 0.14) : undefined}
+              paddingX="xs"
+            >
+              <Button
+                key={TAB_KEY[t](w.key)}
+                label={t === 'outbox' && waiting > 0 ? `Outbox · ${waiting}` : TAB_LABEL[t]}
+                plain
+                dimColor={!isOn}
+                onPress={() => void showTab(w, t)}
+              />
+            </Box>
+          )
+        })}
+      </Box>
+    )
+
     // The outbox, newest first: a file icon, the title, "needs your yes" in amber and
     // Approve / Decline for what waits; a note shows with no buttons.
-    function feed(w: RegistryWorker, items: readonly OutboxItem[], decided: Record<string, Decision>) {
+    function feed(w: RegistryWorker, items: readonly OutboxItem[], decided: Record<string, Decision>, accent: string) {
       const shown = [...items].reverse().slice(0, FEED_ITEMS)
       return (
         <Box key={`outbox-${w.key}`} flexDirection="column" gap="xs" width="100%">
-          {shown.length === 0 ? <Text dimColor size="footnote">Nothing in the outbox yet</Text> : null}
+          {shown.length === 0 ? (
+            <Text dimColor size="footnote">{`Nothing here yet. What ${w.name} drafts or notes lands here for your yes.`}</Text>
+          ) : null}
           {shown.map(item => {
             const d = decided[item.id]
             const isWaiting = item.needs_approval && d === undefined
@@ -1523,14 +1757,15 @@ export const register: Register = on => {
                 key={`item-${w.key}-${item.id}`}
                 flexDirection="column"
                 borderStyle="round"
-                borderDimColor
+                borderColor={isWaiting ? tint(accent, 0.6) : undefined}
+                borderDimColor={!isWaiting}
                 width="100%"
                 paddingX="sm"
                 paddingY="xs"
                 gap="xs"
               >
                 <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
-                  {icon(glyph, isWaiting ? ACCENT : SUB, 14)}
+                  {icon(glyph, isWaiting ? accent : SUB, 14)}
                   <Box flexGrow={1} flexShrink={1}>
                     <Text bold size="footnote" wrap="truncate-end">{item.title}</Text>
                   </Box>
@@ -1622,20 +1857,27 @@ export const register: Register = on => {
       )
     }
 
-    const spaceList = Object.values(open).includes('settings') ? await listSpaces($ as unknown as Host, p) : []
+    const spaceList = current && tabOf(current) === 'settings' ? await listSpaces($ as unknown as Host, p) : []
+
+    // A small section heading inside Settings.
+    const heading = (key: string, text: string) => (
+      <Text key={key} bold size="caption" dimColor>{text}</Text>
+    )
 
     // Make them yours: name, god, voice, hours, tools, paused and spaces, each written
-    // into the worker's registry entry as it is picked.
-    function settings(w: RegistryWorker) {
+    // into the worker's registry entry as it is picked; then Delete, out of the way.
+    function settings(w: RegistryWorker, accent: string) {
       const god = godOf(w)
       const voice = voiceOf(w)
       const tools = toolsOf(w)
       const toolsValue = Array.isArray(tools) ? 'custom' : tools
       const sched = w.schedule
-      const days = sched?.days.trim().toLowerCase() ?? 'none'
+      const mode = scheduleMode(sched)
+      const modeOptions = MODES.some(m => m.value === mode) ? MODES : [...MODES, { value: mode, label: `Every ${mode}` }]
+      const days = typeof sched?.days === 'string' ? sched.days.trim().toLowerCase() : 'mon-fri'
       const dayOptions = DAY_PRESETS.some(d => d.value === days) ? DAY_PRESETS : [{ value: days, label: daysLabel(days) }, ...DAY_PRESETS]
       const voiceOptions = (VOICES as readonly string[]).includes(voice) ? [...VOICES] : [voice, ...VOICES]
-      const toolOptions = [
+      const toolChoices: Choice[] = [
         ...TOOL_PRESETS.map(t => ({ value: t.value as string, label: t.label })),
         ...(Array.isArray(tools) ? [{ value: 'custom', label: `Custom: ${tools.length} tools` }] : []),
       ]
@@ -1645,38 +1887,54 @@ export const register: Register = on => {
       const allowed = spacesOf(w)
       const mine = allowed.list
       const spaces = [...spaceList, ...mine.filter(s => !spaceList.some(x => x.slug === s)).map(s => ({ slug: s, name: s }))]
-      // Turning one space off under "*" keeps every other listed space on.
-      const toggleSpace = (slug: string) => {
-        const current = allowed.isAll ? spaces.map(s => s.slug) : mine
-        return current.includes(slug) ? current.filter(x => x !== slug) : [...current, slug]
-      }
-      const tz = sched?.tz ?? defaultTz(snap.workers)
+      const tz = typeof sched?.tz === 'string' && sched.tz ? sched.tz : defaultTz(snap.workers)
       const nameValue = names.get(w.key) ?? w.name
+      const armedAt = armed[w.key]
+      const isArmed = armedAt !== undefined && now - armedAt < CONFIRM_MS
 
-      const setSchedule = async (nextDays: string, time?: string) => {
-        if (nextDays === 'none') {
-          if (sched) await patch(w, { schedule: undefined })
-          return
-        }
-        const nextSched: Schedule = { days: nextDays, time: time ?? sched?.time ?? '09:00', tz }
-        await patch(w, { schedule: sched ? { ...sched, ...nextSched } : nextSched })
-      }
+      // Each pick is decided from the worker as it is at the click (its earlier picks
+      // included), so quick picks build on each other instead of the second undoing the
+      // first. A pick equal to what the entry already holds writes nothing; one equal
+      // only to a default (a v1 worker's derived god, a god's voice) is written, so it sticks.
+      const pickGod = (kind: string) =>
+        choose(w, cur => (!isGod(kind) || cur.god === kind ? undefined : { god: kind, avatar: GOD_AVATAR[kind] }))
+      const pickVoice = (value: string) => choose(w, cur => (cur.voice === value ? undefined : { voice: value }))
+      const pickTools = (value: string) =>
+        choose(w, cur => (value === 'custom' || cur.tools === value ? undefined : { tools: value }))
+      const pickSchedule = (change: ScheduleChange) =>
+        choose(w, cur => {
+          const nextSched = editSchedule(cur.schedule, change, tz)
+          return JSON.stringify(nextSched) === JSON.stringify(cur.schedule) ? undefined : { schedule: nextSched }
+        })
+      const togglePaused = () => choose(w, cur => ({ paused: cur.paused !== true }))
+      // Turning one space off under "*" keeps every other listed space on.
+      const toggleSpace = (slug: string) =>
+        choose(w, cur => {
+          const sp = spacesOf(cur)
+          const list = sp.isAll ? spaces.map(s => s.slug) : sp.list
+          return { spaces: list.includes(slug) ? list.filter(x => x !== slug) : [...list, slug] }
+        })
+      const toggleAll = () => choose(w, cur => ({ spaces: spacesOf(cur).isAll ? undefined : '*' }))
 
       const rename = async (value: string) => {
         const name = value.trim()
-        if (name === w.name) return
         if (!isValidName(name)) {
-          $.ui.toast('A name is 1 to 24 letters, digits or spaces')
+          if (name !== w.name) $.ui.toast('A name is 1 to 24 letters, digits or spaces')
           return
         }
-        if (await patch(w, { name })) {
+        let isNew = false
+        const isSaved = await choose(w, cur => {
+          isNew = cur.name !== name
+          return isNew ? { name } : undefined
+        })
+        if (isSaved && isNew) {
           names.delete(w.key)
           $.ui.toast(`Renamed to ${name}`)
         }
       }
 
       return (
-        <Box key={`settings-panel-${w.key}`} flexDirection="column" gap="xs" width="100%">
+        <Box key={`settings-panel-${w.key}`} flexDirection="column" gap="sm" width="100%">
           <Text bold size="footnote">{`Make ${w.name} yours`}</Text>
           {Input
             ? fill(
@@ -1690,138 +1948,207 @@ export const register: Register = on => {
                 />,
               )
             : null}
-          {godPicker(`god-${w.key}`, god, kind =>
-            void patch(w, { god: kind, avatar: GOD_AVATAR[kind] }),
-          )}
+          <Box key={`sec-god-${w.key}`} flexDirection="column" gap="xs" width="100%">
+            {heading(`h-god-${w.key}`, 'Character')}
+            {radio(`god-${w.key}`, god, godChoices(), accent, kind => void pickGod(kind), true)}
+          </Box>
           {Select ? (
             <Select
               key={`voice-${w.key}`}
               label="Voice"
               value={voice}
               options={voiceOptions.map(v => ({ value: v, label: `${v}${VOICE_HINT[v.slice(0, 2)] ? ` · ${VOICE_HINT[v.slice(0, 2)]}` : ''}` }))}
-              onSelect={(value: string) => void patch(w, { voice: value })}
+              onSelect={(value: string) => void pickVoice(value)}
             />
           ) : null}
-          <Box flexDirection="row" flexWrap="wrap" gap="xs" alignItems="center" width="100%">
-            {Select ? (
-              <Select
-                key={`days-${w.key}`}
-                label="Hours"
-                value={days}
-                options={dayOptions}
-                onSelect={(value: string) => void setSchedule(value)}
-              />
-            ) : null}
-            {Select && sched ? (
-              <Select
-                key={`time-${w.key}`}
-                label="at"
-                value={sched.time.trim()}
-                options={timeOptions(sched.time.trim())}
-                onSelect={(value: string) => void setSchedule(days, value)}
-              />
-            ) : null}
-            {sched ? <Text dimColor size="caption">{sched.tz}</Text> : null}
-          </Box>
-          {sched && !w.charter ? <Text dimColor size="caption">It wakes only once it has a charter.</Text> : null}
-          <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
-            {icon('pause', w.paused === true ? AMBER : SUB, 13)}
-            <Box flexGrow={1} flexShrink={1}>
-              <Text size="footnote" color={w.paused === true ? AMBER : undefined} dimColor={w.paused !== true}>
-                {w.paused === true ? 'Paused: no scheduled wakes' : 'Wakes on its hours'}
-              </Text>
+          <Box key={`sec-hours-${w.key}`} flexDirection="column" gap="xs" width="100%">
+            {heading(`h-hours-${w.key}`, 'Hours')}
+            <Box flexDirection="row" flexWrap="wrap" gap="xs" alignItems="center" width="100%">
+              {Select ? (
+                <Select
+                  key={`mode-${w.key}`}
+                  label="Wakes"
+                  value={mode}
+                  options={modeOptions}
+                  onSelect={(value: string) => void pickSchedule({ mode: value })}
+                />
+              ) : null}
+              {Select && sched ? (
+                <Select
+                  key={`days-${w.key}`}
+                  label="on"
+                  value={days}
+                  options={dayOptions}
+                  onSelect={(value: string) => void pickSchedule({ days: value })}
+                />
+              ) : null}
             </Box>
-            <Button
-              key={`pause-${w.key}`}
-              label={w.paused === true ? 'Resume' : 'Pause'}
-              variant="secondary"
-              onPress={() => void patch(w, { paused: w.paused !== true })}
-            />
-          </Box>
-          {Select ? (
-            <Select
-              key={`tools-${w.key}`}
-              label="Tools"
-              value={toolsValue}
-              options={toolOptions}
-              onSelect={(value: string) => {
-                if (value === 'custom') return
-                void patch(w, { tools: value })
-              }}
-            />
-          ) : null}
-          <Text dimColor size="caption">{about}</Text>
-          <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
-            {icon('folder', SUB, 13)}
-            <Box flexGrow={1} flexShrink={1}>
-              <Text size="footnote" dimColor>
-                {allowed.isAll ? 'Spaces it may write to: all' : allowed.isDefault ? 'Spaces it may write to: Notes, the default' : 'Spaces it may write to'}
-              </Text>
-            </Box>
-            <Button
-              key={`spaces-all-${w.key}`}
-              label={allowed.isAll ? '✓ All spaces' : 'All spaces'}
-              variant={allowed.isAll ? 'primary' : 'secondary'}
-              onPress={() => void patch(w, { spaces: allowed.isAll ? undefined : '*' })}
-            />
-          </Box>
-          {spaces.length === 0 ? (
-            <Text dimColor size="caption">No spaces yet</Text>
-          ) : (
-            <Box flexDirection="row" flexWrap="wrap" gap="xs" width="100%">
-              {spaces.map(s => {
-                const isOn = allowed.isAll || mine.includes(s.slug)
-                return (
-                  <Button
-                    key={`space-${w.key}-${s.slug}`}
-                    label={isOn ? `✓ ${s.name}` : s.name}
-                    variant={isOn ? 'primary' : 'secondary'}
-                    onPress={() => void patch(w, { spaces: toggleSpace(s.slug) })}
+            {sched ? (
+              <Box flexDirection="row" flexWrap="wrap" gap="xs" alignItems="center" width="100%">
+                {Select && mode === 'daily' ? (
+                  <Select
+                    key={`time-${w.key}`}
+                    label="at"
+                    value={(sched.time ?? '09:00').trim()}
+                    options={timeOptions((sched.time ?? '09:00').trim())}
+                    onSelect={(value: string) => void pickSchedule({ time: value })}
                   />
-                )
-              })}
+                ) : null}
+                {Select && mode !== 'daily' ? (
+                  <Select
+                    key={`from-${w.key}`}
+                    label="from"
+                    value={sched.from?.trim() || ALL_DAY}
+                    options={fromOptions(sched.from?.trim() || undefined)}
+                    onSelect={(value: string) => void pickSchedule({ from: value === ALL_DAY ? '' : value })}
+                  />
+                ) : null}
+                {Select && mode !== 'daily' && sched.from?.trim() ? (
+                  <Select
+                    key={`to-${w.key}`}
+                    label="to"
+                    value={sched.to?.trim() || END_OF_DAY}
+                    options={toOptions(sched.from.trim(), sched.to?.trim() || undefined)}
+                    onSelect={(value: string) => void pickSchedule({ to: value === END_OF_DAY ? '' : value })}
+                  />
+                ) : null}
+                <Text dimColor size="caption">{tz}</Text>
+              </Box>
+            ) : null}
+            {sched ? <Text dimColor size="caption">{scheduleSentence(sched)}</Text> : null}
+            {sched && !w.charter ? <Text dimColor size="caption">It wakes only once it has a charter.</Text> : null}
+            <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
+              {icon('pause', w.paused === true ? AMBER : SUB, 13)}
+              <Box flexGrow={1} flexShrink={1}>
+                <Text size="footnote" color={w.paused === true ? AMBER : undefined} dimColor={w.paused !== true}>
+                  {w.paused === true ? 'Paused: no scheduled wakes' : 'Wakes on its hours'}
+                </Text>
+              </Box>
+              <Button
+                key={`pause-${w.key}`}
+                label={w.paused === true ? 'Resume' : 'Pause'}
+                variant="secondary"
+                onPress={() => void togglePaused()}
+              />
             </Box>
-          )}
-          <Box flexDirection="row" justifyContent="flex-end" width="100%">
-            <Button key={`settings-done-${w.key}`} label="Done" variant="secondary" onPress={() => void setPanel(w, undefined)} />
+          </Box>
+          <Box key={`sec-tools-${w.key}`} flexDirection="column" gap="xs" width="100%">
+            {heading(`h-tools-${w.key}`, 'Tools')}
+            {radio(`tools-${w.key}`, toolsValue, toolChoices, accent, value => void pickTools(value))}
+            <Text dimColor size="caption">{about}</Text>
+          </Box>
+          <Box key={`sec-spaces-${w.key}`} flexDirection="column" gap="xs" width="100%">
+            <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+              {icon('folder', SUB, 13)}
+              <Box flexGrow={1} flexShrink={1}>
+                <Text size="footnote" dimColor>
+                  {allowed.isAll ? 'Spaces it may write to: all' : allowed.isDefault ? 'Spaces it may write to: Notes, the default' : 'Spaces it may write to'}
+                </Text>
+              </Box>
+              <Button
+                key={`spaces-all-${w.key}`}
+                label={allowed.isAll ? '✓ All spaces' : 'All spaces'}
+                variant={allowed.isAll ? 'primary' : 'secondary'}
+                onPress={() => void toggleAll()}
+              />
+            </Box>
+            {spaces.length === 0 ? (
+              <Text dimColor size="caption">No spaces yet</Text>
+            ) : (
+              <Box flexDirection="row" flexWrap="wrap" gap="xs" width="100%">
+                {spaces.map(s => {
+                  const isOn = allowed.isAll || mine.includes(s.slug)
+                  return (
+                    <Button
+                      key={`space-${w.key}-${s.slug}`}
+                      label={isOn ? `✓ ${s.name}` : s.name}
+                      variant={isOn ? 'primary' : 'secondary'}
+                      onPress={() => void toggleSpace(s.slug)}
+                    />
+                  )
+                })}
+              </Box>
+            )}
+          </Box>
+          <Box key={`danger-${w.key}`} flexDirection="row" alignItems="center" gap="xs" width="100%">
+            <Box flexGrow={1} flexShrink={1}>
+              <Text size="caption" color={isArmed ? RED : undefined} dimColor={!isArmed}>
+                {isArmed ? 'Press again to delete it.' : 'Delete removes it here and archives its chat.'}
+              </Text>
+            </Box>
+            {isArmed ? (
+              <Button key={`delete-${w.key}`} label="Confirm delete" variant="secondary" onPress={() => void remove(w)}>
+                <Text bold color={RED}>Confirm delete</Text>
+              </Button>
+            ) : (
+              <Button key={`delete-${w.key}`} label="Delete" plain onPress={() => void remove(w)} />
+            )}
+            <Button key={`settings-done-${w.key}`} label="Done" variant="secondary" onPress={() => void setTab(w, 'overview')} />
           </Box>
         </Box>
       )
     }
 
+    // What one worker's tab shows. Overview differs by layout: the wide detail holds
+    // the Ask field and the actions; a narrow card already shows them above its tabs.
+    const tabBody = async (w: RegistryWorker, tab: Panel, accent: string, isDetail: boolean) => {
+      const items = snap.outbox[w.key] ?? []
+      const decided = snap.decided[w.key] ?? {}
+      if (tab === 'outbox') return feed(w, items, decided, accent)
+      if (tab === 'activity') return await activity(w)
+      if (tab === 'settings') return settings(w, accent)
+      const gap = missing(w)
+      if (!isDetail) {
+        return (
+          <Box key={`overview-${w.key}`} flexDirection="column" gap="xs" width="100%">
+            <Text dimColor size="caption">{hoursAbout(w, false)}</Text>
+            {gap ? <Text dimColor size="caption">{gap}</Text> : null}
+          </Box>
+        )
+      }
+      return (
+        <Box key={`overview-${w.key}`} flexDirection="column" gap="sm" width="100%">
+          {askField(w)}
+          <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs" width="100%">
+            {hoursChip(w, accent)}
+            <Box flexGrow={1} flexShrink={1}>
+              <Text dimColor size="caption">{hoursAbout(w, true)}</Text>
+            </Box>
+          </Box>
+          <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+            {w.charter ? <Button key={`run-${w.key}`} label="Run now" variant="primary" onPress={() => void runNow(w)} /> : null}
+            <Button key={`open-${w.key}`} label="Open chat" variant="secondary" onPress={() => void openChat(w)} />
+            <Box flexGrow={1} />
+          </Box>
+          {gap ? <Text dimColor size="caption">{gap}</Text> : null}
+          {lastLine(w)}
+        </Box>
+      )
+    }
+
+    // Narrow: the film's card, one per worker. The selected one carries its god's
+    // colour and the tabbed detail under its footer.
     const card = async (w: RegistryWorker) => {
-      const s = snap.status[w.key]
-      const isWorking = s?.isWorking ?? false
-      const isSelected = picked === w.key
-      const armedAt = armed[w.key]
-      const isArmed = armedAt !== undefined && now - armedAt < CONFIRM_MS
-      const last = tasks[w.key]
-      const draft = drafts.get(w.key) ?? ''
+      const isWorking = snap.status[w.key]?.isWorking ?? false
+      const isSelected = current?.key === w.key
       const items = snap.outbox[w.key] ?? []
       const decided = snap.decided[w.key] ?? {}
       const waiting = awaiting(items, decided).length
       const tag = badge(items, decided)
-      const panel = open[w.key]
+      const tab = tabOf(w)
       const god = godOf(w)
-      const status = s?.isNew
-        ? { text: '✦ New', color: BLUE }
-        : isWorking
-          ? { text: '● Working', color: GREEN }
-          : { text: `○ Idle${s?.lastActiveMs ? ` · ${ago(now - s.lastActiveMs)}` : ''}`, color: undefined }
+      const th = themeOf(god)
+      const status = statusOf(w)
 
       return (
         <Box
           key={`card-${w.key}`}
           flexDirection="column"
           borderStyle="round"
-          borderColor={isSelected ? ACCENT : undefined}
+          borderColor={isSelected ? th.accent : undefined}
           borderDimColor={!isSelected}
-          backgroundColor={isSelected && isGraphical ? tint(ACCENT, 0.05) : undefined}
-          hover={
-            isGraphical
-              ? { borderColor: isSelected ? ACCENT : SELECTED_BORDER, borderDimColor: false }
-              : undefined
-          }
+          backgroundColor={isSelected && isGraphical ? th.wash : undefined}
+          hover={isGraphical ? { borderColor: isSelected ? th.accent : th.hover, borderDimColor: false } : undefined}
           width="100%"
           paddingX="sm"
           paddingY="sm"
@@ -1834,11 +2161,7 @@ export const register: Register = on => {
                 <Button key={`name-${w.key}`} plain onPress={() => void openChat(w)}>
                   <Text bold>{w.name}</Text>
                 </Button>
-                {tag ? (
-                  <Text key={`badge-${w.key}`} size="caption" color={ACCENT} backgroundColor={isGraphical ? ACCENT_SOFT : undefined}>
-                    {` ${tag} `}
-                  </Text>
-                ) : null}
+                {badgeText(w, tag, th.accent)}
                 <Box flexGrow={1} />
                 <Text key={`status-${w.key}`} size="caption" color={status.color} dimColor={status.color === undefined}>
                   {status.text}
@@ -1849,31 +2172,10 @@ export const register: Register = on => {
               {w.role ? <Text dimColor size="footnote" wrap="truncate-end">{w.role}</Text> : null}
             </Box>
           </Box>
-          {Input
-            ? fill(
-                <Input
-                  key={`task-${w.key}`}
-                  placeholder={`Ask ${w.name}…`}
-                  value={draft}
-                  submitLabel="send"
-                  onInput={(value: string) => void drafts.set(w.key, value)}
-                  onSubmit={(value: string) => void send(w, value)}
-                />,
-              )
-            : null}
+          {askField(w)}
           {/* The film's footer: hours chip left; Run now, Outbox and Open right. */}
           <Box key={`footer-${w.key}`} flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs" width="100%">
-            <Box
-              key={`hours-chip-${w.key}`}
-              flexDirection="row"
-              alignItems="center"
-              gap="xs"
-              paddingX="xs"
-              backgroundColor={isGraphical ? tint(w.paused === true ? AMBER : SUB, 0.12) : undefined}
-            >
-              {icon(w.paused === true ? 'pause' : 'clock', w.paused === true ? AMBER : SUB, 12)}
-              <Button key={`hours-${w.key}`} label={chipLabel(w)} plain onPress={() => void setPanel(w, 'settings')} />
-            </Box>
+            {hoursChip(w, th.accent)}
             <Box flexGrow={1} />
             {w.charter ? (
               <Box flexDirection="row" alignItems="center" gap="xs">
@@ -1882,48 +2184,124 @@ export const register: Register = on => {
               </Box>
             ) : null}
             <Box flexDirection="row" alignItems="center" gap="xs">
-              {icon('inbox', waiting > 0 ? ACCENT : SUB, 13)}
-              <Button key={`feed-${w.key}`} label={outboxLabel(waiting, panel === 'outbox')} plain onPress={() => void toggleFeed(w, items)} />
+              {icon('inbox', waiting > 0 ? th.accent : SUB, 13)}
+              <Button key={`feed-${w.key}`} label={outboxLabel(waiting, tab === 'outbox')} plain onPress={() => void toggleFeed(w)} />
             </Box>
             <Box flexDirection="row" alignItems="center" gap="xs">
               <Button key={`open-${w.key}`} label="Open" plain onPress={() => void openChat(w)} />
               {icon('external', SUB, 11)}
             </Box>
           </Box>
-          <Box key={`tools-row-${w.key}`} flexDirection="row" alignItems="center" gap="xs" width="100%">
-            {icon('activity', SUB, 12)}
-            <Button
-              key={`activity-${w.key}`}
-              label={panel === 'activity' ? 'Hide activity' : 'Activity'}
-              plain
-              dimColor
-              onPress={() => void togglePanel(w, 'activity')}
-            />
-            {icon('settings', SUB, 12)}
-            <Button
-              key={`settings-${w.key}`}
-              label={panel === 'settings' ? 'Close settings' : 'Settings'}
-              plain
-              dimColor
-              onPress={() => void togglePanel(w, 'settings')}
-            />
-            <Box flexGrow={1} />
-            {isArmed ? (
-              <Button key={`delete-${w.key}`} label="Confirm delete" variant="secondary" onPress={() => void remove(w)}>
-                <Text bold color={RED}>Confirm delete</Text>
-              </Button>
-            ) : (
-              <Button key={`delete-${w.key}`} label="Delete" plain onPress={() => void remove(w)} />
-            )}
-          </Box>
-          {panel === 'outbox' ? feed(w, items, decided) : null}
-          {panel === 'activity' ? await activity(w) : null}
-          {panel === 'settings' ? settings(w) : null}
-          {last ? (
-            <Text dimColor size="footnote" wrap="truncate-end">
-              {`${last.isDelivered ? 'Last' : 'Not delivered'}: ${last.text} · ${ago(now - last.atMs)}`}
+          {isSelected ? tabStrip(w, tab, th.accent, waiting) : null}
+          {isSelected ? await tabBody(w, tab, th.accent, false) : null}
+          {lastLine(w)}
+        </Box>
+      )
+    }
+
+    // Wide: one compact row per worker, its god, name, drafts badge and status.
+    const row = (w: RegistryWorker) => {
+      const isWorking = snap.status[w.key]?.isWorking ?? false
+      const isSelected = current?.key === w.key
+      const tag = badge(snap.outbox[w.key] ?? [], snap.decided[w.key] ?? {})
+      const god = godOf(w)
+      const th = themeOf(god)
+      const status = statusOf(w)
+      return (
+        <Box
+          key={`row-${w.key}`}
+          flexDirection="row"
+          alignItems="center"
+          gap="xs"
+          borderStyle="round"
+          borderColor={isSelected ? th.accent : undefined}
+          borderDimColor={!isSelected}
+          backgroundColor={isSelected && isGraphical ? th.soft : undefined}
+          hover={isGraphical ? { borderColor: isSelected ? th.accent : th.hover, borderDimColor: false } : undefined}
+          width="100%"
+          paddingX="xs"
+        >
+          {godAvatar(god, 28, isWorking, `${w.name}, ${GOD_LABEL[god]}`, `row-avatar-${w.key}`)}
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap="xs" width="100%">
+              <Button key={`pick-${w.key}`} label={w.name} plain onPress={() => void select(w)} />
+              {badgeText(w, tag, th.accent)}
+            </Box>
+            <Text key={`status-${w.key}`} size="caption" color={status.color} dimColor={status.color === undefined} wrap="truncate-end">
+              {status.text}
             </Text>
-          ) : null}
+          </Box>
+        </Box>
+      )
+    }
+
+    // Wide: the selected worker's detail, its god large, then the tabs.
+    const detail = async (w: RegistryWorker) => {
+      const isWorking = snap.status[w.key]?.isWorking ?? false
+      const items = snap.outbox[w.key] ?? []
+      const decided = snap.decided[w.key] ?? {}
+      const waiting = awaiting(items, decided).length
+      const tag = badge(items, decided)
+      const tab = tabOf(w)
+      const god = godOf(w)
+      const th = themeOf(god)
+      const status = statusOf(w)
+      return (
+        <Box
+          key={`detail-${w.key}`}
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={th.accent}
+          backgroundColor={isGraphical ? th.wash : undefined}
+          width="100%"
+          paddingX="sm"
+          paddingY="sm"
+          gap="sm"
+        >
+          <Box flexDirection="row" alignItems="center" gap="sm" width="100%">
+            {godAvatar(god, 48, isWorking, `${w.name}, ${GOD_LABEL[god]}`, `detail-avatar-${w.key}`)}
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+                <Text bold size="heading">{w.name}</Text>
+                {badgeText(w, tag, th.accent)}
+                <Box flexGrow={1} />
+                <Text key={`detail-status-${w.key}`} size="caption" color={status.color} dimColor={status.color === undefined}>
+                  {status.text}
+                </Text>
+              </Box>
+              {w.role ? <Text dimColor size="footnote" wrap="truncate-end">{w.role}</Text> : null}
+            </Box>
+          </Box>
+          {tabStrip(w, tab, th.accent, waiting)}
+          {await tabBody(w, tab, th.accent, true)}
+        </Box>
+      )
+    }
+
+    const empty =
+      live.length === 0 ? (
+        <Box key="empty" flexDirection="column" gap="xs" width="100%">
+          {snap.error ? <Text dimColor>{snap.error}</Text> : null}
+          <Text dimColor size="footnote">No workers yet. + New worker makes one: a name, what it does, and a character.</Text>
+        </Box>
+      ) : snap.error ? (
+        <Text dimColor>{snap.error}</Text>
+      ) : null
+
+    if (isWide && live.length > 0 && current) {
+      return (
+        <Box flexDirection="column" alignItems="stretch" width="100%" gap="sm">
+          {header}
+          {newForm}
+          {empty}
+          <Box key="split" flexDirection="row" alignItems="flex-start" gap="sm" width="100%">
+            <Box key="list" flexDirection="column" gap="xs" width="34%" flexShrink={0}>
+              {live.map(row)}
+            </Box>
+            <Box key="detail-column" flexDirection="column" flexGrow={1} flexShrink={1}>
+              {await detail(current)}
+            </Box>
+          </Box>
         </Box>
       )
     }
@@ -1935,7 +2313,7 @@ export const register: Register = on => {
       <Box flexDirection="column" alignItems="stretch" width="100%" gap="sm">
         {header}
         {newForm}
-        {snap.error && snap.workers.length === 0 ? <Text dimColor>{snap.error}</Text> : null}
+        {empty}
         {cards}
       </Box>
     )
@@ -1977,7 +2355,7 @@ export const register: Register = on => {
           {Svg && e.surface !== 'terminal' ? (
             <Svg source={godSvg(god, { size: 16, state: 'idle', animated: false, halo: false })} alt="Workers" width={16} height={16} />
           ) : (
-            <Text color={GOD_COLOUR[god]}>●</Text>
+            <Text color={GOD_ACCENT[god]}>●</Text>
           )}
           <Button
             key="open-workers-band"

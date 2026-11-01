@@ -21,8 +21,12 @@ const CALL = `${HOME}/.voicemode/call`
 const PROJECTS = `${HOME}/.claude/projects`
 const PROJ = `${PROJECTS}/-home-tester-work`
 const PAGES = `${HOME}/.claude/skills/colleague/bin/pages`
-const ACCENT = '#c96442'
 const AMBER = '#b7791f'
+// Each god's accent (register.tsx GOD_ACCENT): a worker's colour in the pane.
+const SCRIBE = '#3b82f6'
+const RESEARCH = '#9061f9'
+const SALES_GOD = '#ea580c'
+const HERALD = '#b47a06'
 const ISO = (ms: number) => new Date(ms).toISOString()
 
 // `version` and each worker's model and effort are keys the pane does not use: every
@@ -147,9 +151,18 @@ test('cards follow the film: header, god, name, status, role, the Ask field and 
   expect(await ui.find({ type: 'Text', text: /Lookups, opening things/ })).toBeDefined()
   expect(await ui.findAll({ type: 'Input' })).toHaveLength(4)
   expect((await ui.find({ key: 'task-deep' }))?.props.placeholder).toBe('Ask Deep…')
-  // The footer: hours chip, then (no charter, so no Run now) Outbox and Open.
-  const footer = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /-quick$/.test(k ?? '') && !/^name-/.test(k ?? ''))
-  expect(footer).toEqual(['hours-quick', 'feed-quick', 'open-quick', 'activity-quick', 'settings-quick', 'delete-quick'])
+  // The footer: hours chip, then (no charter, so no Run now) Outbox and Open. The
+  // first worker is the selected one: under its footer, the tabs, Overview picked.
+  const keysOf = async (k: string) =>
+    (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(x => x?.endsWith(`-${k}`) && !/^name-/.test(x ?? ''))
+  expect(await keysOf('quick')).toEqual([
+    'hours-quick', 'feed-quick', 'open-quick', 'overview-quick', 'outboxtab-quick', 'activity-quick', 'settings-quick',
+  ])
+  expect((await ui.find({ key: 'overview-quick' }))?.props.dimColor).toBe(false)
+  expect((await ui.find({ key: 'activity-quick' }))?.props.dimColor).toBe(true)
+  // Every other card is the film's card alone: no tabs, no Delete on its face.
+  expect(await keysOf('deep')).toEqual(['hours-deep', 'feed-deep', 'open-deep'])
+  expect(await ui.find({ key: 'delete-deep' })).toBeUndefined()
   expect((await ui.find({ key: 'hours-quick' }))?.props.label).toBe('Manual')
   expect((await ui.find({ key: 'feed-quick' }))?.props.label).toBe('Outbox · 0')
   // Line icons, not emoji: a clock, an inbox and an external-link glyph on every card.
@@ -191,21 +204,27 @@ test('each Input is the only submit control: no separate Send or Create Buttons'
   await ui.unmount()
 })
 
-test('the name and Open both open the worker chat and mark the card selected with the accent border', async ($, on) => {
+test("the name and Open both open the worker chat and mark the card selected in its god's colour", async ($, on) => {
   const w = world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // With none picked yet, the first card is the selected one.
+  expect((await ui.find({ key: 'card-quick' }))?.props.borderColor).toBe(SCRIBE)
   expect((await ui.find({ key: 'card-work' }))?.props.borderColor).toBeUndefined()
 
   await ui.press({ key: 'name-work' })
   const work = await ui.find({ key: 'card-work' })
-  expect(work?.props.borderColor).toBe(ACCENT)
+  expect(work?.props.borderColor).toBe(RESEARCH)
   expect(work?.props.borderDimColor).toBe(false)
-  expect(work?.props.backgroundColor).toBeDefined()
+  expect(work?.props.backgroundColor).toBe(`${RESEARCH}0d`)
   expect((await ui.find({ key: 'card-quick' }))?.props.borderDimColor).toBe(true)
+  // The header's dot follows the selected worker.
+  const dot = async () => (await ui.find({ type: 'Text', text: /^●$/ }))?.props.color
+  expect(await dot()).toBe(RESEARCH)
 
   await ui.press({ key: 'open-deep' })
-  expect((await ui.find({ key: 'card-deep' }))?.props.borderColor).toBe(ACCENT)
+  expect((await ui.find({ key: 'card-deep' }))?.props.borderColor).toBe(SALES_GOD)
   expect((await ui.find({ key: 'card-work' }))?.props.borderColor).toBeUndefined()
+  expect(await dot()).toBe(SALES_GOD)
   expect(w.runs).toEqual([
     ['open', 'claude://claude.ai/epitaxy/local_work-2'],
     ['open', 'claude://claude.ai/epitaxy/local_deep-3'],
@@ -213,13 +232,17 @@ test('the name and Open both open the worker chat and mark the card selected wit
   await ui.unmount()
 })
 
-test('Delete needs two presses, then writes the request and drops only that entry, keeping every other key', async ($, on) => {
+test('Delete, in Settings, needs two presses, then writes the request and drops only that entry, keeping every other key', async ($, on) => {
   const w = world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The hours chip selects the worker and opens its Settings, where Delete lives.
+  await ui.press({ key: 'hours-deep' })
+  expect((await ui.find({ key: 'delete-deep' }))?.props.label).toBe('Delete')
   await ui.press({ key: 'delete-deep' })
   expect(w.writes).toHaveLength(0)
   expect((await ui.find({ key: 'delete-deep' }))?.props.label).toBe('Confirm delete')
-  expect((await ui.find({ key: 'delete-work' }))?.props.label).toBe('Delete')
+  expect(await ui.find({ type: 'Text', text: 'Press again to delete it.' })).toBeDefined()
+  expect(await ui.find({ key: 'delete-work' })).toBeUndefined()
 
   await ui.press({ key: 'delete-deep' })
   expect(w.writes).toHaveLength(2)
@@ -236,7 +259,7 @@ test('Delete needs two presses, then writes the request and drops only that entr
   await ui.unmount()
 })
 
-test('the New worker form picks one of six gods, Scribe first, the pick drawn primary', async ($, on) => {
+test('the New worker form picks one of six gods as a radio, Scribe first, the form in the pick\'s colour', async ($, on) => {
   world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
@@ -248,14 +271,20 @@ test('the New worker form picks one of six gods, Scribe first, the pick drawn pr
   expect(tiles.map(b => b.props.label)).toEqual(['Colleague', 'Research', 'Scribe', 'Scout', 'Sales', 'Herald'])
   // Each tile is the god's own drawing, not an emoji swatch.
   expect((await ui.findAll({ type: 'Svg' })).filter(s => s.props.alt === 'Herald')).toHaveLength(1)
-  expect((await ui.find({ key: 'nw-god-scribe' }))?.props.variant).toBe('primary')
-  expect((await ui.find({ key: 'nw-god-herald' }))?.props.variant).toBeUndefined()
+  // Exactly one tile picked: its ring in the god's colour, its label at full strength.
+  const ringed = async () =>
+    (await ui.findAll({ type: 'Box' })).filter(b => b.key?.startsWith('nw-god-tile-') && b.props.borderColor !== undefined).map(b => b.key)
+  expect(await ringed()).toEqual(['nw-god-tile-scribe'])
+  expect((await ui.find({ key: 'nw-god-tile-scribe' }))?.props.borderColor).toBe(SCRIBE)
+  expect((await ui.find({ key: 'nw-god-scribe' }))?.props.dimColor).toBe(false)
+  expect((await ui.find({ key: 'nw-god-herald' }))?.props.dimColor).toBe(true)
 
   await ui.press({ key: 'nw-god-herald' })
-  expect((await ui.find({ key: 'nw-god-herald' }))?.props.variant).toBe('primary')
-  expect((await ui.find({ key: 'nw-god-scribe' }))?.props.variant).toBeUndefined()
-  expect((await ui.find({ key: 'nw-god-tile-herald' }))?.props.borderColor).toBe(ACCENT)
-  expect((await ui.find({ key: 'new-form' }))?.props.borderColor).toBe(ACCENT)
+  expect(await ringed()).toEqual(['nw-god-tile-herald'])
+  expect((await ui.find({ key: 'nw-god-herald' }))?.props.dimColor).toBe(false)
+  expect((await ui.find({ key: 'nw-god-scribe' }))?.props.dimColor).toBe(true)
+  expect((await ui.find({ key: 'nw-god-tile-herald' }))?.props.borderColor).toBe(HERALD)
+  expect((await ui.find({ key: 'new-form' }))?.props.borderColor).toBe(HERALD)
   expect(await ui.find({ type: 'Text', text: /Voice bm_george · drafts only/ })).toBeDefined()
   await ui.unmount()
 })
@@ -408,18 +437,27 @@ test('a proactive card: a badge for what waits, the hours chip, Run now, Outbox 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   // Two drafts and a page wait for a yes; the note does not count.
+  // The badge in the worker's colour (blue avatar: Scribe), on a tint of it.
   const tag = await ui.find({ type: 'Text', text: ' 3 drafts ' })
   expect(tag).toBeDefined()
-  expect(tag?.props.color).toBe(ACCENT)
-  expect(tag?.props.backgroundColor).toBe('#fbe9e5')
+  expect(tag?.props.color).toBe(SCRIBE)
+  expect(tag?.props.backgroundColor).toBe(`${SCRIBE}24`)
   expect((await ui.find({ key: 'hours-sales' }))?.props.label).toBe('Mon to Fri · 9:00')
   expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Outbox · 3')
   expect(await ui.find({ type: 'Text', text: 'Follow-ups' })).toBeDefined()
   const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /-sales$/.test(k ?? '') && !/^name-/.test(k ?? ''))
-  expect(keys).toEqual(['hours-sales', 'run-sales', 'feed-sales', 'open-sales', 'activity-sales', 'settings-sales', 'delete-sales'])
+  expect(keys).toEqual([
+    'hours-sales', 'run-sales', 'feed-sales', 'open-sales', 'overview-sales', 'outboxtab-sales', 'activity-sales', 'settings-sales',
+  ])
+  // The tab reads the count; Overview says when it wakes, in words.
+  expect((await ui.find({ key: 'outboxtab-sales' }))?.props.label).toBe('Outbox · 3')
+  expect(await ui.find({ type: 'Text', text: 'Mon to Fri at 9:00' })).toBeDefined()
+  expect((await ui.find({ key: 'hours-chip-sales' }))?.props.backgroundColor).toBe(`${SCRIBE}1f`)
+  await ui.press({ key: 'settings-sales' })
   const del = await ui.find({ key: 'delete-sales' })
   expect(del?.props.plain).toBe(true)
   expect(del?.props.dimColor).toBeUndefined()
+  await ui.press({ key: 'overview-sales' })
   // The charter is the worker's instructions: never on the card.
   expect(await ui.find({ type: 'Text', text: /You are Sales|More rules here/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Riyadh/ })).toBeUndefined()
@@ -619,13 +657,22 @@ test('Settings show the defaults a v1 worker gets: its god from the avatar, that
 
   expect(await ui.find({ type: 'Text', text: 'Make Sales yours' })).toBeDefined()
   expect((await ui.find({ key: 'rename-sales' }))?.props.value).toBe('Sales')
-  expect((await ui.find({ key: 'god-sales-scribe' }))?.props.variant).toBe('primary') // blue: Scribe
+  // Blue: Scribe, the one tile ringed in Scribe's colour.
+  expect((await ui.find({ key: 'god-sales-scribe' }))?.props.dimColor).toBe(false)
+  expect((await ui.find({ key: 'god-sales-tile-scribe' }))?.props.borderColor).toBe(SCRIBE)
+  expect((await ui.findAll({ type: 'Box' })).filter(b => b.key?.startsWith('god-sales-tile-') && b.props.borderColor).length).toBe(1)
   expect((await ui.find({ key: 'voice-sales' }))?.props.value).toBe('bf_emma')
   const voices = ((await ui.find({ key: 'voice-sales' }))?.props.options as { value: string }[]).map(o => o.value)
   expect(voices).toEqual(['af_heart', 'af_nicole', 'af_bella', 'af_sky', 'bf_emma', 'bf_isabella', 'am_adam', 'am_michael', 'bm_george', 'bm_lewis'])
-  expect((await ui.find({ key: 'tools-sales' }))?.props.value).toBe('full')
+  expect((await ui.find({ key: 'tools-sales-tile-full' }))?.props.borderColor).toBe(SCRIBE)
+  expect((await ui.find({ key: 'tools-sales-full' }))?.props.dimColor).toBe(false)
+  expect((await ui.find({ key: 'tools-sales-drafts' }))?.props.dimColor).toBe(true)
+  expect((await ui.find({ key: 'mode-sales' }))?.props.value).toBe('daily')
   expect((await ui.find({ key: 'days-sales' }))?.props.value).toBe('mon-fri')
   expect((await ui.find({ key: 'time-sales' }))?.props.value).toBe('09:00')
+  expect(await ui.find({ key: 'from-sales' })).toBeUndefined()
+  // The Settings tab is the picked one.
+  expect((await ui.find({ key: 'tabbox-settings-sales' }))?.props.borderColor).toBe(SCRIBE)
   expect((await ui.find({ key: 'pause-sales' }))?.props.label).toBe('Pause')
   // Spaces with a space.json, by name; neither the drafts folder nor a stray folder.
   // With no `spaces` key a worker may write to Notes alone, as bin/pages reads it.
@@ -649,7 +696,7 @@ test('each setting is written into the registry entry, every other key kept', as
 
   await ui.press({ key: 'god-sales-sales' })
   await ui.select({ key: 'voice-sales', value: 'am_michael' })
-  await ui.select({ key: 'tools-sales', value: 'drafts' })
+  await ui.press({ key: 'tools-sales-drafts' })
   await ui.press({ key: 'pause-sales' })
   await ui.select({ key: 'time-sales', value: '07:30' })
   await ui.press({ key: 'space-sales-launch' })
@@ -672,7 +719,10 @@ test('each setting is written into the registry entry, every other key kept', as
   // The card follows at once.
   expect((await ui.findAll({ type: 'Svg' })).filter(s => s.props.alt === 'Sales Desk, Sales')).toHaveLength(1)
   expect((await ui.find({ key: 'hours-sales' }))?.props.label).toBe('Paused')
-  expect((await ui.find({ key: 'god-sales-sales' }))?.props.variant).toBe('primary')
+  expect((await ui.find({ key: 'god-sales-sales' }))?.props.dimColor).toBe(false)
+  // The card takes its new god's colour.
+  expect((await ui.find({ key: 'card-sales' }))?.props.borderColor).toBe(SALES_GOD)
+  expect((await ui.find({ key: 'tools-sales-tile-drafts' }))?.props.borderColor).toBe(SALES_GOD)
   expect((await ui.find({ key: 'space-sales-launch' }))?.props.label).toBe('✓ Launch plan')
 
   // All spaces is "*"; one turned off then keeps the others; All off is the default again.
@@ -688,7 +738,7 @@ test('each setting is written into the registry entry, every other key kept', as
   // Notes off, then no schedule at all; a bad name is refused.
   await ui.press({ key: 'space-sales-notes' })
   await ui.press({ key: 'pause-sales' })
-  await ui.select({ key: 'days-sales', value: 'none' })
+  await ui.select({ key: 'mode-sales', value: 'off' })
   await ui.input({ key: 'rename-sales', text: 'bad;name' })
   const after = registryOf(w).workers[0] ?? {}
   expect(after.spaces).toEqual([])
@@ -698,10 +748,13 @@ test('each setting is written into the registry entry, every other key kept', as
   expect(w.toasts).toContain('A name is 1 to 24 letters, digits or spaces')
   expect((await ui.find({ key: 'hours-sales' }))?.props.label).toBe('Manual')
   expect(await ui.find({ key: 'time-sales' })).toBeUndefined()
+  expect(await ui.find({ key: 'days-sales' })).toBeUndefined()
+  expect((await ui.find({ key: 'mode-sales' }))?.props.value).toBe('off')
 
-  // Done closes the panel.
+  // Done goes back to Overview.
   await ui.press({ key: 'settings-done-sales' })
   expect(await ui.find({ key: 'settings-panel-sales' })).toBeUndefined()
+  expect((await ui.find({ key: 'overview-sales' }))?.props.dimColor).toBe(false)
   await ui.unmount()
 })
 
@@ -713,17 +766,22 @@ test('picking hours for a worker with none gives it a schedule in the zone the o
     ],
   })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'settings-b' })
-  expect((await ui.find({ key: 'days-b' }))?.props.value).toBe('none')
+  await ui.press({ key: 'hours-b' })
+  expect((await ui.find({ key: 'mode-b' }))?.props.value).toBe('off')
+  expect(await ui.find({ key: 'days-b' })).toBeUndefined()
   expect((await ui.find({ key: 'voice-b' }))?.props.value).toBe('am_adam') // Scout's voice
-  expect((await ui.find({ key: 'tools-b' }))?.props.value).toBe('custom')
+  expect((await ui.find({ key: 'tools-b-tile-custom' }))?.props.borderColor).toBe('#578f0e')
   expect(await ui.find({ type: 'Text', text: 'Only: Read, Grep' })).toBeDefined()
 
+  await ui.select({ key: 'mode-b', value: 'daily' })
+  expect(registryOf(w).workers[1]?.schedule).toEqual({ days: 'mon-fri', time: '09:00', tz: 'Europe/Berlin' })
   await ui.select({ key: 'days-b', value: 'sun-thu' })
   expect(registryOf(w).workers[1]?.schedule).toEqual({ days: 'sun-thu', time: '09:00', tz: 'Europe/Berlin' })
-  // Picking the custom row again changes nothing.
-  await ui.select({ key: 'tools-b', value: 'custom' })
+  // Picking the custom row again changes nothing, and neither does the picked preset.
+  const before = w.writes.length
+  await ui.press({ key: 'tools-b-custom' })
   expect(registryOf(w).workers[1]?.tools).toEqual(['Read', 'Grep'])
+  expect(w.writes.length).toBe(before)
   await ui.unmount()
 })
 
@@ -759,9 +817,13 @@ test('Activity shows the last tool steps from the transcript tail, newest first'
   expect(await ui.find({ type: 'Text', text: 'Run the audio tests' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '"mockServer" in ~/repo/tests' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '~/repo/logs/ci-0412.txt' })).toBeDefined()
-  expect((await ui.find({ key: 'activity-sales' }))?.props.label).toBe('Hide activity')
+  expect((await ui.find({ key: 'activity-sales' }))?.props.dimColor).toBe(false)
+  expect((await ui.find({ key: 'tabbox-activity-sales' }))?.props.borderColor).toBe(SCRIBE)
 
+  // A tab is a radio: pressing it again keeps it; Overview puts it away.
   await ui.press({ key: 'activity-sales' })
+  expect(await ui.find({ key: 'activity-panel-sales' })).toBeDefined()
+  await ui.press({ key: 'overview-sales' })
   expect(await ui.find({ key: 'activity-panel-sales' })).toBeUndefined()
   await ui.unmount()
 })
@@ -769,6 +831,9 @@ test('Activity shows the last tool steps from the transcript tail, newest first'
 test('Activity says so when the chat has not run or its transcript is not found', async ($, on) => {
   world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Its chip selects it; then its Activity tab.
+  await ui.press({ key: 'feed-scout' })
+  expect(await ui.find({ type: 'Text', text: /^Nothing here yet\. What Scout drafts/ })).toBeDefined()
   await ui.press({ key: 'activity-scout' })
   expect(await ui.find({ type: 'Text', text: 'No steps yet: the chat has not run' })).toBeDefined()
   await ui.unmount()
