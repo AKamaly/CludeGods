@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""reply: answer a Slack message in its own thread.
+
+  reply <inbox-id> "text"     queue a reply; the Slack bridge posts it in that thread
+  reply <inbox-id>            the text from standard input (also: reply <inbox-id> -)
+
+The inbox id is the one in the message you were given ("id in_..."). An id that is
+in no ~/.voicemode/call/inbox/*.jsonl is refused: a reply only ever goes back to
+a thread a Slack message came from. Markdown is fine; the bridge converts it.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+CALL = Path.home() / ".voicemode" / "call"
+ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+MAX = 40_000
+
+
+def find(iid: str):
+    """(worker key, inbox line) for the id, or None."""
+    inbox = CALL / "inbox"
+    try:
+        files = sorted(inbox.glob("*.jsonl"))
+    except OSError:
+        return None
+    for f in files:
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            if iid not in raw:
+                continue
+            try:
+                line = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(line, dict) and line.get("id") == iid:
+                return f.stem, line
+    return None
+
+
+def bridge_running() -> bool:
+    try:
+        os.kill(int((CALL / "slack-bridge.pid").read_text().strip()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def main(argv) -> int:
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print(__doc__.strip().split("\n\n")[1])
+        return 2
+    iid = argv[1]
+    if not ID_RE.match(iid):
+        print(f"reply: {iid!r} is not an inbox id", file=sys.stderr)
+        return 2
+    if len(argv) > 2 and argv[2] != "-":
+        text = " ".join(argv[2:])
+    else:
+        if sys.stdin.isatty():
+            print("reply: no text (pass it as an argument or on standard input)", file=sys.stderr)
+            return 2
+        text = sys.stdin.read()
+    text = text.strip()
+    if not text:
+        print("reply: empty text, nothing queued", file=sys.stderr)
+        return 2
+    if len(text) > MAX:
+        print(f"reply: {len(text)} characters is too long (at most {MAX})", file=sys.stderr)
+        return 2
+    found = find(iid)
+    if not found:
+        print(f"reply: unknown id {iid}: no Slack message has it, nothing queued", file=sys.stderr)
+        return 3
+    key, line = found
+    replies = CALL / "replies"
+    replies.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # One file per reply: a second reply before the bridge posts the first never overwrites it.
+    path = replies / f"{iid}.json"
+    n = 2
+    while path.exists():
+        path = replies / f"{iid}.{n}.json"
+        n += 1
+    body = {
+        "id": iid,
+        "text": text,
+        "at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "by": key,
+    }
+    tmp = replies / f".{path.name}.{os.getpid()}.tmp"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(body, f, ensure_ascii=False)
+    os.replace(tmp, path)  # the bridge never sees a half-written file
+    where = "a direct message" if line.get("dm") else f"#{line.get('channel') or '?'}"
+    who = line.get("from") or "?"
+    msg = f"queued: reply to {who} in {where} ({iid})"
+    if not bridge_running():
+        msg += "; the Slack bridge is stopped, it posts when it starts"
+    print(msg)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

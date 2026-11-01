@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# bridge: chat bridges for the workers, run from this Mac (Slack first).
+#
+#   bridge start [slack]    connect the Slack bridge (Socket Mode: no public URL)
+#   bridge stop [slack]     disconnect it
+#   bridge status [slack]   configured, running, connected
+#   bridge log [slack]      the last lines of its log
+#
+# Setup (the Slack app, tokens, allow-list, routes): ../bridges/slack/README.md
+set -euo pipefail
+
+DIR="$HOME/.voicemode/call"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SLACK="$HERE/../bridges/slack"
+BRIDGE="$SLACK/slack_bridge.py"
+VENV="$HOME/.voicemode/venvs/slack-bridge"
+SDK="slack_sdk==3.45.0"
+PIDF="$DIR/slack-bridge.pid"
+STATE="$DIR/slack-bridge.state"
+mkdir -p "$DIR"
+
+alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# The status and check commands need only the standard library.
+py() {
+  if [ -x "$VENV/bin/python" ]; then "$VENV/bin/python" -I "$BRIDGE" "$@"; else python3 -I "$BRIDGE" "$@"; fi
+}
+
+which_bridge() {
+  case "${1:-slack}" in
+    slack) ;;
+    teams)
+      echo "teams: not supported yet. Teams only delivers to a public HTTPS endpoint behind an Azure Bot registration, so it cannot run from this Mac alone. See ~/.claude/skills/colleague/bridges/slack/README.md"
+      exit 2 ;;
+    *) echo "bridge: unknown bridge '$1' (there is slack)"; exit 2 ;;
+  esac
+}
+
+# A venv of its own, made once: system Python is never touched.
+ensure_venv() {
+  if [ -x "$VENV/bin/python" ] && [ "$(cat "$VENV/.pin" 2>/dev/null)" = "$SDK" ]; then return 0; fi
+  command -v uv > /dev/null || { echo "slack: needs uv (brew install uv)"; exit 1; }
+  echo "slack: installing $SDK into ~/.voicemode/venvs/slack-bridge (once)"
+  uv venv --quiet --allow-existing --python 3.12 "$VENV" 2>/dev/null || uv venv --quiet --allow-existing "$VENV"
+  uv pip install --quiet --python "$VENV/bin/python" "$SDK"
+  echo "$SDK" > "$VENV/.pin"
+}
+
+state_of() {
+  python3 -I -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("state",""))
+except Exception: print("")' "$STATE"
+}
+
+case "${1:-status}" in
+  start)
+    which_bridge "${2:-slack}"
+    if alive "$PIDF"; then py status; exit 0; fi
+    if ! out=$(py check); then echo "slack: $out"; exit 1; fi
+    ensure_venv
+    rm -f "$STATE"
+    nohup "$VENV/bin/python" -I "$BRIDGE" run >> "$DIR/slack-bridge.out" 2>&1 &
+    echo $! > "$PIDF"; disown
+    # wait for the socket (or an error) for up to 15 s
+    for _ in $(seq 1 30); do
+      case "$(state_of)" in connected|error) break ;; esac
+      alive "$PIDF" || break
+      sleep 0.5
+    done
+    py status
+    ;;
+  stop)
+    which_bridge "${2:-slack}"
+    if alive "$PIDF"; then
+      pid="$(cat "$PIDF")"
+      kill "$pid" 2>/dev/null || true
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDF"
+    echo "slack: stopped"
+    ;;
+  status)
+    which_bridge "${2:-slack}"
+    py status
+    ;;
+  log)
+    which_bridge "${2:-slack}"
+    tail -n "${LINES_SHOWN:-40}" "$DIR/slack-bridge.log" 2>/dev/null || echo "slack: no log yet"
+    ;;
+  *)
+    sed -n '2,8p' "$0"; exit 2
+    ;;
+esac

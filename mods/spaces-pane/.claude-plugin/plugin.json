@@ -1,0 +1,6 @@
+{
+  "name": "spaces-pane",
+  "version": "0.1.0",
+  "description": "A Spaces pane beside the chat: Markdown pages in spaces, nested subpages, search, Ask a worker about a page, and drafts that land only after review",
+  "types": "./types/index.d.ts"
+}

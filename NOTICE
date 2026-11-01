@@ -8,3 +8,11 @@ Only the diff is distributed here; VoiceMode itself is not included.
 
 The project also relies on, without bundling: Whisper and whisper.cpp (MIT), Kokoro (Apache-2.0),
 mlx-audio (MIT), Silero VAD (MIT), and ONNX Runtime (MIT). Check each project for its current terms.
+
+Spaces and Pages, review before saving, per-worker permissions and the Slack bridge follow the
+design of OpenDots (https://github.com/CopilotKit/OpenDots), MIT licensed, copyright Atai
+Barkai. mods/spaces-pane/hooks/register.tsx and skills/colleague/bin/pages adapt its
+pageExcerpt helper; the rest is written for Claude Code.
+
+Interface icons are drawn after Lucide (https://lucide.dev), ISC licensed, copyright Lucide
+Contributors.

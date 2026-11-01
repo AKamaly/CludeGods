@@ -1,0 +1,809 @@
+#!/usr/bin/env python3
+"""pages: Spaces and Pages for CludeGods, as plain Markdown files.
+
+  pages spaces                               the spaces, with page counts
+  pages mkspace "Name" [--emoji E]           make a space
+  pages list [--space S] [--q text]          the pages, as a tree (flat with --q)
+  pages show S/page                          print a page, front matter included
+  pages new S "Title" [--parent P] [--from file|-] [--worker K]
+                                             write a page now (only when the owner asks)
+  pages draft S[/page] "Title" --worker K [--parent P] [--from file|-]
+                                             save a draft for review: S for a new page,
+                                             S/page for a revision of that page
+  pages publish <draft_path|id> [--space S] [--force]
+                                             save a reviewed draft as a page
+
+Files live under ~/.voicemode/call/spaces/:
+  <space>/space.json            {"name", "created", "emoji"?}
+  <space>/<page>.md             front matter (title, created, updated, by, parent?) + Markdown
+  .drafts/<id>.md               a draft awaiting review: the same front matter plus space
+                                (and page, base_updated, base_hash for a revision)
+
+`draft` also appends a `page` item to ~/.voicemode/call/outbox/<worker>.jsonl, so the owner
+reviews it in the Workers pane; Approve runs `pages publish`. `publish` refuses to overwrite
+a page that changed since its draft was made (exit 3) unless --force. A draft published
+twice lands once: the second run answers with the page the first one saved.
+
+Add --json to spaces, list, show, new, draft or publish for machine-readable output.
+Exit codes: 0 done, 1 error, 2 usage, 3 the page changed since the draft, 4 not allowed.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as _dt
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import sys
+import tempfile
+import unicodedata
+from pathlib import Path
+
+EXIT_ERROR, EXIT_USAGE, EXIT_CONFLICT, EXIT_DENIED = 1, 2, 3, 4
+
+TITLE_MAX = 160          # as OpenDots' pageInput
+CONTENT_MAX = 100_000    # as OpenDots' pageInput
+NAME_MAX = 60
+SLUG_MAX = 64
+EXCERPT_MAX = 500
+
+# A slug is letters or digits (any script), then letters, digits, '-' or '_'. No dots and
+# no slashes, so a slug can never climb out of its folder.
+SLUG_RE = re.compile(r"[^\W_][\w-]{0,%d}" % (SLUG_MAX - 1))
+WORKER_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+ID_RE = re.compile(r"ob_[0-9a-f]{12}")
+ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
+
+KEY_ORDER = ["title", "created", "updated", "by", "parent", "space", "page",
+             "base_updated", "base_hash", "id"]
+
+MEMORY_WELCOME = """# About Memory
+
+Pages here are preferences and standing facts every worker may read before it starts: how you like replies written, names to use, things to never do.
+
+- One topic per page, a few short lines each.
+- Workers read Memory. They change it only through a draft you approve.
+- Edit any page in your editor, or ask a worker to draft a change.
+"""
+
+NOTES_WELCOME = """# Welcome to Notes
+
+Notes is a space for working documents: briefs, research, meeting notes and drafts.
+
+- Ask a worker about a page from the Spaces pane.
+- Workers save pages as drafts. You approve them in the Workers pane before they land.
+- Add a subpage to keep related pages together.
+"""
+
+
+class Fail(Exception):
+    def __init__(self, message: str, code: int = EXIT_ERROR):
+        super().__init__(message)
+        self.code = code
+
+
+# ---------------------------------------------------------------- paths
+
+
+def call_dir() -> Path:
+    return Path.home() / ".voicemode" / "call"
+
+
+def spaces_dir() -> Path:
+    return call_dir() / "spaces"
+
+
+def drafts_dir() -> Path:
+    return spaces_dir() / ".drafts"
+
+
+def receipts_dir() -> Path:
+    return drafts_dir() / ".published"
+
+
+def guard(path: Path) -> Path:
+    """The path, if it stays inside the spaces folder once links and '..' are resolved."""
+    root = spaces_dir().resolve()
+    real = path.resolve()
+    if real != root and root not in real.parents:
+        raise Fail(f"Refused: {path} is outside the spaces folder")
+    return path
+
+
+def check_slug(value: str, what: str) -> str:
+    if not isinstance(value, str) or not SLUG_RE.fullmatch(value):
+        raise Fail(f"Not a valid {what}: {value!r} (letters, digits, '-' or '_', up to {SLUG_MAX})")
+    return value
+
+
+def space_path(space: str) -> Path:
+    return guard(spaces_dir() / check_slug(space, "space"))
+
+
+def page_path(space: str, page: str) -> Path:
+    return guard(space_path(space) / f"{check_slug(page, 'page')}.md")
+
+
+def slugify(text: str) -> str:
+    s = unicodedata.normalize("NFKC", text).lower()
+    s = re.sub(r"['’]", "", s)
+    s = re.sub(r"[\W_]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s[:SLUG_MAX].rstrip("-")
+
+
+def now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+# ---------------------------------------------------------------- front matter
+
+
+def fm_value(value: str) -> str:
+    """A front matter value as YAML reads it back unchanged: quoted only when it must be."""
+    v = str(value)
+    if ISO_RE.fullmatch(v):
+        return v
+    risky = (
+        v == ""
+        or v != v.strip()
+        or re.match(r"[-?:,\[\]{}#&*!|>'\"%@`]", v)
+        or ": " in v
+        or " #" in v
+        or v.endswith(":")
+        or re.fullmatch(r"(?i)true|false|null|yes|no|on|off|~|[-+]?[\d.]+(e[-+]?\d+)?", v)
+    )
+    return json.dumps(v, ensure_ascii=False) if risky else v
+
+
+def parse_page(text: str) -> tuple[dict, str]:
+    """Front matter (flat `key: value` lines) and the Markdown body."""
+    lines = text.split("\n")
+    if not lines or lines[0].rstrip("\r") != "---":
+        return {}, text
+    for end in range(1, len(lines)):
+        if lines[end].rstrip("\r") == "---":
+            break
+    else:
+        return {}, text
+    meta: dict[str, str] = {}
+    for line in lines[1:end]:
+        m = re.match(r"([A-Za-z_][\w-]*):[ \t]?(.*)$", line.rstrip("\r"))
+        if not m:
+            continue
+        key, raw = m.group(1), m.group(2).strip()
+        if raw.startswith('"'):
+            try:
+                val = json.loads(raw)
+            except ValueError:
+                val = raw.strip('"')
+        elif len(raw) >= 2 and raw.startswith("'") and raw.endswith("'"):
+            val = raw[1:-1].replace("''", "'")
+        else:
+            val = raw
+        meta[key] = str(val)
+    body = "\n".join(lines[end + 1:])
+    if body.startswith("\n"):
+        body = body[1:]
+    return meta, body
+
+
+def render_page(meta: dict, body: str) -> str:
+    keys = [k for k in KEY_ORDER if k in meta] + [k for k in meta if k not in KEY_ORDER]
+    head = ["---"]
+    for k in keys:
+        v = meta[k]
+        if v is None or v == "":
+            continue
+        head.append(f"{k}: {fm_value(str(v).replace(chr(10), ' ').replace(chr(13), ' '))}")
+    head.append("---")
+    text = "\n".join(head) + "\n"
+    if body.strip():
+        text += "\n" + body.rstrip("\n") + "\n"
+    return text
+
+
+def excerpt(body: str, limit: int = 150) -> str:
+    # After OpenDots' pageExcerpt (src/client/SpaceLibrary.tsx, MIT).
+    s = re.sub(r"```[\s\S]*?```", "Code block", body)
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"(?m)^\s*(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?", "", s)
+    s = re.sub(r"!?\[([^\]]+)\]\([^)]*\)", r"\1", s)
+    s = re.sub(r"[#>*_`|~]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:limit]
+
+
+# ---------------------------------------------------------------- files
+
+
+def write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=path.suffix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+@contextlib.contextmanager
+def locked():
+    """One writer at a time across processes: slugs stay unique, a draft publishes once."""
+    spaces_dir().mkdir(parents=True, exist_ok=True)
+    with open(spaces_dir() / ".lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def file_hash(path: Path) -> str:
+    return hashlib.sha1(path.read_bytes()).hexdigest()
+
+
+def make_space(slug: str, name: str, emoji: str | None = None, welcome: tuple[str, str, str] | None = None) -> None:
+    folder = space_path(slug)
+    folder.mkdir(parents=True, exist_ok=True)
+    info = {"name": name, "created": now_iso()}
+    if emoji:
+        info["emoji"] = emoji
+    write_atomic(folder / "space.json", json.dumps(info, ensure_ascii=False, indent=2) + "\n")
+    if welcome:
+        page, title, body = welcome
+        stamp = now_iso()
+        write_atomic(folder / f"{page}.md", render_page(
+            {"title": title, "created": stamp, "updated": stamp, "by": "you"}, body))
+
+
+def ensure_defaults() -> None:
+    """The built-in Memory space, and on a first run a Notes space, each with a welcome page."""
+    root = spaces_dir()
+    first_run = not root.exists()
+    root.mkdir(parents=True, exist_ok=True)
+    memory = root / "memory"
+    if not memory.exists():
+        make_space("memory", "Memory", welcome=("welcome", "About Memory", MEMORY_WELCOME))
+    elif not (memory / "space.json").exists():
+        make_space("memory", "Memory")
+    if first_run and not (root / "notes").exists():
+        make_space("notes", "Notes", welcome=("welcome", "Welcome", NOTES_WELCOME))
+
+
+def load_space(slug: str) -> dict | None:
+    folder = space_path(slug)
+    info_file = folder / "space.json"
+    if not folder.is_dir() or not info_file.is_file():
+        return None
+    try:
+        info = json.loads(info_file.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        info = {}
+    if not isinstance(info, dict):
+        info = {}
+    name = info.get("name") if isinstance(info.get("name"), str) and info.get("name").strip() else slug
+    out = {"slug": slug, "name": name, "created": str(info.get("created", ""))}
+    if isinstance(info.get("emoji"), str) and info.get("emoji"):
+        out["emoji"] = info["emoji"]
+    return out
+
+
+def require_space(slug: str) -> dict:
+    space = load_space(slug)
+    if space is None:
+        raise Fail(f"No space {slug!r}. Make one with: pages mkspace \"Name\"")
+    return space
+
+
+def all_spaces() -> list[dict]:
+    root = spaces_dir()
+    if not root.is_dir():
+        return []
+    out = []
+    for entry in sorted(root.iterdir(), key=lambda p: p.name):
+        if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
+            continue
+        if not SLUG_RE.fullmatch(entry.name):
+            continue
+        space = load_space(entry.name)
+        if space:
+            space["pages"] = len(page_files(entry.name))
+            out.append(space)
+    # Memory, the built-in space, first; then by name.
+    out.sort(key=lambda s: (s["slug"] != "memory", s["name"].lower()))
+    return out
+
+
+def page_files(space: str) -> list[Path]:
+    folder = space_path(space)
+    if not folder.is_dir():
+        return []
+    return sorted(
+        p for p in folder.iterdir()
+        if p.suffix == ".md" and not p.name.startswith(".") and not p.is_symlink()
+        and p.is_file() and SLUG_RE.fullmatch(p.stem)
+    )
+
+
+def load_page(space: str, slug: str) -> dict | None:
+    path = page_path(space, slug)
+    if not path.is_file():
+        return None
+    meta, body = parse_page(path.read_text(encoding="utf-8", errors="replace"))
+    return {
+        "space": space,
+        "slug": slug,
+        "title": meta.get("title") or slug,
+        "created": meta.get("created", ""),
+        "updated": meta.get("updated", ""),
+        "by": meta.get("by", ""),
+        "parent": meta.get("parent", ""),
+        "path": str(path),
+        "meta": meta,
+        "body": body,
+    }
+
+
+def require_page(space: str, slug: str) -> dict:
+    page = load_page(space, slug)
+    if page is None:
+        raise Fail(f"No page {space}/{slug}")
+    return page
+
+
+def unique_slug(space: str, base: str) -> str:
+    base = base or "page"
+    if len(base) > SLUG_MAX - 4:
+        base = base[:SLUG_MAX - 4].rstrip("-")
+    check_slug(base, "page")
+    slug, n = base, 2
+    while page_path(space, slug).exists():
+        slug, n = f"{base}-{n}", n + 1
+    return slug
+
+
+def split_target(value: str) -> tuple[str, str | None]:
+    if "/" in value:
+        space, _, page = value.partition("/")
+        if not page or "/" in page:
+            raise Fail(f"Expected S/page, got {value!r}")
+        return check_slug(space, "space"), check_slug(page, "page")
+    return check_slug(value, "space"), None
+
+
+def read_content(source: str | None) -> str:
+    if source is None:
+        return ""
+    if source == "-":
+        text = sys.stdin.read()
+    else:
+        try:
+            text = Path(source).expanduser().read_text(encoding="utf-8")
+        except OSError as err:
+            raise Fail(f"Can't read {source}: {err.strerror or err}")
+    if len(text) > CONTENT_MAX:
+        raise Fail(f"Pages hold up to {CONTENT_MAX:,} characters; this one has {len(text):,}")
+    return text
+
+
+def clean_title(title: str) -> str:
+    t = re.sub(r"\s+", " ", title or "").strip()
+    if len(t) > TITLE_MAX:
+        raise Fail(f"A title is up to {TITLE_MAX} characters")
+    return t
+
+
+# ---------------------------------------------------------------- workers
+
+
+def registry_worker(key: str) -> dict:
+    if not WORKER_RE.fullmatch(key or ""):
+        raise Fail(f"Not a valid worker key: {key!r}", EXIT_USAGE)
+    path = call_dir() / "workers.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise Fail("No workers.json: drafts come from a registered worker", EXIT_DENIED)
+    except (ValueError, OSError):
+        raise Fail("workers.json is not valid JSON")
+    for w in data.get("workers", []) if isinstance(data, dict) else []:
+        if isinstance(w, dict) and w.get("key") == key:
+            return w
+    raise Fail(f"No worker {key!r} in workers.json", EXIT_DENIED)
+
+
+def writable_spaces(worker: dict) -> list[str]:
+    """The registry's `spaces`: the spaces this worker may write to. Absent: Notes only."""
+    spaces = worker.get("spaces")
+    if spaces is None:
+        return ["notes"]
+    if spaces == "*":
+        return ["*"]
+    if isinstance(spaces, list):
+        return [s for s in spaces if isinstance(s, str)]
+    return []
+
+
+def require_write(worker: dict, space: str) -> None:
+    allowed = writable_spaces(worker)
+    if "*" not in allowed and space not in allowed:
+        listed = ", ".join(allowed) if allowed else "none"
+        raise Fail(
+            f"{worker.get('name') or worker.get('key')} may not write to {space!r} "
+            f"(its spaces: {listed}). The owner adds it under \"spaces\" in workers.json.",
+            EXIT_DENIED,
+        )
+
+
+def append_outbox(worker_key: str, item: dict) -> Path:
+    path = call_dir() / "outbox" / f"{worker_key}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(item, ensure_ascii=False)
+    with open(path, "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0, os.SEEK_END)
+            if f.tell() > 0:
+                f.seek(f.tell() - 1)
+                if f.read(1) != "\n":
+                    f.write("\n")
+            f.write(line + "\n")
+            f.flush()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    return path
+
+
+# ---------------------------------------------------------------- output
+
+
+def public(page: dict, with_body: bool = False) -> dict:
+    out = {k: page[k] for k in ("space", "slug", "title", "created", "updated", "by", "parent", "path")}
+    if with_body:
+        out["body"] = page["body"]
+    return out
+
+
+def emit(args, data, text: str) -> None:
+    if getattr(args, "json", False):
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    else:
+        print(text)
+
+
+def day(iso: str) -> str:
+    return iso[:10] if iso else "?"
+
+
+# ---------------------------------------------------------------- commands
+
+
+def cmd_spaces(args) -> int:
+    ensure_defaults()
+    spaces = all_spaces()
+    lines = []
+    for s in spaces:
+        count = f"{s['pages']} page" + ("" if s["pages"] == 1 else "s")
+        lines.append(f"{s['slug']}\t{s['name']}\t{count}")
+    emit(args, spaces, "\n".join(lines) if lines else "No spaces yet")
+    return 0
+
+
+def cmd_mkspace(args) -> int:
+    name = re.sub(r"\s+", " ", args.name).strip()
+    if not name or len(name) > NAME_MAX:
+        raise Fail(f"A space name is 1 to {NAME_MAX} characters", EXIT_USAGE)
+    slug = slugify(name)
+    if not slug:
+        raise Fail(f"Can't make a folder name from {name!r}", EXIT_USAGE)
+    ensure_defaults()
+    with locked():
+        if space_path(slug).exists():
+            raise Fail(f"A space {slug!r} exists already")
+        make_space(slug, name, emoji=args.emoji)
+    emit(args, require_space(slug), slug)
+    return 0
+
+
+def tree(pages: list[dict]) -> list[tuple[int, dict]]:
+    """Pages in outline order: each parent, then its subpages, by title. A page whose parent
+    is missing is shown at the top level; a parent loop is broken where it is met first."""
+    by_slug = {p["slug"]: p for p in pages}
+    order = sorted(pages, key=lambda p: p["title"].lower())
+    children: dict[str, list[dict]] = {}
+    for p in order:
+        parent = p.get("parent")
+        if parent and parent in by_slug and parent != p["slug"]:
+            children.setdefault(parent, []).append(p)
+    out: list[tuple[int, dict]] = []
+    placed: set[str] = set()
+
+    def walk(p: dict, depth: int) -> None:
+        if p["slug"] in placed:
+            return
+        placed.add(p["slug"])
+        out.append((depth, p))
+        for child in children.get(p["slug"], []):
+            walk(child, depth + 1)
+
+    for p in order:
+        parent = p.get("parent")
+        if not parent or parent not in by_slug or parent == p["slug"]:
+            walk(p, 0)
+    for p in order:  # pages caught in a parent loop
+        walk(p, 0)
+    return out
+
+
+def cmd_list(args) -> int:
+    ensure_defaults()
+    if args.space:
+        require_space(check_slug(args.space, "space"))
+        spaces = [args.space]
+    else:
+        spaces = [s["slug"] for s in all_spaces()]
+    q = (args.q or "").strip().lower()
+    rows: list[tuple[int, dict]] = []
+    for space in spaces:
+        pages = [p for p in (load_page(space, f.stem) for f in page_files(space)) if p]
+        if q:
+            hits = [p for p in pages if q in f"{p['title']} {p['body']}".lower()]
+            hits.sort(key=lambda p: (p["updated"], p["title"].lower()), reverse=True)
+            rows += [(0, p) for p in hits]
+        else:
+            rows += tree(pages)
+    lines = [
+        f"{'  ' * depth}{p['space']}/{p['slug']}\t{p['title']}\t{day(p['updated'])}\t{p['by'] or '?'}"
+        for depth, p in rows
+    ]
+    data = [dict(public(p), depth=depth) for depth, p in rows]
+    empty = "No matching pages" if q else "No pages yet"
+    emit(args, data, "\n".join(lines) if lines else empty)
+    return 0
+
+
+def cmd_show(args) -> int:
+    space, slug = split_target(args.target)
+    if slug is None:
+        raise Fail("show takes S/page", EXIT_USAGE)
+    page = require_page(space, slug)
+    if args.json:
+        emit(args, public(page, with_body=True), "")
+    else:
+        sys.stdout.write(Path(page["path"]).read_text(encoding="utf-8", errors="replace"))
+    return 0
+
+
+def cmd_new(args) -> int:
+    space = check_slug(args.space, "space")
+    title = clean_title(args.title)
+    if not title:
+        raise Fail("A page needs a title", EXIT_USAGE)
+    by = "you"
+    if args.worker:
+        worker = registry_worker(args.worker)
+        require_write(worker, space)
+        by = args.worker
+    content = read_content(args.source)
+    ensure_defaults()
+    with locked():
+        require_space(space)
+        if args.parent:
+            require_page(space, check_slug(args.parent, "parent page"))
+        slug = unique_slug(space, slugify(title))
+        stamp = now_iso()
+        meta = {"title": title, "created": stamp, "updated": stamp, "by": by}
+        if args.parent:
+            meta["parent"] = args.parent
+        write_atomic(page_path(space, slug), render_page(meta, content))
+    page = require_page(space, slug)
+    emit(args, public(page), f"{space}/{slug}")
+    return 0
+
+
+def cmd_draft(args) -> int:
+    space, target = split_target(args.target)
+    worker = registry_worker(args.worker)
+    require_write(worker, space)
+    content = read_content(args.source)
+    if not content.strip():
+        raise Fail("A draft needs content: --from file, or --from - for stdin", EXIT_USAGE)
+    ensure_defaults()
+    info = require_space(space)
+    title = clean_title(args.title)
+    meta: dict[str, str] = {}
+    if target:
+        current = require_page(space, target)
+        title = title or current["title"]
+        meta.update({"page": target, "base_updated": current["updated"] or "none",
+                     "base_hash": file_hash(Path(current["path"]))})
+        parent = args.parent if args.parent is not None else current["parent"]
+        what = f"Revision of {info['name']} / {current['title']}"
+    else:
+        parent = args.parent or ""
+        what = f"New page in {info['name']}"
+    if not title:
+        raise Fail("A page needs a title", EXIT_USAGE)
+    if parent:
+        require_page(space, check_slug(parent, "parent page"))
+    draft_id = "ob_" + secrets.token_hex(6)
+    stamp = now_iso()
+    head = {"title": title, "created": stamp, "updated": stamp, "by": args.worker}
+    if parent:
+        head["parent"] = parent
+    head["space"] = space
+    head.update(meta)
+    head["id"] = draft_id
+    path = drafts_dir() / f"{draft_id}.md"
+    write_atomic(guard(path), render_page(head, content))
+    preview = excerpt(content, EXCERPT_MAX)
+    item = {
+        "id": draft_id,
+        "at": stamp,
+        "kind": "page",
+        "title": title,
+        "body": f"{what}\n\n{preview}" if preview else what,
+        "needs_approval": True,
+        "space": space,
+        "draft_path": str(path),
+    }
+    if target:
+        item["page"] = target
+    append_outbox(args.worker, item)
+    emit(args, item, f"Draft {draft_id} saved for review: {path}\n"
+                     f"The owner approves it in the Workers pane; it lands as a page only then.")
+    return 0
+
+
+def draft_file(ref: str) -> Path:
+    if ID_RE.fullmatch(ref):
+        path = drafts_dir() / f"{ref}.md"
+    else:
+        path = Path(ref).expanduser()
+    guard(path)
+    real_dir = drafts_dir().resolve()
+    if path.resolve().parent != real_dir or path.suffix != ".md" or not SLUG_RE.fullmatch(path.stem):
+        raise Fail(f"Not a draft: {ref} (drafts live in {drafts_dir()})")
+    return path
+
+
+def cmd_publish(args) -> int:
+    path = draft_file(args.draft)
+    draft_id = path.stem
+    receipt_path = receipts_dir() / f"{draft_id}.json"
+    with locked():
+        if receipt_path.is_file():
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if args.space and receipt.get("space") != args.space:
+                raise Fail(f"Draft {draft_id} was already published to {receipt.get('space')!r}")
+            emit(args, dict(receipt, already=True),
+                 f"Already published: {receipt.get('space')}/{receipt.get('page')}")
+            return 0
+        if not path.is_file():
+            raise Fail(f"No draft {draft_id}")
+        meta, body = parse_page(path.read_text(encoding="utf-8"))
+        space = meta.get("space", "")
+        if args.space and args.space != space:
+            raise Fail(f"Draft {draft_id} is for space {space!r}, not {args.space!r}")
+        check_slug(space, "space")
+        require_space(space)
+        title = clean_title(meta.get("title", "")) or "Untitled"
+        by = meta.get("by") or "you"
+        stamp = now_iso()
+        target = meta.get("page")
+        notes: list[str] = []
+        if target:
+            check_slug(target, "page")
+            current = load_page(space, target)
+            if current is None:
+                if not args.force:
+                    raise Fail(f"{space}/{target} was removed after this draft was made. "
+                               "Publish with --force to save it again.", EXIT_CONFLICT)
+                page_meta = {"created": stamp}
+            else:
+                changed = (current["updated"] or "none") != meta.get("base_updated", "none") \
+                    or (meta.get("base_hash") and file_hash(Path(current["path"])) != meta["base_hash"])
+                if changed and not args.force:
+                    raise Fail(f"{space}/{target} changed after this draft was made. Ask for a fresh "
+                               "draft, or publish with --force to overwrite it.", EXIT_CONFLICT)
+                page_meta = dict(current["meta"])
+            slug = target
+        else:
+            slug = unique_slug(space, slugify(title))
+            page_meta = {"created": stamp}
+        parent = meta.get("parent", "")
+        if parent and (not SLUG_RE.fullmatch(parent) or parent == slug or load_page(space, parent) is None):
+            notes.append(f"its parent page {parent!r} is gone, so it is saved at the top level")
+            parent = ""
+        page_meta.update({"title": title, "updated": stamp, "by": by})
+        page_meta.setdefault("created", stamp)
+        if parent:
+            page_meta["parent"] = parent
+        else:
+            page_meta.pop("parent", None)
+        dest = page_path(space, slug)
+        write_atomic(dest, render_page(page_meta, body))
+        receipt = {"id": draft_id, "space": space, "page": slug, "path": str(dest), "at": stamp}
+        write_atomic(guard(receipt_path), json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        path.unlink()
+    for note in notes:
+        print(f"Note: {note}", file=sys.stderr)
+    emit(args, receipt, f"Published {space}/{slug}: {dest}")
+    return 0
+
+
+# ---------------------------------------------------------------- main
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="pages", description="Spaces and Pages as Markdown files.",
+                                formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def add(name: str, help_: str):
+        sp = sub.add_parser(name, help=help_)
+        sp.add_argument("--json", action="store_true", help="machine-readable output")
+        return sp
+
+    add("spaces", "list the spaces with page counts")
+
+    sp = add("mkspace", "make a space")
+    sp.add_argument("name")
+    sp.add_argument("--emoji")
+
+    sp = add("list", "list pages")
+    sp.add_argument("--space")
+    sp.add_argument("--q", help="search titles and text")
+
+    sp = add("show", "print a page")
+    sp.add_argument("target", metavar="S/page")
+
+    sp = add("new", "write a page now (only when the owner asks)")
+    sp.add_argument("space", metavar="S")
+    sp.add_argument("title")
+    sp.add_argument("--parent", metavar="P")
+    sp.add_argument("--from", dest="source", metavar="file|-")
+    sp.add_argument("--worker", metavar="K")
+
+    sp = add("draft", "save a draft for the owner's review")
+    sp.add_argument("target", metavar="S[/page]")
+    sp.add_argument("title")
+    sp.add_argument("--worker", required=True, metavar="K")
+    sp.add_argument("--parent", metavar="P")
+    sp.add_argument("--from", dest="source", metavar="file|-")
+
+    sp = add("publish", "save a reviewed draft as a page")
+    sp.add_argument("draft", metavar="draft_path|id")
+    sp.add_argument("--space", metavar="S")
+    sp.add_argument("--force", action="store_true", help="overwrite a page that changed since the draft")
+    return p
+
+
+COMMANDS = {
+    "spaces": cmd_spaces, "mkspace": cmd_mkspace, "list": cmd_list, "show": cmd_show,
+    "new": cmd_new, "draft": cmd_draft, "publish": cmd_publish,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    try:
+        return COMMANDS[args.command](args)
+    except Fail as err:
+        print(f"pages: {err}", file=sys.stderr)
+        return err.code
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
