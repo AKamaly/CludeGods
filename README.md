@@ -609,10 +609,13 @@ registry fields turn it on (see the `inbox` worker in `config/workers.example.js
 - **`charter`**: the worker's standing instructions, limits included. For example: each
   run, read new replies, draft follow-ups to the outbox, never send. The card never shows
   it; every wake sends all of it.
-- **`schedule`**: when it runs, as `{"days": "mon-fri", "time": "09:00", "tz": "UTC"}`.
-  `days` takes a range (`mon-fri`, `sun-thu`, `fri-mon`), a list (`mon,wed,fri`) or
-  `daily`; `tz` is any IANA zone. The card shows it as one dim line after the role:
-  `role · Mon–Fri · 9:00`.
+- **`schedule`**: when it runs. Once a day:
+  `{"days": "mon-fri", "time": "09:00", "tz": "UTC"}`. Or every few hours, within optional
+  active hours: `{"days": "mon-fri", "every": "3h", "from": "09:00", "to": "18:00", "tz": "UTC"}`
+  (`every` is `1h`, `2h`, `3h`, `4h`, `6h` or `12h`). `days` takes a range (`mon-fri`,
+  `sun-thu`, `fri-mon`), a list (`mon,wed,fri`) or `daily`; `tz` is any IANA zone. The card's
+  hours chip reads `Mon to Fri · 9:00` or `Every 3h · 9:00-18:00`, and you can set it in the
+  card's Settings.
 
 **The pane is the scheduler.** At the scheduled time the Workers pane sends the worker's
 own chat a wake message carrying its charter. It has to be the pane: the only local thing
@@ -620,7 +623,8 @@ that can put a message into an existing desktop chat is a mod's `$.session.send`
 launchd job or cron has no way into a chat, and a scheduled task starts a new session
 instead of waking the one that holds the worker's context. Each wake claims
 `~/.voicemode/call/wakes/<key>-<date>` with an atomic `mkdir`, so a worker is woken once a
-day however many sessions run the pane. A wake that is not delivered (the chat is not
+day (or once per slot, for an every-few-hours schedule) however many sessions run the pane;
+after a gap only the latest missed slot fires. A wake that is not delivered (the chat is not
 running yet) gives its claim back and retries every 10 minutes.
 
 **Run now** on a card sends the same wake at once.

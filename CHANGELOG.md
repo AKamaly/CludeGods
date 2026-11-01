@@ -9,9 +9,24 @@ release adds features and a patch release fixes things.
 
 ### Added
 
+- **Wake every few hours**: a worker's hours can be every 1, 2, 3, 4, 6 or 12 hours, within
+  optional active hours (for example 9:00 to 18:00) on chosen days, besides once a day. Each
+  slot wakes once however many panes run; after a gap only the latest missed slot fires.
+- **Expanded Workers pane**: when the pane is wide, workers are listed on the left and the
+  selected worker opens on the right, with Overview, Outbox, Activity and Settings tabs.
+  Narrow, the selected card gets the same tabs.
+- **Each worker's own colour**: the selected worker's god colour drives its border, badges,
+  chips, tabs and settings, readable in light and dark.
+
 - A release process: this changelog, CI on every pull request and push to `main` (the
   self-tests, the unit tests, the CallPill build and a snapshot of every pill state), a pull
   request template, and [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Fixed
+
+- Worker settings: choosing a god, tools preset, voice or hours could leave several options
+  looking selected, and quick clicks could undo each other. Every choice is now a single
+  selection that moves on the click, and settings writes are queued so the last click wins.
 
 ## [0.2.0] - 2026-11-01
 

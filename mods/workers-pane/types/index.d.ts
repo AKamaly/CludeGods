@@ -41,10 +41,29 @@ export type RegistryWorker = {
 }
 
 /**
- * A wake time: `days` like "mon-fri", "sun-thu", "mon,wed,fri" or "daily"; `time`
- * "HH:MM" in the IANA zone `tz`.
+ * When the pane wakes the worker to run its charter, in the IANA zone `tz`, on the
+ * weekdays `days` ("mon-fri", "sun-thu", "mon,wed,fri", "sat,sun" or "daily"). Two shapes:
+ *
+ * - Once a day (no `every`), as before: `{ "days": "mon-fri", "time": "09:00", "tz": "Asia/Riyadh" }`.
+ *   Claimed as `wakes/<key>-<date>`; due from `time` until midnight.
+ * - Every N hours: `{ "days": "mon-fri", "every": "3h", "from": "09:00", "to": "18:00", "tz": "Asia/Riyadh" }`.
+ *   `every` is "1h", "2h", "3h", "4h", "6h" or "12h". Slots start at `from` (00:00 when
+ *   absent) and repeat every N hours through `to`, inclusive (the end of the day when
+ *   absent; a window never crosses midnight). Each slot is claimed as
+ *   `wakes/<key>-<date>-<HHMM>` and is due until the next slot (or midnight): a missed
+ *   slot fires once, late, and older missed slots never fire.
  */
-export type Schedule = { days: string; time: string; tz: string }
+export type Schedule = {
+  days: string
+  tz: string
+  /** Once a day: "HH:MM". Ignored when `every` is set. */
+  time?: string
+  /** Every N hours: "1h" to "12h". */
+  every?: string
+  /** The interval's active hours, "HH:MM"; both absent is all day. */
+  from?: string
+  to?: string
+}
 
 /**
  * One line of `~/.voicemode/call/outbox/<key>.jsonl` (outbox v2), as the worker
@@ -77,8 +96,24 @@ export type WorkerStatus = { isWorking: boolean; lastActiveMs: number; isNew: bo
 /** The last task sent to a worker from the pane. */
 export type SentTask = { text: string; atMs: number; isDelivered: boolean; reason?: string }
 
-/** The panel open under a card: its outbox, its recent steps, or its settings. */
-export type Panel = 'outbox' | 'activity' | 'settings'
+/**
+ * The tab a worker's detail shows: Overview (the Ask field, hours, Run now, Open), its
+ * outbox, its recent steps, or its settings. Absent is Overview.
+ */
+export type Panel = 'overview' | 'outbox' | 'activity' | 'settings'
+
+/**
+ * A setting picked in the pane and not yet read back from workers.json: drawn at once
+ * in place of the registry's value, dropped once its write lands (or fails, or after a
+ * few seconds). `value` null means the key is being removed.
+ */
+export type PendingEdit = { value: EditValue; at: number }
+
+/** Worker key to field to its pending pick. */
+export type PendingEdits = Record<string, Record<string, PendingEdit>>
+
+/** A setting's value as workers.json holds it: plain JSON. */
+export type EditValue = string | number | boolean | null | readonly EditValue[] | { readonly [key: string]: EditValue }
 
 /**
  * The New worker form's drawn state; the typed "Name, role" line lives in the hook.
@@ -103,7 +138,10 @@ declare module 'claude-code' {
       rev: Shaped<number>
       sent: Shaped<Record<string, SentTask>>
       form: Shaped<FormState>
-      /** The key of the card last opened (name or Open): drawn with the accent border. '' for none. */
+      /**
+       * The worker whose detail shows: the card drawn with its god's colour (narrow), or
+       * the row and the detail column (wide). '' or a key gone: the first worker.
+       */
       selected: Shaped<string>
       /** Worker key to when its Delete was armed (ms); a second press within 5 s deletes. */
       confirming: Shaped<Record<string, number>>
@@ -111,12 +149,17 @@ declare module 'claude-code' {
       removing: Shaped<Record<string, number>>
       /** Whether the Workers pane is the one shown. */
       paneShown: Shaped<boolean>
-      /** Worker key to the panel open under its card. */
+      /** Worker key to the tab its detail shows; absent is Overview. */
       panels: Shaped<Record<string, Panel>>
       /** Outbox item id to when its Approve or Decline started (ms), while it runs. */
       deciding: Shaped<Record<string, number>>
       /** Worker name to the create waiting for the call session to register it. */
       pending: Shaped<Record<string, PendingCreate>>
+      /**
+       * Worker key to field to a setting picked but not yet written: what makes a radio
+       * group's highlight move on the click, before the registry write lands.
+       */
+      edits: Shaped<PendingEdits>
     }
   }
 }

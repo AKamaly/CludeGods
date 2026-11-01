@@ -9,8 +9,11 @@ import {
   daysLabel,
   declineText,
   dueDate,
+  dueSlot,
+  editSchedule,
   godOf,
   headsUp,
+  intervalSlots,
   legacyId,
   outboxLabel,
   pageSavedText,
@@ -19,6 +22,7 @@ import {
   parseSteps,
   scheduleDays,
   scheduleLabel,
+  scheduleSentence,
   sha1Hex,
   shortArg,
   toolsOf,
@@ -175,4 +179,111 @@ test('a tool call reads as its tool and one short argument', async () => {
     JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `s${i}`, name: 'Bash', input: { description: `step ${i}` } }] } }),
   ).join('\n')
   expect(parseSteps(many, home, 10).map(s => s.arg)).toEqual(Array.from({ length: 10 }, (_, i) => `step ${14 - i}`))
+})
+
+// Every N hours: { days, every, from, to, tz }. Riyadh is UTC+3 all year; New York is
+// UTC-5 from Sun 1 Nov 2026 (its clocks went back that morning).
+const EVERY3 = { days: 'mon-fri', every: '3h', from: '09:00', to: '18:00', tz: 'Asia/Riyadh' }
+const riyadh = (day: number, hhmm: string) => at(`2026-11-${String(day).padStart(2, '0')}T${hhmm}:00+03:00`)
+
+test("Sales' once-a-day schedule is unchanged: the same due window, the same claim id, the same time", async () => {
+  // Mon 2 Nov 09:05 Riyadh: the claim is wakes/sales-2026-11-02, as it always was.
+  expect(dueSlot(WEEKDAYS, riyadh(2, '09:05'))).toEqual({ id: '2026-11-02', date: '2026-11-02', time: '09:00' })
+  expect(dueSlot(WEEKDAYS, riyadh(2, '08:59'))).toBeUndefined()
+  expect(dueSlot(WEEKDAYS, riyadh(2, '23:59'))?.id).toBe('2026-11-02')
+  expect(dueSlot(WEEKDAYS, riyadh(7, '09:05'))).toBeUndefined() // Saturday
+  for (const iso of ['2026-11-02T05:59:00Z', '2026-11-02T06:00:00Z', '2026-11-02T19:00:00Z', '2026-11-02T23:30:00Z', '2026-11-01T12:00:00Z']) {
+    expect(dueSlot(WEEKDAYS, at(iso))?.id).toBe(dueDate(WEEKDAYS, at(iso)))
+  }
+})
+
+test('every 3h within 9:00-18:00: one slot due at a time, each until the next', async () => {
+  expect(intervalSlots(EVERY3)).toEqual([540, 720, 900, 1080]) // 9:00, 12:00, 15:00, 18:00 (inclusive)
+  expect(dueSlot(EVERY3, riyadh(2, '08:59'))).toBeUndefined()
+  expect(dueSlot(EVERY3, riyadh(2, '09:00'))).toEqual({ id: '2026-11-02-0900', date: '2026-11-02', time: '09:00' })
+  expect(dueSlot(EVERY3, riyadh(2, '11:59'))?.id).toBe('2026-11-02-0900')
+  expect(dueSlot(EVERY3, riyadh(2, '12:00'))?.id).toBe('2026-11-02-1200')
+  expect(dueSlot(EVERY3, riyadh(2, '18:00'))?.id).toBe('2026-11-02-1800')
+  // The last slot keeps one interval's grace for a late poll, never longer.
+  expect(dueSlot(EVERY3, riyadh(2, '20:59'))?.id).toBe('2026-11-02-1800')
+  expect(dueSlot(EVERY3, riyadh(2, '21:00'))).toBeUndefined()
+  expect(dueSlot(EVERY3, riyadh(1, '12:00'))).toBeUndefined() // Sunday: off
+  expect(dueSlot(EVERY3, riyadh(6, '12:00'))?.id).toBe('2026-11-06-1200') // Friday
+})
+
+test('the active window: no window is all day, a window ends at midnight, a malformed one never wakes', async () => {
+  const allDay = { days: 'daily', every: '6h', tz: 'Asia/Riyadh' }
+  expect(intervalSlots(allDay)).toEqual([0, 360, 720, 1080])
+  expect(dueSlot(allDay, riyadh(1, '00:00'))?.id).toBe('2026-11-01-0000')
+  expect(dueSlot(allDay, riyadh(1, '23:59'))?.id).toBe('2026-11-01-1800')
+  expect(intervalSlots({ ...allDay, every: '12h' })).toEqual([0, 720])
+  expect(intervalSlots({ ...allDay, every: '1h', from: '09:00', to: '18:00' })).toHaveLength(10)
+  expect(intervalSlots({ ...allDay, every: '4h', from: '10:30' })).toEqual([630, 870, 1110, 1350]) // to the end of the day
+  expect(intervalSlots({ ...allDay, every: '2h', from: '20:00', to: '06:00' })).toEqual([1200, 1320]) // never past midnight
+  expect(intervalSlots({ ...allDay, every: '2h', from: '08:00', to: '24:00' })).toEqual([480, 600, 720, 840, 960, 1080, 1200, 1320])
+  for (const bad of [{ every: '5x' }, { every: '0h' }, { every: '13h' }, { every: '3h', from: '9am' }, { every: '3h', from: '09:00', to: '25:00' }]) {
+    expect(dueSlot({ ...allDay, ...bad }, riyadh(2, '12:00'))).toBeUndefined()
+  }
+  expect(dueSlot({ ...EVERY3, tz: 'Not/AZone' }, riyadh(2, '12:00'))).toBeUndefined()
+})
+
+test("slots follow the worker's own zone across day edges", async () => {
+  const ny = { days: 'mon-fri', every: '2h', tz: 'America/New_York' }
+  // Mon 2 Nov 00:30 New York is 05:30 UTC.
+  expect(dueSlot(ny, at('2026-11-02T05:30:00Z'))).toEqual({ id: '2026-11-02-0000', date: '2026-11-02', time: '00:00' })
+  // Mon 23:30 New York is already Tuesday in UTC: still Monday's 22:00 slot.
+  expect(dueSlot(ny, at('2026-11-03T04:30:00Z'))?.id).toBe('2026-11-02-2200')
+  // Fri 22:00 New York (Saturday in UTC) is a weekday there; Sun 22:00 (Monday in UTC) is not.
+  expect(dueSlot(ny, at('2026-11-07T03:00:00Z'))?.id).toBe('2026-11-06-2200')
+  expect(dueSlot(ny, at('2026-11-02T03:00:00Z'))).toBeUndefined()
+  // Riyadh's Monday starts at 21:00 UTC on Sunday.
+  const r = { days: 'mon-fri', every: '1h', tz: 'Asia/Riyadh' }
+  expect(dueSlot(r, at('2026-11-01T20:59:00Z'))).toBeUndefined()
+  expect(dueSlot(r, at('2026-11-01T21:30:00Z'))?.id).toBe('2026-11-02-0000')
+})
+
+test('no backlog burst: a pane away for hours wakes the latest slot once, the missed ones never', async () => {
+  const fired = (from: string, to: string, gaps: [string, string][] = []) => {
+    const ids: string[] = []
+    for (let ms = riyadh(2, from); ms <= riyadh(2, to); ms += 60_000) {
+      if (gaps.some(([a, b]) => ms >= riyadh(2, a) && ms < riyadh(2, b))) continue
+      const id = dueSlot(EVERY3, ms)?.id
+      if (id && !ids.includes(id)) ids.push(id)
+    }
+    return ids
+  }
+  // Polled every minute all day: each slot once.
+  expect(fired('07:00', '23:00')).toEqual(['2026-11-02-0900', '2026-11-02-1200', '2026-11-02-1500', '2026-11-02-1800'])
+  // Asleep 09:30 to 16:10: 12:00 never fires; 15:00 fires once, late.
+  expect(fired('07:00', '23:00', [['09:30', '16:10']])).toEqual(['2026-11-02-0900', '2026-11-02-1500', '2026-11-02-1800'])
+  // Away all morning, back at 16:10: one wake, not three.
+  expect(fired('16:10', '16:20')).toEqual(['2026-11-02-1500'])
+})
+
+test('interval labels: the chip, the sentence and the Hours control edits', async () => {
+  expect(scheduleLabel(EVERY3)).toBe('Every 3h · 9:00-18:00')
+  expect(scheduleLabel({ days: 'daily', every: '2h', tz: 'UTC' })).toBe('Every 2h')
+  expect(scheduleLabel({ days: 'daily', every: '6h', from: '07:00', tz: 'UTC' })).toBe('Every 6h · from 7:00')
+  expect(chipLabel({ schedule: EVERY3 })).toBe('Every 3h · 9:00-18:00')
+  expect(chipLabel({ schedule: EVERY3, paused: true })).toBe('Paused')
+  expect(scheduleSentence(EVERY3)).toBe('Every 3h, 9:00-18:00, Mon to Fri')
+  expect(scheduleSentence({ days: 'daily', every: '1h', tz: 'UTC' })).toBe('Every 1h, every day')
+  expect(scheduleSentence(WEEKDAYS)).toBe('Mon to Fri at 9:00')
+  expect(scheduleSentence({ days: 'daily', time: '07:30', tz: 'UTC' })).toBe('Every day at 7:30')
+
+  // Once a day to every 3h: the documented shape, the default window, the days kept.
+  const withExtra = { ...WEEKDAYS, note: 'kept' }
+  expect(editSchedule(withExtra, { mode: '3h' }, 'UTC')).toEqual({ days: 'mon-fri', every: '3h', from: '09:00', to: '18:00', tz: 'Asia/Riyadh', note: 'kept' })
+  // And back: once a day, the interval's keys gone.
+  expect(editSchedule(EVERY3, { mode: 'daily' }, 'UTC')).toEqual({ days: 'mon-fri', time: '09:00', tz: 'Asia/Riyadh' })
+  expect(editSchedule(EVERY3, { mode: '6h' }, 'UTC')).toEqual({ ...EVERY3, every: '6h' })
+  expect(editSchedule(EVERY3, { from: '' }, 'UTC')).toEqual({ days: 'mon-fri', every: '3h', tz: 'Asia/Riyadh' })
+  expect(editSchedule(EVERY3, { from: '19:00' }, 'UTC')).toEqual({ days: 'mon-fri', every: '3h', from: '19:00', tz: 'Asia/Riyadh' })
+  expect(editSchedule(EVERY3, { to: '' }, 'UTC')).toEqual({ days: 'mon-fri', every: '3h', from: '09:00', tz: 'Asia/Riyadh' })
+  expect(editSchedule(EVERY3, { days: 'sun-thu' }, 'UTC')).toEqual({ ...EVERY3, days: 'sun-thu' })
+  expect(editSchedule(WEEKDAYS, { time: '07:30' }, 'UTC')).toEqual({ ...WEEKDAYS, time: '07:30' })
+  expect(editSchedule(EVERY3, { mode: 'off' }, 'UTC')).toBeUndefined()
+  expect(editSchedule(WEEKDAYS, { days: 'none' }, 'UTC')).toBeUndefined()
+  expect(editSchedule(undefined, { mode: 'daily' }, 'Europe/Berlin')).toEqual({ days: 'mon-fri', time: '09:00', tz: 'Europe/Berlin' })
+  expect(editSchedule(undefined, { mode: '2h' }, 'Europe/Berlin')).toEqual({ days: 'mon-fri', every: '2h', from: '09:00', to: '18:00', tz: 'Europe/Berlin' })
 })

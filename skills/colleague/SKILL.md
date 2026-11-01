@@ -105,8 +105,9 @@ The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
 - **Open the pane**: `touch ~/.voicemode/call/open-workers`. Never ask them to type `/workers`.
 - **Proactive workers**: a registry entry may carry a `charter` (the worker's standing
   brief, limits included) and a `schedule` (`{"days": "mon-fri", "time": "09:00", "tz":
-  "UTC"}`; days also take `sun-thu`, `mon,wed,fri` or `daily`). To make a worker proactive,
-  write both into its entry; the Workers pane wakes it at that time, once a day. Do not
+  "UTC"}`, or every few hours: add `"every": "3h"` with optional `"from"`/`"to"` active hours
+  instead of `"time"`; days also take `sun-thu`, `mon,wed,fri` or `daily`). To make a worker
+  proactive, write both into its entry; the Workers pane wakes it at those times. Do not
   use a scheduled task or cron for this: neither can put a message into an existing chat.
   The charter must say: drafts only, never send, and append one JSON line per item to
   `~/.voicemode/call/outbox/<key>.jsonl`:
