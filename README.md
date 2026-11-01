@@ -525,7 +525,6 @@ easiest to review. Before sending a change:
   [whisper.cpp](https://github.com/ggml-org/whisper.cpp): speech to text.
 - [Silero VAD](https://github.com/snakers4/silero-vad): voice activity detection.
 - [mlx-audio](https://github.com/Blaizzy/mlx-audio): fast local speech on Apple Silicon.
-- Landing layout inspired by [CopilotKit/OpenDots](https://github.com/CopilotKit/OpenDots).
 
 ## License
 
