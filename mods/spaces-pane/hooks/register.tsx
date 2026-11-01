@@ -441,7 +441,13 @@ export const register: Register = on => {
   const typed = { search: '', title: '', ask: '' }
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'spaces', description: 'Show the Spaces pane' })
+    // `/spaces` is the workers' Spaces skill, so the pane's command is `/spaces-pane`. A refused
+    // name must never stop the poll below.
+    try {
+      await $.command.register({ name: 'spaces-pane', description: 'Show the Spaces pane' })
+    } catch {
+      // a name the person or another plugin already holds: the footer launcher still opens it
+    }
     const p = await pathsOf($, memo)
     timer?.cancel()
     if (p) {
@@ -480,7 +486,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'spaces' }, async $ => {
+  on('command.run', { command: 'spaces-pane' }, async $ => {
     await openPane($, false)
     return { text: 'Spaces pane opened.' }
   })

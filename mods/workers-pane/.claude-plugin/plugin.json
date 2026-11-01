@@ -2,5 +2,8 @@
   "name": "workers-pane",
   "version": "0.2.0",
   "description": "A Workers pane beside the chat: standing worker chats as god cards with live status, an Ask field, scheduled wakes, an outbox to approve or decline, recent activity, and per-worker settings",
+  "author": {
+    "name": "AKamaly"
+  },
   "types": "./types/index.d.ts"
 }

@@ -54,7 +54,7 @@ test('the session start registers /spaces, seeds Memory and Notes on a first run
   await start($)
   await settle()
 
-  expect(w.commands).toEqual(['spaces'])
+  expect(w.commands).toEqual(['spaces-pane'])
   expect(w.opens).toEqual([])
   const written = w.writes.map(x => x.path)
   expect(written).toEqual([
@@ -91,7 +91,7 @@ test('/spaces opens the pane', async ($, on) => {
   const w = world(on)
   await start($)
   await settle()
-  const result = await $.command.run({ command: 'spaces', args: '' } as any)
+  const result = await $.command.run({ command: 'spaces-pane', args: '' } as any)
   expect(JSON.stringify(result)).toContain('Spaces pane opened.')
   expect(w.opens).toEqual([expect.objectContaining({ id: 'spaces', title: 'Spaces', columns: 46 })])
 })

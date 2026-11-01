@@ -1,0 +1,24 @@
+{
+  "name": "cludegods",
+  "owner": {
+    "name": "AKamaly"
+  },
+  "description": "CludeGods: voice calls, always-on workers, Spaces and a Slack bridge for Claude Code, as desktop mods",
+  "plugins": [
+    {
+      "name": "workers-pane",
+      "source": "./mods/workers-pane",
+      "description": "The Workers pane: your standing worker chats as god cards with status, an Ask field, hours, an outbox to approve, activity, and settings"
+    },
+    {
+      "name": "spaces-pane",
+      "source": "./mods/spaces-pane",
+      "description": "The Spaces pane: Markdown spaces and pages you and your workers share, with drafts that land only after your approval"
+    },
+    {
+      "name": "inbox-relay",
+      "source": "./mods/inbox-relay",
+      "description": "Hands messages from the Slack bridge to the right worker chat"
+    }
+  ]
+}
