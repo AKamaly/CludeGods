@@ -1,0 +1,702 @@
+#!/usr/bin/env python3
+"""PreToolUse hook: per-worker tool permissions (each worker's "tools" in the registry).
+
+The hook's session_id is matched to a worker by the registry's "transcript" file stem
+(~/.voicemode/call/workers.json). Not a worker: allow silently. A worker is held to its
+"tools" setting:
+
+    full (or missing)  no guard: everything the session could do anyway
+    read               Read, Grep, Glob, WebSearch, WebFetch, LS, and in Bash only
+                       `pages list|show|spaces` (reading Spaces)
+    drafts             read + Write/Edit only into its own outbox (outbox/<key>.jsonl) and
+                       page drafts (spaces/.drafts/) + a read-only Bash allow-list, plus
+                       `pages draft` (a page for review) and `reply` (its Slack thread reply).
+                       `pages publish|new|mkspace` stay blocked: publishing is the owner's
+                       Approve in the Workers pane
+    [names]            an explicit allow-list of tool names ("mcp__x__*" matches a prefix)
+
+Every worker may also use the harness tools that change nothing (ToolSearch, TodoWrite,
+Skill, ...) and may speak on the call (`~/.claude/skills/colleague/bin/call say`).
+
+Allowed: prints nothing, exit 0, so the normal permission flow carries on (this hook never
+grants anything). Denied: the hook's JSON decision with a reason the worker can act on.
+Fails open: any error of its own is logged to ~/.voicemode/call/guard.log and the tool runs.
+The registry is cached by mtime in ~/.voicemode/call/.guard-cache.json.
+
+    guard < payload.json      the hook
+    guard --selftest          synthetic payloads against a temp registry, asserts decisions
+
+Standard library only; Python 3.9 compatible (hooks may run the system python3).
+"""
+
+import json
+import os
+import re
+import shlex
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+CALL_DIR = os.environ.get("GUARD_CALL_DIR") or os.path.join(HOME, ".voicemode", "call")
+BIN = os.path.dirname(os.path.realpath(__file__))
+
+READ_TOOLS = {"Read", "Grep", "Glob", "WebSearch", "WebFetch", "LS"}
+WRITE_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path",
+               "NotebookEdit": "notebook_path"}
+# harness tools that change nothing outside the chat; every worker keeps them
+HARNESS = {"ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
+           "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "Skill"}
+HARNESS_PREFIXES = ("mcp__ccd_turn__",)
+
+# Bash for drafts workers: commands that only read. Anything else is denied.
+READONLY = set("""
+cat head tail ls pwd echo printf wc grep egrep fgrep rg stat file du df which type whoami id
+uname printenv cut tr jq basename dirname realpath readlink diff cmp comm column nl tree md5
+md5sum shasum sha1sum sha256sum od hexdump strings true false test [ seq sleep cd ps pgrep
+lsof uptime sw_vers mdfind mdls tac rev paste join fold expand unexpand look cal locale
+pbpaste sort uniq xxd find date sed git plutil defaults hostname env
+""".split())
+BAD_ARGS = {  # flags that make an otherwise read-only command write or run something
+    "find": ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0",
+             "-fprintf", "-fls"),
+    "sort": ("-o", "--output", "--compress-program"),
+    "rg": ("--pre",),
+    "tree": ("-o",),
+    "file": ("-C",),
+    "date": ("-s", "--set"),
+}
+GIT_READ = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "describe",
+            "shortlog", "grep", "cat-file", "ls-tree", "branch", "remote", "config", "reflog",
+            "rev-list", "name-rev", "whatchanged", "merge-base", "for-each-ref", "tag"}
+SAFE_BIN_DIRS = ("/bin/", "/usr/bin/", "/usr/sbin/", "/sbin/", "/opt/homebrew/bin/",
+                 "/usr/local/bin/")
+SEPARATORS = {"|", "||", "&&", ";", "&", "\n", "|&", ";;", "(", ")"}
+OUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>"}
+IN_REDIRECTS = {"<", "<<", "<<<"}
+
+
+# ---------------------------------------------------------------------------- plumbing
+
+def log(msg):
+    path = os.path.join(CALL_DIR, "guard.log")
+    try:
+        if os.path.getsize(path) > 1_000_000:  # keep it small: drop the older half
+            with open(path) as f:
+                tail = f.read()[-500_000:]
+            with open(path, "w") as f:
+                f.write(tail)
+    except OSError:
+        pass
+    try:
+        with open(path, "a") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%S") + " " + msg.replace("\n", " ") + "\n")
+    except OSError:
+        pass
+
+
+def stem(transcript):
+    name = os.path.basename(str(transcript).strip())
+    return name[:-6] if name.endswith(".jsonl") else name
+
+
+def workers():
+    """{transcript stem: {key, name, tools}}, cached by the registry's mtime and size.
+    A registry caught mid-write falls back to the last good cache."""
+    reg = os.path.join(CALL_DIR, "workers.json")
+    cache = os.path.join(CALL_DIR, ".guard-cache.json")
+    try:
+        st = os.stat(reg)
+    except FileNotFoundError:
+        return {}
+    sig = [st.st_mtime_ns, st.st_size]
+    cached = None
+    try:
+        with open(cache) as f:
+            cached = json.load(f)
+        if cached.get("sig") == sig:
+            return cached["by_stem"]
+    except (OSError, ValueError, KeyError, AttributeError):
+        cached = None
+    try:
+        with open(reg) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        log(f"registry unreadable ({e}); using the last good cache")
+        return (cached or {}).get("by_stem", {})
+    by_stem = {}
+    for w in data.get("workers", []) if isinstance(data, dict) else []:
+        if not isinstance(w, dict) or not w.get("transcript"):
+            continue
+        by_stem[stem(w["transcript"])] = {"key": w.get("key") or "", "name": w.get("name") or
+                                          w.get("key") or "This worker",
+                                          "tools": w.get("tools", "full")}
+    try:
+        tmp = f"{cache}.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump({"sig": sig, "by_stem": by_stem}, f)
+        os.replace(tmp, cache)
+    except OSError:
+        pass
+    return by_stem
+
+
+def deny(reason):
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
+def tilde(path):
+    return "~" + path[len(HOME):] if path.startswith(HOME + os.sep) else path
+
+
+# ---------------------------------------------------------------------------- paths
+
+def expand(word, cwd=None):
+    """An absolute real path for a file path or redirect target, or None if it is relative
+    (a `cd` earlier in the command could move it) or uses any variable but $HOME."""
+    for pre in ("$HOME", "${HOME}", "~"):
+        if word == pre or word.startswith(pre + "/"):
+            word = HOME + word[len(pre):]
+            break
+    if "$" in word or "`" in word:
+        return None
+    if not os.path.isabs(word):
+        if cwd is None:
+            return None
+        word = os.path.join(cwd, word)
+    return os.path.realpath(word)
+
+
+def draft_area(key, path):
+    """May a drafts worker write here? Its own outbox file, or a page draft."""
+    if not path:
+        return False
+    call = os.path.realpath(CALL_DIR)
+    if path == os.path.join(call, "outbox", f"{key}.jsonl"):
+        return True
+    drafts = os.path.join(call, "spaces", ".drafts") + os.sep
+    return path.startswith(drafts)
+
+
+# ---------------------------------------------------------------------------- Bash
+
+def strip_heredocs(cmd):
+    """The command with heredoc bodies removed (they are data). Only quoted delimiters
+    (<<'EOF', <<"EOF") are taken: an unquoted one expands $(...) in its body. Returns None
+    when a heredoc cannot be read safely."""
+    out, i, n, q, pending = [], 0, len(cmd), None, []
+    while i < n:
+        c = cmd[i]
+        if q == "'":
+            q = None if c == "'" else q
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if q == '"':
+            q = None if c == '"' else q
+            out.append(c)
+            i += 1
+            continue
+        if c in "'\"":
+            q = c
+            out.append(c)
+            i += 1
+            continue
+        if cmd.startswith("<<<", i):
+            out.append("<<<")
+            i += 3
+            continue
+        if cmd.startswith("<<", i):
+            m = re.match(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\")", cmd[i:])
+            if not m:
+                return None
+            pending.append((m.group(2) or m.group(3), m.group(1) == "-"))
+            out.append("<< HEREDOC")
+            i += m.end()
+            continue
+        if c == "\n" and pending:
+            out.append("\n")
+            i += 1
+            for delim, tabs in pending:
+                while True:
+                    if i >= n:
+                        return None  # unterminated
+                    j = cmd.find("\n", i)
+                    line = cmd[i:] if j < 0 else cmd[i:j]
+                    i = n if j < 0 else j + 1
+                    if (line.lstrip("\t") if tabs else line) == delim:
+                        break
+            pending = []
+            continue
+        out.append(c)
+        i += 1
+    return None if pending or q else "".join(out)
+
+
+def tokens(cmd):
+    lx = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&\n")
+    lx.whitespace = " \t\r"
+    lx.commenters = ""
+    lx.wordchars += "$#@%+,:!^[]{}"
+    return list(lx)
+
+
+def is_punct(tok):
+    return bool(tok) and all(ch in "();<>|&\n" for ch in tok)
+
+
+def segments(cmd):
+    """Simple commands as (words, out_targets), or raise ValueError when the command
+    cannot be judged (substitution, unparseable)."""
+    body = strip_heredocs(cmd.replace("\\\n", " "))
+    if body is None:
+        raise ValueError("a heredoc with an unquoted delimiter")
+    for bad in ("$(", "`", "<(", ">("):
+        if bad in body:
+            raise ValueError("command substitution")
+    segs, words, outs = [], [], []
+    toks = tokens(body)
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if is_punct(t) and t not in OUT_REDIRECTS | IN_REDIRECTS | {">&", "<&"}:
+            if words or outs:
+                segs.append((words, outs))
+            words, outs = [], []
+            i += 1
+            continue
+        if t in OUT_REDIRECTS | IN_REDIRECTS | {">&", "<&"}:
+            if words and words[-1].isdigit():  # the fd number of 2>/dev/null
+                words.pop()
+            if i + 1 >= len(toks) or is_punct(toks[i + 1]):
+                raise ValueError("a redirect with no target")
+            target = toks[i + 1]
+            if t in (">&", "<&"):
+                if not (target.isdigit() or target == "-"):
+                    raise ValueError("a redirect to a file by >&")
+            elif t in OUT_REDIRECTS and target != "/dev/null":
+                outs.append(target)
+            i += 2
+            continue
+        words.append(t)
+        i += 1
+    if words or outs:
+        segs.append((words, outs))
+    return segs
+
+
+def colleague_script(word):
+    """'call' / 'pages' / ... when word is one of the colleague skill's own scripts."""
+    path = expand(word)
+    if path and os.path.dirname(path) == BIN:
+        return os.path.basename(path)
+    return None
+
+
+def speaking(words):
+    """`call say ...` / `call status`: speaking on the call, open to every worker."""
+    return (len(words) >= 2 and colleague_script(words[0]) == "call"
+            and words[1] in ("say", "status"))
+
+
+PAGES_READ = ("list", "show", "spaces")
+
+
+def pages_problem(words, may_draft):
+    """For a `pages` command: None if this preset may run it, else why."""
+    sub = words[1] if len(words) > 1 else ""
+    if sub in PAGES_READ or (may_draft and sub == "draft"):
+        return None
+    if sub in ("publish", "new", "mkspace"):
+        return (f"`pages {sub}` is the owner's Approve in the Workers pane"
+                + ("; save it with `pages draft` for review" if may_draft else ""))
+    allowed = "list|show|spaces" + ("|draft" if may_draft else "")
+    return f"only `pages {allowed}` are open to it"
+
+
+def readonly_problem(words):
+    """None if this simple command only reads, else a short why."""
+    if not words:
+        return None
+    if speaking(words):
+        return None
+    prog, args = words[0], words[1:]
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", prog):
+        return "environment assignments are not on the list"
+    script = colleague_script(prog)
+    if script == "pages":
+        return pages_problem(words, may_draft=True)
+    if script == "reply":  # its answer in the Slack thread that asked it
+        return None
+    if script:
+        return f"`{script}` is not on the read-only list"
+    if "/" in prog:
+        if not prog.startswith(SAFE_BIN_DIRS):
+            return f"`{prog}` is not on the read-only list"
+        prog = os.path.basename(prog)
+    if prog not in READONLY:
+        return f"`{prog}` is not on the read-only list"
+    for flag in BAD_ARGS.get(prog, ()):
+        if any(a == flag or a.startswith(flag + "=") or (flag.startswith("--") and
+               a.startswith(flag)) for a in args):
+            return f"`{prog} {flag}` writes or runs something"
+    positional = [a for a in args if not a.startswith("-")]
+    if prog == "env" and args:
+        return "`env` with arguments runs a command"
+    if prog in ("uniq", "xxd") and len(positional) > 1:
+        return f"`{prog}` with an output file writes"
+    if prog == "hostname" and positional:
+        return "`hostname NAME` sets the hostname"
+    if prog == "date" and any(not a.startswith(("-", "+")) for a in args):
+        return "`date` with a time sets the clock"
+    if prog == "sed":
+        if any(a.startswith(("-i", "-I", "--in-place")) for a in args):
+            return "`sed -i` edits files"
+        scripts = [a for a in args if not a.startswith("-")][:1]
+        if not scripts or not re.match(r"^\s*(\d+|\$)?\s*(,\s*(\d+|\$))?\s*p\s*$|^/[^/]*/p$",
+                                       scripts[0]):
+            return "only `sed -n 'N,Mp'` style printing is on the list"
+    if prog == "plutil" and not any(a in ("-p", "-lint") for a in args):
+        return "only `plutil -p` / `-lint` read"
+    if prog == "defaults" and (not args or args[0] not in ("read", "read-type", "domains")):
+        return "only `defaults read` reads"
+    if prog == "git":
+        return git_problem(args)
+    return None
+
+
+def git_problem(args):
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        if a == "-C":
+            i += 2
+            continue
+        if a in ("--no-pager", "-P", "--no-optional-locks") or a.startswith(("--git-dir=",
+                                                                             "--work-tree=")):
+            i += 1
+            continue
+        return f"`git {a}` is not on the read-only list"
+    if i >= len(args):
+        return None  # bare `git`: prints usage
+    if args[i] not in GIT_READ:
+        return f"`git {args[i]}` is not on the read-only list"
+    sub, rest = args[i], args[i + 1:]
+    if any(a.startswith(("--output", "-O", "--open-files-in-pager", "--ext-diff")) for a in rest):
+        return f"`git {sub}` with that flag writes or runs something"
+    flags_only = all(a.startswith("-") for a in rest)
+    if sub in ("branch", "tag") and not (flags_only and all(
+            a in ("-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all",
+                  "--remotes", "--merged", "--no-merged", "--contains") for a in rest)):
+        return f"`git {sub}` with a name changes the repo"
+    if sub == "remote" and rest not in ([], ["-v"]) and (not rest or rest[0] != "get-url"):
+        return "`git remote` that changes a remote"
+    if sub == "config" and not any(a in ("--get", "--get-all", "--list", "-l",
+                                         "--get-regexp") for a in rest):
+        return "`git config` that sets a value"
+    if sub == "reflog" and rest and rest[0] in ("expire", "delete"):
+        return "`git reflog expire|delete` changes the repo"
+    return None
+
+
+# ---------------------------------------------------------------------------- decision
+
+def decide(worker, tool, inp, cwd=None):
+    """None to allow, else the deny reason."""
+    key, name, tools = worker["key"], worker["name"], worker.get("tools", "full")
+    if tools in (None, "full", ""):
+        return None
+    if tool in HARNESS or tool.startswith(HARNESS_PREFIXES):
+        return None
+    outbox = f"~/.voicemode/call/outbox/{key}.jsonl"
+
+    if isinstance(tools, list):
+        allowed = [t for t in tools if isinstance(t, str)]
+        if any(tool == t or (t.endswith("*") and tool.startswith(t[:-1])) for t in allowed):
+            return None
+        if tool == "Bash" and only_speaking(inp.get("command", "")):
+            return None
+        return (f"{name} may only use {', '.join(allowed) or 'no tools'}: {tool} is not one of "
+                f"them. Say what you need in your reply instead.")
+
+    if tools not in ("read", "drafts"):
+        log(f"{key}: unknown tools setting {tools!r}, held to read")
+        tools = "read"
+
+    if tool in READ_TOOLS:
+        return None
+    if tools == "read":
+        if tool == "Bash":
+            why = read_bash_problem(inp.get("command", ""))
+            if why is None:
+                return None
+            return f"{name} is read-only: {why}. Say what you would do in your reply instead."
+        return (f"{name} is read-only: it can read and search, not use {tool}. "
+                f"Say what you would do in your reply instead.")
+
+    # drafts
+    if tool in WRITE_TOOLS:
+        path = expand(str(inp.get(WRITE_TOOLS[tool]) or ""), cwd)
+        if draft_area(key, path):
+            return None
+        return (f"{name} is drafts-only: write to the outbox instead ({outbox}), "
+                f"or draft a page with ~/.claude/skills/colleague/bin/pages draft.")
+    if tool == "Bash":
+        why = bash_problem(key, inp.get("command", ""))
+        if why is None:
+            return None
+        return (f"{name} is drafts-only: {why}. Put what you would run in the outbox "
+                f"({outbox}) for a yes.")
+    return f"{name} is drafts-only: {tool} is not allowed. Write to the outbox instead ({outbox})."
+
+
+def only_speaking(cmd):
+    try:
+        segs = segments(cmd)
+    except ValueError:
+        return False
+    return bool(segs) and all(speaking(w) and not outs for w, outs in segs)
+
+
+def read_bash_problem(cmd):
+    """Read workers run no commands but speaking on the call and reading Spaces."""
+    try:
+        segs = segments(cmd)
+    except ValueError as e:
+        return f"the command has {e}"
+    if not segs:
+        return "it can read and search, not run commands"
+    for words, outs in segs:
+        if outs:
+            return f"it can read and search, not write to {outs[0]}"
+        if speaking(words):
+            continue
+        if words and colleague_script(words[0]) == "pages":
+            why = pages_problem(words, may_draft=False)
+            if why:
+                return why
+            continue
+        prog = words[0] if words else ""
+        return (f"it can read and search, not run `{prog}` (Bash is open to it only for "
+                f"`call say` and `pages list|show|spaces`)")
+    return None
+
+
+def bash_problem(key, cmd):
+    try:
+        segs = segments(cmd)
+    except ValueError as e:
+        return f"the command has {e}"
+    for words, outs in segs:
+        for target in outs:
+            if not draft_area(key, expand(target)):
+                return f"it writes to {target}"
+        why = readonly_problem(words)
+        if why:
+            return why
+    return None
+
+
+def main():
+    raw = sys.stdin.read()
+    if not os.path.exists(os.path.join(CALL_DIR, "workers.json")):
+        return
+    event = json.loads(raw)
+    sid = event.get("session_id") or ""
+    by_stem = workers()
+    worker = by_stem.get(sid) or by_stem.get(stem(event.get("transcript_path") or "")
+                                             if event.get("transcript_path") else "")
+    if not worker:
+        return
+    tool, inp = event.get("tool_name") or "", event.get("tool_input") or {}
+    reason = decide(worker, tool, inp, event.get("cwd"))
+    if reason:
+        log(f"deny {worker['key']} {tool}: {reason}")
+        sys.stdout.write(json.dumps(deny(reason)))
+
+
+# ---------------------------------------------------------------------------- selftest
+
+def selftest():
+    import subprocess
+    import tempfile
+    B = BIN + "/"  # the scripts beside this file, wherever it is installed
+
+    global CALL_DIR
+    tmp = tempfile.mkdtemp(prefix="guard-test-")
+    CALL_DIR = tmp
+    reg = {"workers": [
+        {"key": "sales", "name": "Sales", "transcript": "s-full.jsonl"},
+        {"key": "research", "name": "Research", "tools": "read", "transcript": "s-read.jsonl"},
+        {"key": "scribe", "name": "Scribe", "tools": "drafts", "transcript": "s-drafts.jsonl"},
+        {"key": "scout", "name": "Scout", "tools": ["Read", "WebSearch", "mcp__claude-in-chrome__*"],
+         "transcript": "~/.claude/projects/x/s-list.jsonl"},
+        {"key": "odd", "name": "Odd", "tools": "readonly", "transcript": "s-odd.jsonl"},
+    ]}
+    with open(os.path.join(tmp, "workers.json"), "w") as f:
+        json.dump(reg, f)
+    call = os.path.join(BIN, "call")
+    outbox = os.path.join(tmp, "outbox", "scribe.jsonl")
+    page = os.path.join(tmp, "spaces", ".drafts", "ob_123.md")
+    say = f'{tilde(call)} say --voice bf_emma "Done. It\'s in the outbox."'
+    fails = checks = 0
+
+    def run(sid, tool, inp, cwd="/tmp"):
+        payload = json.dumps({"session_id": sid, "transcript_path": f"/x/{sid}.jsonl",
+                              "cwd": cwd, "hook_event_name": "PreToolUse",
+                              "tool_name": tool, "tool_input": inp})
+        t0 = time.time()
+        p = subprocess.run([sys.executable, os.path.realpath(__file__)], input=payload,
+                           capture_output=True, text=True, env={**os.environ,
+                                                                "GUARD_CALL_DIR": tmp})
+        ms = (time.time() - t0) * 1000
+        if p.returncode != 0 or p.stderr:
+            return ("error", p.returncode, p.stderr.strip()[:200]), ms
+        if not p.stdout.strip():
+            return "allow", ms
+        out = json.loads(p.stdout)["hookSpecificOutput"]
+        return ("deny", out["permissionDecisionReason"]), ms
+
+    def check(label, sid, tool, inp, want, contains=None):
+        nonlocal fails, checks
+        checks += 1
+        got, ms = run(sid, tool, inp)
+        verdict = got if got == "allow" else got[0]
+        ok = verdict == want and (contains is None or (got != "allow" and contains in got[1]))
+        fails += not ok
+        detail = "" if got == "allow" else f"  [{got[1]}]"
+        print(f"{'PASS' if ok else 'FAIL'}  {label}: {verdict} ({ms:.0f} ms){detail if not ok or want == 'deny' else ''}")
+
+    # not a worker: silent allow, whatever the tool
+    check("non-worker Bash rm", "s-other", "Bash", {"command": "rm -rf /tmp/x"}, "allow")
+    check("non-worker Write anywhere", "s-other", "Write", {"file_path": "/etc/hosts"}, "allow")
+    # full (missing tools): the existing Sales worker is unaffected
+    check("full: Bash", "s-full", "Bash", {"command": "git push"}, "allow")
+    check("full: Write", "s-full", "Write", {"file_path": "/tmp/x.md"}, "allow")
+    # read
+    check("read: Read", "s-read", "Read", {"file_path": "/etc/hosts"}, "allow")
+    check("read: WebFetch", "s-read", "WebFetch", {"url": "https://example.com"}, "allow")
+    check("read: ToolSearch (harness)", "s-read", "ToolSearch", {"query": "x"}, "allow")
+    check("read: Write", "s-read", "Write", {"file_path": outbox}, "deny", "Research is read-only")
+    check("read: Bash ls", "s-read", "Bash", {"command": "ls"}, "deny", "read-only")
+    check("read: speaks on the call", "s-read", "Bash", {"command": say}, "allow")
+    check("read: speak; rm", "s-read", "Bash", {"command": say + "; rm -rf /tmp/x"}, "deny")
+    # read: Spaces are readable through the pages CLI, never writable
+    P = B + "pages"
+    for cmd in [f"{P} list --space notes", f"{P} show notes/launch-brief", f"{P} spaces --json",
+                f"{P} list --q launch && {P} show memory/prefs"]:
+        check(f"read: Bash {cmd[len(P) - 5:][:44]!r}", "s-read", "Bash", {"command": cmd}, "allow")
+    for cmd, why in [(f"{P} draft notes \"Plan\" --worker research --from - <<'EOF'\nx\nEOF",
+                      "only `pages list|show|spaces`"),
+                     (f"{P} publish d.md --space notes", "owner's Approve"),
+                     (f"{P} new notes \"Plan\"", "owner's Approve"),
+                     (f"{P} mkspace \"Ideas\"", "owner's Approve"),
+                     (f"{P} list > /tmp/pages.txt", "not write to /tmp/pages.txt"),
+                     (f"{P} list | head -3", "not run `head`"),
+                     (B + "reply in_1 hi", "not run")]:
+        check(f"read: Bash {cmd[len(P) - 5:].splitlines()[0][:38]!r} denied", "s-read", "Bash",
+              {"command": cmd}, "deny", why)
+    # drafts: writes
+    check("drafts: Write own outbox", "s-drafts", "Write", {"file_path": outbox}, "allow")
+    checks += 1
+    want = os.path.realpath(os.path.join(HOME, "x", "y.md"))
+    got = [expand("~/x/y.md"), expand("$HOME/x/y.md"), expand("${HOME}/x/y.md"),
+           expand("x/y.md"), expand("$TMPDIR/y.md"), expand("y.md", cwd=os.path.join(HOME, "x"))]
+    ok = got == [want, want, want, None, None, want]
+    fails += not ok
+    print(f"{'PASS' if ok else 'FAIL'}  paths: ~, $HOME, ${{HOME}} expand; relative and other "
+          f"variables refused; tool paths join cwd" + ("" if ok else f"  {got}"))
+    check("drafts: Write page draft", "s-drafts", "Write", {"file_path": page}, "allow")
+    check("drafts: Write outside", "s-drafts", "Write", {"file_path": "/tmp/notes.md"}, "deny",
+          "Scribe is drafts-only: write to the outbox instead")
+    check("drafts: Write another worker's outbox", "s-drafts", "Write",
+          {"file_path": os.path.join(tmp, "outbox", "sales.jsonl")}, "deny")
+    check("drafts: Write its decisions file", "s-drafts", "Write",
+          {"file_path": os.path.join(tmp, "outbox", "scribe.decisions.jsonl")}, "deny")
+    check("drafts: Write the registry", "s-drafts", "Write",
+          {"file_path": os.path.join(tmp, "workers.json")}, "deny")
+    check("drafts: Write ../ escape", "s-drafts", "Write",
+          {"file_path": os.path.join(tmp, "spaces", ".drafts", "..", "..", "workers.json")}, "deny")
+    check("drafts: Agent", "s-drafts", "Agent", {"prompt": "x"}, "deny", "Agent is not allowed")
+    # drafts: Bash read-only vs not
+    for cmd in ["ls -la ~/Documents", "grep -rn TODO . | head -20", "git log --oneline -5",
+                "git -C ~/x diff HEAD~1 --stat", "cat a.txt 2>/dev/null || echo none",
+                "find . -name '*.md' | wc -l", "sed -n '1,40p' notes.md", "jq .workers f.json",
+                "echo '{\"title\":\"x\"}' >> " + outbox, say,
+                B + "pages draft notes \"Plan\" --worker scribe "
+                "--from - <<'EOF'\nline one; rm -rf /\n$(not run)\nEOF",
+                f"{P} list --space memory", f"{P} show memory/prefs", f"{P} spaces",
+                f"cat draft.md | {P} draft notes/launch-brief \"\" --worker scribe --from -",
+                B + "reply in_1 \"Thanks, on it.\"",
+                B + "reply in_1 - <<'EOF'\nDone, see the thread.\nEOF"]:
+        check(f"drafts: Bash {cmd.splitlines()[0][:48]!r}", "s-drafts", "Bash", {"command": cmd},
+              "allow")
+    for cmd, why in [("rm -rf /tmp/x", "`rm`"), ("ls; rm x", "`rm`"), ("ls\nrm x", "`rm`"),
+                     ("echo hi > /tmp/x", "writes to /tmp/x"), ("cat x | sh", "`sh`"),
+                     ("git push", "`git push`"), ("git -c core.pager=sh log", "git -c"),
+                     ("find . -delete", "-delete"), ("sed -i '' s/a/b/ f", "sed -i"),
+                     ("echo $(rm x)", "substitution"), ("python3 -c 'print(1)'", "`python3`"),
+                     ("curl https://example.com", "`curl`"), ("ls `rm x`", "substitution"),
+                     ("X=1 ls", "environment"), ("/tmp/ls", "/tmp/ls"),
+                     ("cat <<EOF\n$(rm x)\nEOF", "heredoc"), ("sort -o out.txt in.txt", "sort -o"),
+                     (B + "pages publish d.md --space notes", "pages"),
+                     (f"{P} new notes \"Plan\" --worker scribe", "owner's Approve"),
+                     (f"{P} mkspace \"Ideas\"", "owner's Approve"),
+                     (B + "reply in_1 hi; rm x", "`rm`"),
+                     (B + "bridge run", "`bridge`"),
+                     ("echo x >> outbox/scribe.jsonl", "writes to"), ("(rm x)", "`rm`"),
+                     ("git branch -D main", "git branch")]:
+        check(f"drafts: Bash {cmd.splitlines()[0][:40]!r} denied", "s-drafts", "Bash",
+              {"command": cmd}, "deny", why)
+    # explicit list
+    check("list: Read", "s-list", "Read", {"file_path": "/x"}, "allow")
+    check("list: prefix match", "s-list", "mcp__claude-in-chrome__navigate", {"url": "x"}, "allow")
+    check("list: Bash", "s-list", "Bash", {"command": "ls"}, "deny", "Scout may only use Read")
+    check("list: speaks on the call", "s-list", "Bash", {"command": say}, "allow")
+    check("list: Grep not listed", "s-list", "Grep", {"pattern": "x"}, "deny")
+    # an unknown preset is held to read, not waved through
+    check("unknown preset held to read", "s-odd", "Write", {"file_path": outbox}, "deny", "read-only")
+    # broken registry falls back to the last good cache; garbage stdin fails open
+    with open(os.path.join(tmp, "workers.json"), "w") as f:
+        f.write('{"workers": [')
+    check("registry mid-write: last good cache", "s-drafts", "Bash", {"command": "rm x"}, "deny")
+    checks += 1
+    p = subprocess.run([sys.executable, os.path.realpath(__file__)], input="not json",
+                       capture_output=True, text=True, env={**os.environ, "GUARD_CALL_DIR": tmp})
+    ok = p.returncode == 0 and not p.stdout and not p.stderr
+    fails += not ok
+    print(f"{'PASS' if ok else 'FAIL'}  garbage stdin: fails open, silent (rc={p.returncode})")
+    with open(os.path.join(tmp, "guard.log")) as f:
+        logged = f.read()
+    checks += 1
+    ok = "deny scribe Bash" in logged and "error" in logged
+    fails += not ok
+    print(f"{'PASS' if ok else 'FAIL'}  guard.log has denies and the error")
+
+    # speed: the hook path, in-process timing of a warm cache (subprocess adds interpreter start)
+    with open(os.path.join(tmp, "workers.json"), "w") as f:
+        json.dump(reg, f)
+    times = sorted(run("s-other", "Bash", {"command": "ls"})[1] for _ in range(15))
+    checks += 1
+    ok = times[len(times) // 2] < 50
+    fails += not ok
+    print(f"{'PASS' if ok else 'FAIL'}  speed: median {times[len(times) // 2]:.0f} ms per call "
+          f"(process start included), max {times[-1]:.0f} ms")
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+    print(f"\n{checks - fails} passed, {fails} failed")
+    return fails
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        raise SystemExit(1 if selftest() else 0)
+    try:
+        main()
+    except Exception as e:  # fail open: the tool runs, the error is logged
+        log(f"error {type(e).__name__}: {e}")
+    sys.exit(0)

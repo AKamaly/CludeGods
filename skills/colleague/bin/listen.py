@@ -11,6 +11,8 @@ Tails ~/.voicemode/logs/conversations/heard_*.jsonl from its current end and pri
     EARS: muted / EARS: unmuted                they turned the mic off or on with the pill
     USER: Stop. (...)                          they pressed Stop on the pill
     PANE: ...                                  a request from the Workers pane mod
+    FOCUS: on key=… name=… voice=… session=…    a worker was put on the call (`call focus`)
+    FOCUS: off                                 the call is back with the main colleague
 
 Echo. On laptop speakers the mic hears the mouth (my lines AND the filler clips), and
 there is no echo canceller. So on speakers the gate is half-duplex: a turn whose audio
@@ -33,6 +35,12 @@ compounds) because the echo comes back garbled. The turn that follows a barge-in
                                     run a past log through the gate, print every decision
                                     (HUSH lines are barge-ins: the mouth cut, his words sent)
     listen.py --selftest            synthetic logs: barge-in hushes and emits, echo does not
+    listen.py --worker NAME         a worker by exact key or exact name: key, name, voice,
+                                    session, god (tab-separated); exit 1 if there is none
+    listen.py --receipt --start EPOCH [--stop EPOCH]
+                                    the call receipt: his turns (through the same echo gate)
+                                    and the spoken replies, as a page in the Spaces "calls"
+                                    space (~/.voicemode/call/spaces/calls/<date-time>.md)
 
 Standard library only.
 """
@@ -43,8 +51,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 LOG_DIR = Path.home() / ".voicemode" / "logs" / "conversations"
@@ -77,6 +86,73 @@ NOISE = re.compile(r"^[\W_]*$|^\[?blank_audio\]?$", re.I)
 CJK = re.compile(r"[぀-ヿ㐀-鿿가-힯]")
 CONTRACTIONS = [("n't", " not"), ("'re", " are"), ("'ll", " will"), ("'ve", " have"),
                 ("'m", " am"), ("'d", " would"), ("'s", " is")]
+HEADPHONES = re.compile(r"airpods|headphone|headset|buds|beats", re.I)
+
+# Workers (~/.voicemode/call/workers.json, registry v2). A worker's voice is its "voice", else
+# its god's default; its god is "god", else derived from the "avatar" colour.
+GOD_VOICE = {"colleague": "af_heart", "research": "af_nicole", "scribe": "bf_emma",
+             "scout": "am_adam", "sales": "am_michael", "herald": "bm_george"}
+AVATAR_GOD = [("purple", "research"), ("violet", "research"), ("blue", "scribe"),
+              ("green", "scout"), ("orange", "sales"), ("red", "sales"), ("yellow", "herald")]
+
+
+def load_workers(call_dir=None):
+    try:
+        data = json.loads(((call_dir or CALL_DIR) / "workers.json").read_text())
+    except (OSError, ValueError):
+        return []
+    ws = data.get("workers") if isinstance(data, dict) else None
+    return [w for w in ws or [] if isinstance(w, dict) and w.get("key")]
+
+
+def god_of(w):
+    if w.get("god") in GOD_VOICE:
+        return w["god"]
+    avatar = str(w.get("avatar") or "").lower()
+    for colour, god in AVATAR_GOD:
+        if colour in avatar:
+            return god
+    return "colleague"
+
+
+def voice_of(w):
+    v = w.get("voice")
+    return v.strip() if isinstance(v, str) and v.strip() else GOD_VOICE[god_of(w)]
+
+
+def transcript_stem(w):
+    name = os.path.basename(str(w.get("transcript") or "").strip())
+    return name[:-6] if name.endswith(".jsonl") else name
+
+
+def find_worker(text, workers):
+    """The worker whose key is exactly `text`, else whose name is exactly `text` (any case).
+    Never a near match: a wrong worker on the call is worse than asking."""
+    text = (text or "").strip()
+    for w in workers:
+        if w["key"] == text:
+            return w
+    for w in workers:
+        if str(w.get("name") or "").strip().lower() == text.lower() and text:
+            return w
+    return None
+
+
+def read_focus(call_dir=None):
+    try:
+        return ((call_dir or CALL_DIR) / "focus").read_text().strip()
+    except OSError:
+        return ""
+
+
+def focus_line(key, workers):
+    if not key:
+        return "FOCUS: off (the call is back with you, the main colleague)"
+    w = find_worker(key, workers)
+    if not w or w["key"] != key:
+        return f"FOCUS: on key={key} (not in the registry)"
+    return (f"FOCUS: on key={key} name={w.get('name') or key} voice={voice_of(w)} "
+            f"session={w.get('session') or ''}")
 
 
 def ts(rec):
@@ -164,7 +240,7 @@ def on_headphones():
         name = (CALL_DIR / "device").read_text()
     except OSError:
         return False
-    return re.search(r"airpods|headphone|headset|buds|beats", name, re.I) is not None
+    return HEADPHONES.search(name) is not None
 
 
 def play_filler():
@@ -375,6 +451,7 @@ def live():
     last_stop = mtime(stop_file)
     requests_dir = CALL_DIR / "requests"
     next_scan = 0.0
+    focus = read_focus()  # a worker already on the call when listening starts is not news
 
     while True:
         stop_at = mtime(stop_file)
@@ -384,6 +461,10 @@ def live():
                   "agents now, then say in a few words that you stopped.)", flush=True)
         if time.time() >= next_scan:  # the Workers pane's requests, twice a second
             next_scan = time.time() + 0.5
+            now_focus = read_focus()
+            if now_focus != focus:  # `call focus` from this session, the pane or the pill
+                focus = now_focus
+                print(focus_line(focus, load_workers()), flush=True)
             for req in sorted(requests_dir.glob("*.json")):
                 try:
                     r = json.loads(req.read_text())
@@ -446,6 +527,123 @@ def replay(path, since, headphones):
         if rec.get("kind") == "turn" and out and rec["ts"][11:19] >= since:
             verdict = out[1] if out[0] == "emit" else f"DROP ({out[1]})"
             print(f"{rec['ts'][11:19]}  {rec.get('text', '')[:60]!r:64} -> {verdict}")
+
+
+def heard_records(start, stop, log_dir=None):
+    """Heard-log records from start to stop (epoch seconds), across midnight if need be."""
+    log_dir = log_dir or LOG_DIR
+    day, last = datetime.fromtimestamp(start).date(), datetime.fromtimestamp(stop).date()
+    while day <= last:
+        try:
+            with open(log_dir / f"heard_{day.isoformat()}.jsonl") as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                        t = ts(rec)
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    if start <= t <= stop:
+                        yield rec
+        except OSError:
+            pass
+        day += timedelta(days=1)
+
+
+def receipt_entries(recs, workers, device=""):
+    """(entries, steps): entries are (ts, who, text) for his turns ("You", as the live gate
+    would have passed them, so my echo stays out) and every spoken line that played ("Claude"
+    or the worker's name, from the line's agent tag or its session). Narrated steps (agent
+    "step" or "<key>:step") are only counted."""
+    by_key = {w["key"]: w for w in workers}
+    by_stem = {transcript_stem(w): w for w in workers if w.get("transcript")}
+    out_dev = {"name": device}
+    gate = Gate(lambda: HEADPHONES.search(out_dev["name"]) is not None)
+    entries, steps, saying = [], 0, {}
+    for rec in recs:
+        try:
+            t = ts(rec)
+        except (ValueError, KeyError, TypeError):
+            continue
+        if rec.get("source") == "mouth":
+            if rec.get("device") and rec["device"] != "null":
+                out_dev["name"] = rec["device"]
+            if rec.get("kind") == "saying":
+                saying[rec.get("utt")] = rec.get("text") or ""
+        out = gate.feed(rec, now=t)
+        if out and out[0] in ("barge", "emit") and out[1]:
+            entries.append((t, "You", out[1].split(": ", 1)[1]))
+        if rec.get("kind") != "said" or rec.get("source") != "mouth":
+            continue
+        text = (rec.get("text_played_est") or "").strip()
+        if rec.get("device") == "null" or rec.get("file") or not text or text.startswith("[sound"):
+            continue  # the silent warm-up, a sound clip, or a line that never played
+        agent = str(rec.get("agent") or "")
+        if agent == "step" or agent.endswith(":step"):
+            steps += 1
+            continue
+        w = by_key.get(agent) or by_stem.get(str(rec.get("session") or ""))
+        full = saying.get(rec.get("utt"), text)
+        if rec.get("cut") and len(text) < len(full):
+            text += " (cut off)"
+        entries.append((t, (w.get("name") or w["key"]) if w else "Claude", text))
+    return sorted(entries, key=lambda e: e[0]), steps
+
+
+def plural(n, one, many):
+    return f"{n} {one if n == 1 else many}"
+
+
+def receipt_markdown(entries, steps, start, stop):
+    """The receipt page (Spaces front matter, by "colleague"), or None if he never spoke."""
+    turns = sum(1 for _, who, _ in entries if who == "You")
+    if not turns:
+        return None
+    s = datetime.fromtimestamp(start).astimezone()
+    e = datetime.fromtimestamp(stop).astimezone()
+    mins = int(round((stop - start) / 60))
+    dur = ("under a minute" if mins < 1 else f"{mins} min" if mins < 60
+           else f"{mins // 60} h {mins % 60} min")
+    title = f"Call, {s:%a} {s.day} {s:%b}, {s:%H:%M}"
+    voices = sorted({who for _, who, _ in entries if who != "You"}, key=lambda w: (w != "Claude", w))
+    replies = len(entries) - turns
+    summary = (f"{s:%H:%M} to {e:%H:%M}, {dur}. {plural(turns, 'turn', 'turns')} from you, "
+               f"{plural(replies, 'spoken reply', 'spoken replies')}"
+               + (f" ({', '.join(voices)})" if voices else "") + "."
+               + (f" {plural(steps, 'narrated step', 'narrated steps')} not shown." if steps else ""))
+    lines = ["---", f"title: {title}", f"created: {s.isoformat(timespec='seconds')}",
+             f"updated: {e.isoformat(timespec='seconds')}", "by: colleague", "---", "",
+             f"# {title}", "", summary, ""]
+    for t, who, text in entries:
+        lines += [f"**{datetime.fromtimestamp(t):%H:%M} {who}:** {text}", ""]
+    return "\n".join(lines)
+
+
+def write_receipt(start, stop, call_dir=None, log_dir=None):
+    """Write the call's receipt into spaces/calls/; returns its path, or None (no turns)."""
+    call_dir = call_dir or CALL_DIR
+    try:
+        device = (call_dir / "device").read_text().strip()
+    except OSError:
+        device = ""
+    entries, steps = receipt_entries(heard_records(start, stop, log_dir), load_workers(call_dir),
+                                     device)
+    md = receipt_markdown(entries, steps, start, stop)
+    if md is None:
+        return None
+    space = call_dir / "spaces" / "calls"
+    space.mkdir(parents=True, exist_ok=True)
+    meta = space / "space.json"
+    if not meta.exists():
+        meta.write_text(json.dumps({"name": "Calls", "created": datetime.now().astimezone()
+                                    .isoformat(timespec="seconds")}, indent=2) + "\n")
+    slug = datetime.fromtimestamp(start).strftime("%Y-%m-%d-%H%M")
+    path, n = space / f"{slug}.md", 2
+    while path.exists():
+        path, n = space / f"{slug}-{n}.md", n + 1
+    part = space / f".{path.name}.part"
+    part.write_text(md)
+    part.rename(path)
+    return path
 
 
 def selftest():
@@ -569,6 +767,76 @@ def selftest():
                headphones=True)
     check("headphones: stale saying -> no barge", barges(outs), [])
 
+    # 9. workers: exact key or exact name only, and each one's voice
+    workers = [{"key": "scribe", "name": "Scribe", "god": "scribe", "transcript": "s-scribe.jsonl"},
+               {"key": "sales", "name": "Sales", "avatar": "blue"},
+               {"key": "deep", "name": "Deep Research", "voice": "bm_lewis", "avatar": "purple"},
+               {"key": "plain", "name": "Plain"}]
+    check("workers: exact key, exact name any case, never a near match",
+          [(find_worker(q, workers) or {}).get("key") for q in
+           ("scribe", "Scribe", "deep research", "Scrib", "Research", "", "sales ")],
+          ["scribe", "scribe", "deep", None, None, None, "sales"])
+    check("workers: voice from registry, god default, avatar colour, else af_heart",
+          [voice_of(w) for w in workers], ["bf_emma", "bf_emma", "bm_lewis", "af_heart"])
+    check("focus lines", [focus_line("", workers), focus_line("scribe", workers),
+                          focus_line("Scribe", workers)],
+          ["FOCUS: off (the call is back with you, the main colleague)",
+           "FOCUS: on key=scribe name=Scribe voice=bf_emma session=",
+           "FOCUS: on key=Scribe (not in the registry)"])
+
+    # 10. the call receipt: his turns through the echo gate, every line that played, by speaker
+    def spoke(sec, utt, text, dur=2.0, **kw):
+        common = {"source": "mouth", "utt": utt, "device": "MacBook Air Speakers", **kw}
+        return [{"ts": at(sec), "kind": "saying", "text": text, **common},
+                {"ts": at(sec + dur), "kind": "said", "text_played_est": text, "cut": False,
+                 **common}]
+
+    call = (ears()
+            + [turn(12, "Can you check the quote?", 8.0, 11.0)]
+            + spoke(13, "u1", "Sure, checking it now.", agent="mouth", session="s-call")
+            + [turn(16.5, "Sure, checking it now.", 12.6, 14.6)]          # my echo on speakers
+            + spoke(20, "u2", "Reading the CI log.", agent="colleague:step")
+            + spoke(24, "u3", "[sound mmhm.wav]", file="/x/mmhm.wav")
+            + spoke(27, "u4", "Ready.", device="null")
+            + spoke(30, "u5", "Scribe here. The draft is in your outbox.", agent="scribe")
+            + spoke(35, "u6", "One more thing from me.", agent="mouth", session="s-scribe")
+            + [turn(42, "Thanks, that's it.", 38.5, 41.0)])
+    entries, steps = receipt_entries(call, workers, "MacBook Air Speakers")
+    check("receipt: turns, replies by speaker; echo, steps, clips, warm-up left out",
+          ([(round(t - base), who, text) for t, who, text in entries], steps),
+          ([(12, "You", "Can you check the quote?"), (15, "Claude", "Sure, checking it now."),
+            (32, "Scribe", "Scribe here. The draft is in your outbox."),
+            (37, "Scribe", "One more thing from me."), (42, "You", "Thanks, that's it.")], 1))
+    md = receipt_markdown(entries, steps, base, base + 300)
+    s0 = datetime.fromtimestamp(base).astimezone()
+    s1 = datetime.fromtimestamp(base + 300).astimezone()
+    title = f"Call, {s0:%a} {s0.day} {s0:%b}, {s0:%H:%M}"
+    check("receipt: front matter by colleague, summary line",
+          md.splitlines()[:11] if md else md,
+          ["---", f"title: {title}", f"created: {s0.isoformat(timespec='seconds')}",
+           f"updated: {s1.isoformat(timespec='seconds')}", "by: colleague", "---", "",
+           f"# {title}", "",
+           f"{s0:%H:%M} to {s1:%H:%M}, 5 min. 2 turns from you, 3 spoken replies "
+           "(Claude, Scribe). 1 narrated step not shown.", ""])
+    no_turns = receipt_entries(ears() + spoke(13, "u1", "Hello?"), workers)
+    check("receipt: a call with no turns -> no receipt",
+          receipt_markdown(no_turns[0], no_turns[1], base, base + 60), None)
+    import shutil
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="receipt-test-"))
+    (tmp / "workers.json").write_text(json.dumps({"workers": workers}))
+    day = datetime.fromtimestamp(base).date().isoformat()
+    (tmp / f"heard_{day}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in call))
+    first = write_receipt(base, base + 300, call_dir=tmp, log_dir=tmp)
+    second = write_receipt(base, base + 300, call_dir=tmp, log_dir=tmp)
+    space = json.loads((tmp / "spaces" / "calls" / "space.json").read_text())
+    check("receipt: written to spaces/calls, space created, a second one does not overwrite",
+          (first and first.name, second and second.name, space["name"],
+           first and first.read_text() == md),
+          (f"{datetime.fromtimestamp(base):%Y-%m-%d-%H%M}.md",
+           f"{datetime.fromtimestamp(base):%Y-%m-%d-%H%M}-2.md", "Calls", True))
+    shutil.rmtree(tmp, ignore_errors=True)
+
     print(f"\n{checks - fails} passed, {fails} failed")
     return fails
 
@@ -580,10 +848,34 @@ if __name__ == "__main__":
     ap.add_argument("--headphones", action="store_true")
     ap.add_argument("--speakers", action="store_true")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--worker", metavar="NAME")
+    ap.add_argument("--receipt", action="store_true")
+    ap.add_argument("--start", type=float)
+    ap.add_argument("--stop", type=float)
+    ap.add_argument("--call-dir", type=Path)
+    ap.add_argument("--log-dir", type=Path)
     args = ap.parse_args()
     try:
         if args.selftest:
             raise SystemExit(1 if selftest() else 0)
+        if args.worker is not None:
+            everyone = load_workers(args.call_dir)
+            w = find_worker(args.worker, everyone)
+            if not w:
+                names = ", ".join(f"{x.get('name') or x['key']} ({x['key']})" for x in everyone)
+                print(f"no worker named '{args.worker}' (exact key or name). "
+                      f"Workers: {names or 'none'}", file=sys.stderr)
+                raise SystemExit(1)
+            print("\t".join([w["key"], str(w.get("name") or w["key"]), voice_of(w),
+                             str(w.get("session") or "-"), god_of(w)]))
+            raise SystemExit(0)
+        if args.receipt:
+            if args.start is None:
+                raise SystemExit("listen.py --receipt needs --start EPOCH")
+            path = write_receipt(args.start, args.stop or time.time(), call_dir=args.call_dir,
+                                 log_dir=args.log_dir)
+            print(f"receipt: {path}" if path else "receipt: none (no turns on this call)")
+            raise SystemExit(0)
         if args.replay:
             replay(args.replay, args.since, args.headphones and not args.speakers)
         else:

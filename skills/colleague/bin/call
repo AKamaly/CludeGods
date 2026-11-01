@@ -4,11 +4,14 @@
 #   call start         start the ears (always-on mic) and the mouth (speaker)
 #   call say TEXT      speak TEXT; returns at once, lines queue in order
 #   call say --now T   cut whatever is playing and speak T
+#   call say --voice V T   speak in Kokoro voice V (default af_heart, speed 1.05)
+#   call say --as KEY T    a worker's line: its registry voice, tagged KEY in the heard log
 #   call hush          stop speaking and drop the queue
 #   call listen        the user's turns, one line each (run it under Monitor)
+#   call focus KEY     put a worker on the call (exact key or name); `call focus clear` ends it
 #   call mute|unmute   turn the mic fully off / back on (the pill's mic button)
 #   call stopwork      cut speech and tell the call session to halt (the pill's stop button)
-#   call stop          hang up: stop the ears and the mouth
+#   call stop          hang up: stop the ears and the mouth, write the call receipt
 #   call status        what is running
 set -euo pipefail
 
@@ -17,6 +20,10 @@ DIR="$HOME/.voicemode/call"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SILERO="${CALL_SILERO_MODEL:-$HOME/.voicemode/models/silero_vad.onnx}"
 mkdir -p "$DIR"
+
+# Kokoro-82M v1.0's English voices (the mouth's own list). All verified on mlx-audio (8890);
+# bf_isabella is missing on the Kokoro-FastAPI fallback (8880).
+KOKORO=" af_alloy af_aoede af_bella af_heart af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george bm_lewis "
 
 mouth() { "$PY" -m voice_mode.mouth "$@"; }
 
@@ -46,6 +53,10 @@ for d in sd.query_devices():
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 
+# A worker from the registry by exact key or exact name: "key<TAB>name<TAB>voice<TAB>session<TAB>god"
+# (an unknown session is "-", so no field is ever empty)
+worker() { python3 "$HERE/listen.py" --worker "$1"; }
+
 start_ears() {
   alive "$DIR/ears.pid" && return 0
   rm -f "$DIR/ears.stop"
@@ -62,6 +73,12 @@ start_ears() {
 
 case "${1:-status}" in
   start)
+    # the call's start time, for its receipt: kept across a restart mid-call (ears dropped),
+    # new for a fresh call or when a stale one never hung up
+    if [ ! -f "$DIR/started" ] || [ -n "$(find "$DIR/started" -mmin +720 2>/dev/null)" ] \
+       || ! { alive "$DIR/ears.pid" || pgrep -f "voice_mode.mouth (serve|mail)" > /dev/null; }; then
+      date +%s > "$DIR/started"
+    fi
     # mouth: restart the player so it picks up the backend and device
     pkill -f "voice_mode.mouth (serve|mail)" 2>/dev/null || true
     backend=$(tts_env)
@@ -82,15 +99,64 @@ case "${1:-status}" in
     ;;
   say)
     shift
-    flag=()
-    if [ "${1:-}" = "--now" ]; then flag=(--now); shift; fi
-    mouth say ${flag[@]+"${flag[@]}"} --voice "${CALL_VOICE:-af_heart}" --speed "${CALL_SPEED:-1.05}" --device "$(cat "$DIR/device")" "$*" > /dev/null
+    flag=(); voice=""; as=""; step=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --now) flag=(--now); shift ;;
+        --voice|--as)
+          [ $# -ge 2 ] || { echo "call say: $1 needs a value" >&2; exit 2; }
+          if [ "$1" = "--voice" ]; then voice="$2"; else as="$2"; fi
+          shift 2 ;;
+        --voice=*) voice="${1#--voice=}"; shift ;;
+        --as=*) as="${1#--as=}"; shift ;;
+        --step) step=1; shift ;;   # a narrated step: receipts count it, not quote it
+        --) shift; break ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$as" ]; then
+      # a worker's line: its voice unless one was given, and its key on the heard log
+      if [ -z "$voice" ]; then
+        voice=$(worker "$as" 2>/dev/null | cut -f3) || voice=""
+      fi
+      export VOICEMODE_AGENT="$as${step:+:step}"
+    elif [ -n "$step" ]; then
+      export VOICEMODE_AGENT="colleague:step"
+    fi
+    voice="${voice:-${CALL_VOICE:-af_heart}}"
+    # a Kokoro-looking id the voice model does not have would drop the line: fall back
+    if [[ "$voice" =~ ^[a-z][a-z]_[a-z0-9]+$ ]] && [[ "$KOKORO" != *" $voice "* ]]; then
+      echo "call say: no Kokoro voice '$voice', speaking as ${CALL_VOICE:-af_heart}" >&2
+      voice="${CALL_VOICE:-af_heart}"
+    fi
+    mouth say ${flag[@]+"${flag[@]}"} --voice "$voice" --speed "${CALL_SPEED:-1.05}" --device "$(cat "$DIR/device")" "$*" > /dev/null
     ;;
   hush)
     mouth stop > /dev/null
     ;;
   listen)
     exec python3 -u "$HERE/listen.py"
+    ;;
+  focus)
+    # who the call is with: a worker key, or empty for the main colleague. The pill draws
+    # that worker; the call session forwards his lines to it; listen prints FOCUS events.
+    target="${*:2}"
+    case "$target" in
+      "")
+        f=$(cat "$DIR/focus" 2>/dev/null || true)
+        echo "focus: ${f:-colleague}"
+        ;;
+      clear|off|none|colleague)
+        : > "$DIR/focus.part" && mv -f "$DIR/focus.part" "$DIR/focus"
+        echo "focus: colleague"
+        ;;
+      *)
+        info=$(worker "$target") || exit 2
+        IFS=$'\t' read -r key name voice session god <<< "$info"
+        printf '%s' "$key" > "$DIR/focus.part" && mv -f "$DIR/focus.part" "$DIR/focus"
+        echo "focus: $key ($name, voice $voice, session $session)"
+        ;;
+    esac
     ;;
   mute)
     # the mic is really off (capture stops), not just ignored: for phone calls and visitors
@@ -115,15 +181,23 @@ case "${1:-status}" in
     rm -f "$DIR/mouth.pid"
     pkill -x CallPill 2>/dev/null || true
     rm -f "$DIR/session" "$DIR/muted"
+    : > "$DIR/focus"
     echo "call down"
+    # the receipt: his turns and the spoken replies, as a page in the Spaces "calls" space
+    if [ -f "$DIR/started" ]; then
+      python3 "$HERE/listen.py" --receipt --start "$(cat "$DIR/started")" --stop "$(date +%s)" 2>&1 || true
+      rm -f "$DIR/started"
+    fi
     ;;
   status)
     alive "$DIR/ears.pid" && echo "ears: up" || echo "ears: down"
     [ -f "$DIR/muted" ] && echo "mic: muted"
     pgrep -f "voice_mode.mouth (serve|mail)" > /dev/null && echo "mouth: up" || echo "mouth: down"
     [ -f "$DIR/device" ] && echo "speaker: $(cat "$DIR/device")"
+    [ -s "$DIR/focus" ] && echo "focus: $(cat "$DIR/focus")"
+    true
     ;;
   *)
-    sed -n '2,12p' "$0"; exit 2
+    sed -n '2,15p' "$0"; exit 2
     ;;
 esac

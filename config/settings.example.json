@@ -10,6 +10,16 @@
             "async": true
           }
         ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/skills/colleague/bin/guard",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PermissionRequest": [

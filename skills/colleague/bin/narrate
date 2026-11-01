@@ -3,7 +3,10 @@
 
 No silence while work runs: a short sentence about what the session is doing. It speaks only when a voice call is live AND the hook fired in the call's own session
 (`call start` records it in ~/.voicemode/call/session), so every other session is untouched.
+One exception: a worker on the call (`call focus <key>`) gets its steps said too, in its own
+voice, when the hook fires in that worker's session (matched by its registry "transcript").
 At most one line every NARRATE_GAP_S seconds; the call's own plumbing is never narrated.
+Lines go out as `call say --step` (tagged, so the call receipt counts them, not quotes them).
 Standard library only; always exits 0 and prints nothing, so it can never block a tool.
 """
 
@@ -26,13 +29,25 @@ SILENT_TOOLS = re.compile(
 OPENERS = ["Now I'm going to", "Next, I'll", "Okay, I'm going to", "Let me"]
 
 
-def live(session_id):
+def speaker(session_id):
+    """Who narrates this session's steps: "" for the call session (my voice), a worker key
+    for the worker on the call, None to stay quiet."""
     try:
         pid = int((CALL_DIR / "ears.pid").read_text())
         os.kill(pid, 0)
-        return (CALL_DIR / "session").read_text().strip() == session_id
+        if (CALL_DIR / "session").read_text().strip() == session_id:
+            return ""
+        key = (CALL_DIR / "focus").read_text().strip()
     except (OSError, ValueError):
-        return False
+        return None
+    if not key or not session_id:
+        return None
+    sys.path.insert(0, str(CALL.parent))
+    sys.dont_write_bytecode = True  # no __pycache__ beside the scripts
+    import listen  # the registry helpers live there
+
+    w = listen.find_worker(key, listen.load_workers())
+    return key if w and w["key"] == key and listen.transcript_stem(w) == session_id else None
 
 
 def lower_first(s):
@@ -77,7 +92,10 @@ def main():
     except ValueError:
         return
     tool, inp = event.get("tool_name", ""), event.get("tool_input") or {}
-    if SILENT_TOOLS.match(tool) or not live(event.get("session_id", "")):
+    if SILENT_TOOLS.match(tool):
+        return
+    who = speaker(event.get("session_id", ""))
+    if who is None:
         return
     stamp = CALL_DIR / "narrated"
     try:
@@ -89,8 +107,9 @@ def main():
     if not line:
         return
     stamp.touch()
-    subprocess.Popen([str(CALL), "say", line], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    voice = ["--as", who] if who else []
+    subprocess.Popen([str(CALL), "say", *voice, "--step", line], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 if __name__ == "__main__":

@@ -39,7 +39,12 @@ non-blocking mouth). You never use the `converse` tool in this mode; it blocks.
      later. Stay quiet unless the archive fails twice.
    - `USER: Stop. (...)`: they pressed Stop on the pill. Speech is already cut. Stop the
      current work at once: `TaskStop` every running helper agent and background task you
-     started for it, start nothing new, then `$C say` a few words ("Stopped. What now?").
+     started for it, start nothing new, then `$C say` a few words ("Stopped. What now?"). If
+     a worker is on the call, also `SendMessage` it "Stop what you're doing."
+   - `FOCUS: on key=… name=… voice=… session=…` / `FOCUS: off`: who the call is with
+     changed. If you just ran `$C focus` yourself, it is only the echo: stay silent and end
+     your turn. If you didn't (the pane or the pill did), follow "Put them on with a worker"
+     below from step 3 (`on`), or its "back to you" step without `$C focus clear` (`off`).
 4. `$C say "I'm here. What's first?"` and end your turn. Waiting costs nothing; their next
    sentence wakes you.
 5. When the monitor expires (every 30 minutes), re-arm it silently.
@@ -110,6 +115,33 @@ The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
   `bin/outbox-say` ("Inbox drafted a reply to …"); do not repeat it. Asked what is in an
   outbox, read the file and give the short version. Drafts are approved in the worker's own
   chat with a typed yes, never on a spoken yes and never from this session.
+- **Voice and tools**: each worker speaks in its own voice (registry `voice`, else its god's
+  default; `$C say --as <key>` picks it). Its `tools` (`read`, `drafts`, `full`, or a list
+  of tool names; missing means `full`) is enforced by the `guard` PreToolUse hook: a denied
+  tool comes back to the worker with the reason. Never loosen a worker's `tools` without the
+  user's typed yes.
+
+## Put them on with a worker
+
+They say "put me on with Scribe", "let me talk to Research":
+
+1. The name must be a worker's exact name or key in `~/.voicemode/call/workers.json`. No
+   exact match, or two could fit: ask ("Scribe or Scout?"). Never fuzzy-match.
+2. `$C focus <key>`. It prints the worker's name, voice and session; the pill now shows that
+   worker's god and name. Say nothing yourself: the worker answers from here.
+3. `SendMessage` the worker's `session` once: "The user is on a live voice call with you now.
+   I'll pass you each thing they say. Answer out loud with
+   `~/.claude/skills/colleague/bin/call say --voice <its voice> --as <key> "<text>"`: one to
+   three short spoken sentences, no paths, IDs or tables (those go in your chat). Same rules
+   and tools as always; anything outward still waits for their typed yes."
+4. Every `USER:` line after that, except "back to you" (step 5) and a hang-up: `SendMessage`
+   it to the worker word for word (`User: <text>`) and do not answer it yourself.
+   `USER (over you)`: `$C hush` first, then forward it. `EARS`, `PANE` and Stop events stay
+   yours. The worker's steps are narrated in its own voice by the narrate hook.
+5. **Back to you**: they say "back to you", "back to Claude", or "that's all, Scribe":
+   `$C focus clear`, `SendMessage` the worker "Call over: the user is back with me. Stop
+   speaking on the call; finish anything in flight in your chat.", then `$C say` a short line
+   ("I'm back.").
 
 ## Delegated work
 
@@ -160,7 +192,9 @@ anything need no confirmation. Permission prompts are never answered by voice: o
 ## Hang up
 
 They say "that's it", "bye", "hang up", or "end the call": `$C say "Talk soon."`, then
-`$C stop`, then `TaskStop` the monitor.
+`$C stop`, then `TaskStop` the monitor. If a worker was on the call, `SendMessage` it "Call
+over." `$C stop` also writes the call receipt (their turns and the spoken replies) into the
+Spaces "calls" space and prints its path; mention it in the chat, don't read it out.
 
 ## When voice breaks
 
