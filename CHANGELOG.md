@@ -7,6 +7,8 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-01
+
 ### Added
 
 - **Wake every few hours**: a worker's hours can be every 1, 2, 3, 4, 6 or 12 hours, within
@@ -17,8 +19,7 @@ release adds features and a patch release fixes things.
   Narrow, the selected card gets the same tabs.
 - **Each worker's own colour**: the selected worker's god colour drives its border, badges,
   chips, tabs and settings, readable in light and dark.
-
-- A release process: this changelog, CI on every pull request and push to `main` (the
+- **A release process**: this changelog, CI on every pull request and push to `main` (the
   self-tests, the unit tests, the CallPill build and a snapshot of every pill state), a pull
   request template, and [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -83,6 +84,7 @@ release adds features and a patch release fixes things.
 - A Bluetooth patch for VoiceMode's mouth.
 - The silent launch film, attached to the release.
 
-[Unreleased]: https://github.com/AKamaly/CludeGods/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AKamaly/CludeGods/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/AKamaly/CludeGods/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AKamaly/CludeGods/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AKamaly/CludeGods/releases/tag/v0.1.0
