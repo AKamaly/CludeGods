@@ -1,10 +1,63 @@
+<div align="center">
+
+<img src="docs/media/gods.png" alt="The six CludeGods workers: Scout, Colleague, Research, Scribe, Sales, and Herald" width="560" />
+
 # CludeGods
 
-Talk to Claude Code like a colleague, out loud, inside the Claude desktop app. Keep a few
-always-on worker chats beside you and hand them tasks by voice or from a pane.
+### Talk to Claude Code out loud, and keep always-on workers right beside you.
+
+**Voice calls, spoken progress, standing worker chats, and click-only approvals, inside the Claude desktop app on your Mac.**
+
+Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [VoiceMode](https://github.com/mbailey/voicemode). · [Get started](#get-started) · [Overview](#overview) · [Architecture](#architecture) · [Features](#features) · [Safety](#safety-model) · [Contributing](#contributing)
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
+![Platform: macOS Apple Silicon](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey.svg)
+![Works with Claude Code](https://img.shields.io/badge/works%20with-Claude%20Code-d97757.svg)
+
+</div>
+
+---
+
+<div align="center">
+
+<table><tr><td>
+
+<img src="docs/media/hero.gif" alt="CludeGods: the app, a voice call, approving with a click, and a worker checking in" width="960" />
+
+</td></tr></table>
+
+**[Watch the full launch film (67 s, silent)](https://github.com/AKamaly/CludeGods/releases/download/v0.1.0/cludegods-film-v1-silent.mp4)** · [Release v0.1.0](https://github.com/AKamaly/CludeGods/releases/tag/v0.1.0)
+
+</div>
+
+_The app scene, a call with a barge-in, a permission approved with a click, and a scheduled worker checking in with drafts. A 14-second cut of the silent launch film; the film is an animated mockup of the real parts, not a screen capture._
+
+## Overview
 
 CludeGods is a small set of parts that sit on top of Claude Code and
-[VoiceMode](https://github.com/mbailey/voicemode):
+[VoiceMode](https://github.com/mbailey/voicemode). You type `/colleague`, a small orb
+appears in the corner, and you talk to your Claude Code session the way you would to
+someone sitting next to you. Over on the right, a Workers pane shows your standing worker
+chats, each with a task box.
+
+**A toolkit, not a hosted product.** Everything runs on your Mac. The only state is plain
+files under `~/.voicemode/call/`. Speech to text and text to speech run locally; the
+transcript of what you say goes to Claude, the same as anything you type into the session.
+
+<div align="center">
+
+<table><tr><td>
+
+<img src="docs/media/app-scene.jpg" alt="Claude desktop app with a chat, the Workers pane, and the call card" width="860" />
+
+</td></tr></table>
+
+</div>
+
+_The chat, the Workers pane, and the call card, side by side in the Claude desktop app._
+
+The parts:
 
 - **`colleague` skill**: a live voice call with your Claude Code session. An
   always-on mic streams your words in, Claude answers out loud without blocking its own
@@ -17,12 +70,9 @@ CludeGods is a small set of parts that sit on top of Claude Code and
 - **Workers pane mod**: a pane beside the chat with your standing worker chats as persona
   cards, live status, and a task box per worker.
 
-> Demo GIF goes here: `docs/demo.gif`
+### What it feels like
 
-## What it feels like
-
-You type `/colleague`. A small orb appears in the corner and Claude says "I'm here. What's
-first?" You talk the way you would to someone sitting next to you: "Can you check why the
+You type `/colleague`. Claude says "I'm here. What's first?" You ask "Can you check why the
 build broke this morning?" Claude says "Hmm, let me look," and while it reads logs you hear
 "Reading the CI log." and "Searching the code." between your own questions. Halfway through
 its answer you say "wait, not that one," and it stops talking and listens.
@@ -30,125 +80,113 @@ its answer you say "wait, not that one," and it stops talking and listens.
 Long jobs go to helper agents that report milestones in a sentence. Anything outward, like
 an email or a post, lands in the chat as a draft, and nothing goes out until you type yes.
 
-Over on the right, the Workers pane shows your standing chats: Research is working, Scribe
-is idle since ten minutes ago. You type a task into Scribe's box and press Enter.
+In the Workers pane, Research is working and Scribe has been idle for ten minutes. You type
+a task into Scribe's box and press Enter.
 
-## Architecture
+## Features
 
-```mermaid
-flowchart LR
-  mic([Microphone]) --> ears
+### Hop on a call with Claude
 
-  subgraph VoiceMode["VoiceMode (local services)"]
-    ears["ears: voice_mode.listen<br/>Silero VAD + Whisper large-v3-turbo"]
-    mouth["mouth: voice_mode.mouth<br/>mlx-audio Kokoro (Kokoro-FastAPI fallback)"]
-  end
+`/colleague` starts the ears (always-on capture with Silero VAD and Whisper), the mouth (a
+non-blocking speech queue), and CallPill. The orb moves through Listening, You, Thinking,
+and Claude. Talk over Claude and it stops: each partial transcript is checked while a line
+plays, and if it is you, the speech is cut and your words go straight to the session.
 
-  ears -- "heard_*.jsonl" --> listen["listen.py<br/>echo gate + barge-in"]
-  listen -- "USER: ... lines" --> monitor["Monitor tool"]
-  monitor --> call["the call session<br/>(Claude Code, colleague skill)"]
-  call -- "call say" --> mouth
-  mouth --> spk([Speakers / headphones])
-  listen -. "call hush on barge-in" .-> mouth
+<div align="center">
 
-  call -- "PreToolUse" --> narrate["narrate hook"]
-  narrate -- "call say" --> mouth
+<table><tr><td>
 
-  call -- "PermissionRequest" --> permit["permit hook"]
-  permit -- "permit/&lt;id&gt;.json" --> pill["CallPill"]
-  pill -- "click writes &lt;id&gt;.answer" --> permit
-  ears -- "heard log (state)" --> pill
-  pill -- "mute / stop" --> call
+<img src="docs/media/call.jpg" alt="The call card in the Thinking state" width="860" />
 
-  pane["Workers pane mod"] <--> reg[("~/.voicemode/call/workers.json")]
-  call <--> reg
-  pane -- "send task / open" --> workers["worker chats"]
-  pane -- "requests/*.json" --> listen
-  call -- "start_session / SendMessage" --> workers
-  pane -- "scheduled wake / Run now" --> workers
-  workers -- "outbox/*.jsonl" --> pane
-  pane -- "outbox-say" --> mouth
-```
+</td></tr></table>
 
-Everything runs on your Mac. The only state is plain files under `~/.voicemode/call/`.
+</div>
 
-## Components
+_The call card. Real-time voice, and you can cut in at any time._
 
-### `skills/colleague/bin/call`
+### Every step, said out loud
 
-The plumbing, one shell script. `call start` launches the ears (always-on capture with
-Silero VAD and Whisper), the mouth (a non-blocking speech queue), and the pill.
-`call say "text"` returns at once and lines queue in order; `call say --now` cuts in.
-`call hush`, `call mute`, `call unmute`, `call stopwork`, `call stop`, `call status`.
-Settings by environment: `CALL_VOICE` (default `af_heart`), `CALL_SPEED`,
-`CALL_SILERO_THRESHOLD`, `CALL_SILENCE_S`, `CALL_MIC_DEVICE`, `VOICEMODE_PY`.
+The `narrate` hook turns each tool call into a short spoken line ("Reading config.py.",
+"Now I'm going to run the tests.") at most once every 6 seconds, only during a live call and
+only in the call's own session. You hear what Claude is doing without watching the screen.
 
-### `skills/colleague/bin/listen.py`
+### Keep always-on workers
 
-Runs under Claude Code's `Monitor` tool and turns the ears' log into one line per event:
-`USER: …`, `USER (over you): …`, `EARS: down`, `EARS: muted`, `PANE: …`. Two jobs:
+Each worker is its own Claude Code chat with a name, a role, a model, and an avatar. The
+Workers pane lists them as cards with Working or Idle status read from each transcript.
+Type a task into a card and press Enter to send it to that chat; click the name to open it.
 
-- **Echo gate.** On laptop speakers the mic hears Claude's own voice and there is no echo
-  canceller. A turn whose audio starts while Claude is speaking has Claude's words stripped
-  (loosely matched, because the echo comes back garbled), and only a real remainder gets
-  through. On headphones nothing is stripped.
-- **Barge-in.** While a line is playing, each partial transcript is checked at once. If it
-  is you, the mouth is cut and your words go to the session without waiting for the turn to
-  end.
+<div align="center">
 
-`listen.py --selftest` runs the gate against synthetic logs; `--replay FILE` runs a real
-log through it and prints every decision.
+<table><tr><td>
 
-### `skills/colleague/bin/narrate`
+<img src="docs/media/workers.jpg" alt="Diagram: Research, Scribe, Scout, and Sales connected through the Workers pane" width="860" />
 
-A `PreToolUse` hook. During a live call, and only in the call's own session, it turns the
-tool call into a short spoken line ("Now I'm going to run the tests.", "Reading
-config.py.") at most once every 6 seconds. Standard library only, always exits 0, never
-blocks a tool.
+</td></tr></table>
 
-### `skills/colleague/bin/permit` and CallPill
+</div>
 
-`permit` is a `PermissionRequest` hook. If CallPill is not running it does nothing and the
-app behaves as usual. If it is, it writes the request to `~/.voicemode/call/permit/<id>.json`
-and waits up to 50 seconds for `<id>.answer`. CallPill shows the request in a panel beside
-the orb with Deny and Allow. A mouse click is the only thing that writes the answer. On a
-timeout the hook prints nothing and the normal in-app dialog takes over.
+_Workers connect to you through the pane: send a task, run on a schedule, collect drafts in an outbox, approve with a typed yes._
 
-CallPill (`pill.swift`) is a native AppKit and Metal app: the orb from
-`design/orb.html` ported to a Metal shader, states for Listening, You, Thinking, Claude and
-Mic off, hover controls for Mute and Stop, scroll or pinch to resize. It can also list
-sessions waiting on you from `~/.voicemode/call/pending/*.json` with an Open button per
-row (see [Waiting sessions](#waiting-sessions-optional)).
+### Approve with a click, never by voice
 
-### `mods/workers-pane`
+The mic hears the whole room, so voice can never approve anything. When Claude asks for a
+permission, CallPill shows the request beside the orb with Deny and Allow, and a mouse click
+is the only thing that answers it. A spoken "yes, go ahead" is ignored.
 
-A Claude Code mod (plugin with a hooks module) for the desktop app. It draws a Workers pane
-from `~/.voicemode/call/workers.json`: one card per worker with an animated SVG avatar,
-Working or Idle status read from the worker's transcript, a task box that sends straight to
-that chat, and a two-press Delete; the name opens the chat. Workers with a charter also get
-Run now, a schedule, and an outbox feed (see [Proactive workers](#proactive-workers)).
-"+ New worker" puts a `Create worker: …` request
-in your prompt box for your own Enter, because the app refuses to start sessions from
-automated events. A `Workers · N` launcher sits in the footer. All paths are resolved from
-`$HOME` at runtime.
+<div align="center">
 
-`tsconfig.json` only extends `.claude-plugin/types/tsconfig.json`, which Claude Code
-generates when it loads the mod. It is there so your editor and `tsc` type-check the mod;
-the generated types are not committed.
+<table><tr><td>
 
-### `patches/voicemode-mouth-bluetooth.patch`
+<img src="docs/media/approve.jpg" alt="A permission card for npm run deploy:staging with Deny and Allow buttons" width="860" />
 
-A small diff against VoiceMode's `voice_mode/mouth/output.py`: play at the output device's
-native sample rate (48 kHz on AirPods) with continuous upsampling, and open the stream at
-high latency. Without it, Bluetooth outputs crackle. `VOICEMODE_MOUTH_LATENCY` overrides
-the latency.
+</td></tr></table>
 
-### `skills/colleague/design/`
+</div>
 
-`orb.html` is the WebGL reference for the orb; `workers.html` is the pane mockup. Open
-either in a browser.
+_A permission request on CallPill. Only the click counts._
 
-## Install (macOS on Apple Silicon)
+### Workers that check in on their own
+
+Give a worker a `charter` and a `schedule`, and the pane wakes it at that time. It does its
+run, writes drafts and notes to an outbox, and the card shows `Outbox · 2 drafts`. Nothing
+is sent until you type yes in the worker's own chat. Details in
+[Proactive workers](#proactive-workers).
+
+<div align="center">
+
+<table><tr><td>
+
+<img src="docs/media/check-in.jpg" alt="Scribe's card at 09:00 with two drafts that need a yes" width="860" />
+
+</td></tr></table>
+
+</div>
+
+_Scribe runs Monday to Friday at 9:00 and leaves two drafts that need your yes._
+
+### Local voice
+
+Whisper (speech to text), Silero VAD (voice activity), Kokoro through mlx-audio (the voice),
+and the Metal orb all run on your Mac, managed by VoiceMode. Your audio stays on the
+machine. The transcript of what you say goes to Claude as part of the session, like
+anything you type.
+
+<div align="center">
+
+<table><tr><td>
+
+<img src="docs/media/open-source.jpg" alt="Open source. Local voice. Safe by design." width="860" />
+
+</td></tr></table>
+
+</div>
+
+_MIT licensed. The voice stack runs locally; the session itself still talks to Claude._
+
+## Get started
+
+### Install (macOS on Apple Silicon)
 
 You need the Claude desktop app with Claude Code, Homebrew, `uv`, and the Xcode command line
 tools (`xcode-select --install`).
@@ -223,7 +261,7 @@ tools (`xcode-select --install`).
    - start Claude Code with `--plugin-dir /path/to/CludeGods/mods/workers-pane`, or set
      `CLAUDE_CODE_PLUGIN_DIRS=/path/to/CludeGods/mods/workers-pane`.
 
-## Usage
+### Usage
 
 - **Start a call:** type `/colleague` (or say "let's talk" in a chat with the skill
   installed). Claude starts the ears, the mouth and the pill, arms the listener, and greets
@@ -237,7 +275,7 @@ tools (`xcode-select --install`).
   asking on the call. Type a task in a card and press Enter to send it. Click the name to
   jump to that chat. Delete needs two presses; the chat is archived, not deleted.
 
-### Waiting sessions (optional)
+#### Waiting sessions (optional)
 
 CallPill can list sessions waiting on you. It reads `~/.voicemode/call/pending/*.json`,
 one record per session:
@@ -250,39 +288,120 @@ one record per session:
 Write these from your own `Notification` hook if you want the list. Open only ever opens a
 `claude://` session link; there is no Allow in that list.
 
-## Safety model
+## Architecture
 
-The mic hears the whole room: a video, a phone call, another person. The design assumes it
-will mishear.
+```mermaid
+flowchart LR
+  mic([Microphone]) --> ears
 
-- **Only a physical click approves a permission.** The `permit` hook waits for an answer file
-  that only the pill's mouse-click handler writes. There is no keyboard path and no voice
-  path, and clicks are ignored for 0.6 seconds after a request appears so a new request
-  cannot catch a click meant for the previous one.
-- **Outward actions need a typed yes.** Sending email or messages, posting, publishing,
-  deleting, purchases, invites: the exact action goes in the chat and Claude waits for you to
-  type yes. A spoken yes does not count.
-- **Voice never starts sessions.** New worker chats start only from text you submit
-  yourself. The desktop app also refuses session starts from automated events, so a mod or
-  hook cannot do it on its own.
-- **Names are never fuzzy-matched.** If Claude is unsure it heard a person or company right,
-  it asks.
-- **The echo gate** keeps Claude from hearing itself on laptop speakers and acting on its
-  own words as if you had said them. Lines that make no sense as speech are treated as room
-  noise and questioned, never acted on.
+  subgraph VoiceMode["VoiceMode (local services)"]
+    ears["ears: voice_mode.listen<br/>Silero VAD + Whisper large-v3-turbo"]
+    mouth["mouth: voice_mode.mouth<br/>mlx-audio Kokoro (Kokoro-FastAPI fallback)"]
+  end
 
-## Honest limits
+  ears -- "heard_*.jsonl" --> listen["listen.py<br/>echo gate + barge-in"]
+  listen -- "USER: ... lines" --> monitor["Monitor tool"]
+  monitor --> call["the call session<br/>(Claude Code, colleague skill)"]
+  call -- "call say" --> mouth
+  mouth --> spk([Speakers / headphones])
+  listen -. "call hush on barge-in" .-> mouth
 
-- Your Mac and the Claude desktop app must be on. Nothing here runs in the cloud.
-- macOS on Apple Silicon only (Metal, AppKit, mlx-audio).
-- On laptop speakers, a barge-in needs at least two content words that are not in Claude's
-  own line. On headphones two words of any kind are enough.
-- The Workers pane uses desktop app mod surfaces (panes, the footer launcher, SVG). In the
-  terminal it degrades to plain text.
-- VoiceMode's always-on ears (`voice_mode.listen`) and non-blocking mouth
-  (`voice_mode.mouth`) are experimental upstream and may change between releases.
-- The first spoken line after a cold start can take up to a minute while the voice model
-  loads.
+  call -- "PreToolUse" --> narrate["narrate hook"]
+  narrate -- "call say" --> mouth
+
+  call -- "PermissionRequest" --> permit["permit hook"]
+  permit -- "permit/&lt;id&gt;.json" --> pill["CallPill"]
+  pill -- "click writes &lt;id&gt;.answer" --> permit
+  ears -- "heard log (state)" --> pill
+  pill -- "mute / stop" --> call
+
+  pane["Workers pane mod"] <--> reg[("~/.voicemode/call/workers.json")]
+  call <--> reg
+  pane -- "send task / open" --> workers["worker chats"]
+  pane -- "requests/*.json" --> listen
+  call -- "start_session / SendMessage" --> workers
+  pane -- "scheduled wake / Run now" --> workers
+  workers -- "outbox/*.jsonl" --> pane
+  pane -- "outbox-say" --> mouth
+```
+
+Everything runs on your Mac. The only state is plain files under `~/.voicemode/call/`.
+
+### Components
+
+#### `skills/colleague/bin/call`
+
+The plumbing, one shell script. `call start` launches the ears (always-on capture with
+Silero VAD and Whisper), the mouth (a non-blocking speech queue), and the pill.
+`call say "text"` returns at once and lines queue in order; `call say --now` cuts in.
+`call hush`, `call mute`, `call unmute`, `call stopwork`, `call stop`, `call status`.
+Settings by environment: `CALL_VOICE` (default `af_heart`), `CALL_SPEED`,
+`CALL_SILERO_THRESHOLD`, `CALL_SILENCE_S`, `CALL_MIC_DEVICE`, `VOICEMODE_PY`.
+
+#### `skills/colleague/bin/listen.py`
+
+Runs under Claude Code's `Monitor` tool and turns the ears' log into one line per event:
+`USER: …`, `USER (over you): …`, `EARS: down`, `EARS: muted`, `PANE: …`. Two jobs:
+
+- **Echo gate.** On laptop speakers the mic hears Claude's own voice and there is no echo
+  canceller. A turn whose audio starts while Claude is speaking has Claude's words stripped
+  (loosely matched, because the echo comes back garbled), and only a real remainder gets
+  through. On headphones nothing is stripped.
+- **Barge-in.** While a line is playing, each partial transcript is checked at once. If it
+  is you, the mouth is cut and your words go to the session without waiting for the turn to
+  end.
+
+`listen.py --selftest` runs the gate against synthetic logs; `--replay FILE` runs a real
+log through it and prints every decision.
+
+#### `skills/colleague/bin/narrate`
+
+A `PreToolUse` hook. During a live call, and only in the call's own session, it turns the
+tool call into a short spoken line ("Now I'm going to run the tests.", "Reading
+config.py.") at most once every 6 seconds. Standard library only, always exits 0, never
+blocks a tool.
+
+#### `skills/colleague/bin/permit` and CallPill
+
+`permit` is a `PermissionRequest` hook. If CallPill is not running it does nothing and the
+app behaves as usual. If it is, it writes the request to `~/.voicemode/call/permit/<id>.json`
+and waits up to 50 seconds for `<id>.answer`. CallPill shows the request in a panel beside
+the orb with Deny and Allow. A mouse click is the only thing that writes the answer. On a
+timeout the hook prints nothing and the normal in-app dialog takes over.
+
+CallPill (`pill.swift`) is a native AppKit and Metal app: the orb from
+`design/orb.html` ported to a Metal shader, states for Listening, You, Thinking, Claude and
+Mic off, hover controls for Mute and Stop, scroll or pinch to resize. It can also list
+sessions waiting on you from `~/.voicemode/call/pending/*.json` with an Open button per
+row (see [Waiting sessions](#waiting-sessions-optional)).
+
+#### `mods/workers-pane`
+
+A Claude Code mod (plugin with a hooks module) for the desktop app. It draws a Workers pane
+from `~/.voicemode/call/workers.json`: one card per worker with an animated SVG avatar,
+Working or Idle status read from the worker's transcript, a task box that sends straight to
+that chat, and a two-press Delete; the name opens the chat. Workers with a charter also get
+Run now, a schedule, and an outbox feed (see [Proactive workers](#proactive-workers)).
+"+ New worker" puts a `Create worker: …` request
+in your prompt box for your own Enter, because the app refuses to start sessions from
+automated events. A `Workers · N` launcher sits in the footer. All paths are resolved from
+`$HOME` at runtime.
+
+`tsconfig.json` only extends `.claude-plugin/types/tsconfig.json`, which Claude Code
+generates when it loads the mod. It is there so your editor and `tsc` type-check the mod;
+the generated types are not committed.
+
+#### `patches/voicemode-mouth-bluetooth.patch`
+
+A small diff against VoiceMode's `voice_mode/mouth/output.py`: play at the output device's
+native sample rate (48 kHz on AirPods) with continuous upsampling, and open the stream at
+high latency. Without it, Bluetooth outputs crackle. `VOICEMODE_MOUTH_LATENCY` overrides
+the latency.
+
+#### `skills/colleague/design/`
+
+`orb.html` is the WebGL reference for the orb; `workers.html` is the pane mockup. Open
+either in a browser.
 
 ## Proactive workers
 
@@ -337,15 +456,69 @@ Limits:
   as the pane polls again.
 - A day missed entirely is skipped, not replayed.
 
+## Safety model
+
+The mic hears the whole room: a video, a phone call, another person. The design assumes it
+will mishear.
+
+- **Only a physical click approves a permission.** The `permit` hook waits for an answer file
+  that only the pill's mouse-click handler writes. There is no keyboard path and no voice
+  path, and clicks are ignored for 0.6 seconds after a request appears so a new request
+  cannot catch a click meant for the previous one.
+- **Outward actions need a typed yes.** Sending email or messages, posting, publishing,
+  deleting, purchases, invites: the exact action goes in the chat and Claude waits for you to
+  type yes. A spoken yes does not count.
+- **Voice never starts sessions.** New worker chats start only from text you submit
+  yourself. The desktop app also refuses session starts from automated events, so a mod or
+  hook cannot do it on its own.
+- **Names are never fuzzy-matched.** If Claude is unsure it heard a person or company right,
+  it asks.
+- **The echo gate** keeps Claude from hearing itself on laptop speakers and acting on its
+  own words as if you had said them. Lines that make no sense as speech are treated as room
+  noise and questioned, never acted on.
+
+## Honest limits
+
+- Your Mac and the Claude desktop app must be on. Nothing here runs in the cloud, apart from
+  the Claude Code session itself, which receives your transcripts like any typed message.
+- macOS on Apple Silicon only (Metal, AppKit, mlx-audio).
+- On laptop speakers, a barge-in needs at least two content words that are not in Claude's
+  own line. On headphones two words of any kind are enough.
+- The Workers pane uses desktop app mod surfaces (panes, the footer launcher, SVG). In the
+  terminal it degrades to plain text.
+- VoiceMode's always-on ears (`voice_mode.listen`) and non-blocking mouth
+  (`voice_mode.mouth`) are experimental upstream and may change between releases.
+- The first spoken line after a cold start can take up to a minute while the voice model
+  loads.
+
+## Roadmap
+
+Ideas, not built:
+
+- **A voice per worker.** Today every spoken line uses one voice, set by `CALL_VOICE`.
+
 ## Repository layout
 
 ```
 skills/colleague/        the skill: SKILL.md, bin/ (call, listen.py, narrate, permit, outbox-say, pill.swift), design/
-mods/workers-pane/       the Workers pane mod
+mods/workers-pane/       the Workers pane mod (hooks/, tests/)
 patches/                 the VoiceMode Bluetooth diff
 config/                  example settings hooks and workers registry
 scripts/build-pill.sh    builds and ad-hoc signs CallPill.app
+docs/media/              README images and the hero GIF
 ```
+
+## Contributing
+
+Issues and pull requests are welcome. CludeGods is alpha, so small, focused changes are
+easiest to review. Before sending a change:
+
+- to the echo gate or barge-in: run `skills/colleague/bin/listen.py --selftest`, and
+  `--replay FILE` on a real log if you have one;
+- to the Workers pane: run the mod's tests in `mods/workers-pane/tests/` and type-check with
+  `tsc` after loading the mod once;
+- to anything that approves, sends, or starts sessions: keep the [Safety model](#safety-model)
+  intact and say in the PR how the change preserves it.
 
 ## Credits
 
@@ -356,6 +529,7 @@ scripts/build-pill.sh    builds and ad-hoc signs CallPill.app
   [whisper.cpp](https://github.com/ggml-org/whisper.cpp): speech to text.
 - [Silero VAD](https://github.com/snakers4/silero-vad): voice activity detection.
 - [mlx-audio](https://github.com/Blaizzy/mlx-audio): fast local speech on Apple Silicon.
+- Landing layout inspired by [CopilotKit/OpenDots](https://github.com/CopilotKit/OpenDots).
 
 ## License
 
