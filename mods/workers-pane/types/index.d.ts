@@ -1,6 +1,6 @@
 /**
  * One worker as `~/.voicemode/call/workers.json` lists it: the fields the pane reads.
- * The file may carry more (a model, an effort, a charter); the user picks the model inside the chat.
+ * The file may carry more (a model, an effort); the user picks the model inside the chat.
  */
 export type RegistryWorker = {
   key: string
@@ -15,6 +15,29 @@ export type RegistryWorker = {
   transcript?: string
   /** An avatar preset name (blue, violet, orange, rose, lime, gold; one coloured-circle emoji each). */
   avatar?: string
+  /** The worker's standing brief. The card never shows it; every wake carries all of it. */
+  charter?: string
+  /** When the pane wakes the worker to run its charter. */
+  schedule?: Schedule
+}
+
+/**
+ * A wake time: `days` like "mon-fri", "sun-thu", "mon,wed,fri" or "daily"; `time`
+ * "HH:MM" in the IANA zone `tz`.
+ */
+export type Schedule = { days: string; time: string; tz: string }
+
+/**
+ * One line of `~/.voicemode/call/outbox/<key>.jsonl`, as the worker appends it. A draft
+ * waits for the user's typed yes in the worker's chat; the pane only shows it.
+ */
+export type OutboxItem = {
+  at: string
+  kind: 'draft' | 'note'
+  title: string
+  body: string
+  to?: string
+  needs_approval: boolean
 }
 
 /** What the pane knows about one worker right now. */
@@ -45,6 +68,8 @@ declare module 'claude-code' {
       removing: Shaped<Record<string, number>>
       /** Whether the Workers pane is the one shown: the AbovePrompt launcher hides then. */
       paneShown: Shaped<boolean>
+      /** Worker key to whether its outbox feed is expanded on the card. */
+      feeds: Shaped<Record<string, boolean>>
     }
   }
 }

@@ -65,6 +65,9 @@ flowchart LR
   pane -- "send task / open" --> workers["worker chats"]
   pane -- "requests/*.json" --> listen
   call -- "start_session / SendMessage" --> workers
+  pane -- "scheduled wake / Run now" --> workers
+  workers -- "outbox/*.jsonl" --> pane
+  pane -- "outbox-say" --> mouth
 ```
 
 Everything runs on your Mac. The only state is plain files under `~/.voicemode/call/`.
@@ -122,7 +125,9 @@ row (see [Waiting sessions](#waiting-sessions-optional)).
 A Claude Code mod (plugin with a hooks module) for the desktop app. It draws a Workers pane
 from `~/.voicemode/call/workers.json`: one card per worker with an animated SVG avatar,
 Working or Idle status read from the worker's transcript, a task box that sends straight to
-that chat, Open, and a two-press Delete. "+ New worker" puts a `Create worker: …` request
+that chat, and a two-press Delete; the name opens the chat. Workers with a charter also get
+Run now, a schedule, and an outbox feed (see [Proactive workers](#proactive-workers)).
+"+ New worker" puts a `Create worker: …` request
 in your prompt box for your own Enter, because the app refuses to start sessions from
 automated events. A `Workers · N` launcher sits in the footer. All paths are resolved from
 `$HOME` at runtime.
@@ -229,8 +234,8 @@ tools (`xcode-select --install`).
   resize. Permission requests appear to its left with Deny and Allow.
 - **Hang up:** say "that's it" or "end the call".
 - **Workers pane:** open it from the `Workers` launcher in the footer, `/workers`, or by
-  asking on the call. Type a task in a card and press Enter to send it. Click the name or
-  Open to jump to that chat. Delete needs two presses; the chat is archived, not deleted.
+  asking on the call. Type a task in a card and press Enter to send it. Click the name to
+  jump to that chat. Delete needs two presses; the chat is archived, not deleted.
 
 ### Waiting sessions (optional)
 
@@ -279,24 +284,63 @@ will mishear.
 - The first spoken line after a cold start can take up to a minute while the voice model
   loads.
 
-## Proactive workers (in progress)
+## Proactive workers
 
-Workers today wait for tasks. The next step is workers that run on their own and report
-back. The registry already accepts the fields (see `config/workers.example.json`):
+A worker can run on its own and report back instead of waiting for a task. Two optional
+registry fields turn it on (see the `inbox` worker in `config/workers.example.json`):
 
-- `charter`: the worker's standing instructions, including its limits (drafts only, never
-  send).
-- `schedule`: when it runs (`days`, `time`, `tz`).
-- `outbox`: a JSONL file the worker appends findings and drafts to, one line per item, with
-  `needs_approval` on anything outward. The pane will display it; approval stays a typed
-  yes in the worker's own chat.
+- **`charter`**: the worker's standing instructions, limits included. For example: each
+  run, read new replies, draft follow-ups to the outbox, never send. The card never shows
+  it; every wake sends all of it.
+- **`schedule`**: when it runs, as `{"days": "mon-fri", "time": "09:00", "tz": "UTC"}`.
+  `days` takes a range (`mon-fri`, `sun-thu`, `fri-mon`), a list (`mon,wed,fri`) or
+  `daily`; `tz` is any IANA zone. The card shows it as one dim line after the role:
+  `role · Mon–Fri · 9:00`.
 
-The scheduler and the outbox view in the pane are not built yet.
+**The pane is the scheduler.** At the scheduled time the Workers pane sends the worker's
+own chat a wake message carrying its charter. It has to be the pane: the only local thing
+that can put a message into an existing desktop chat is a mod's `$.session.send`. A
+launchd job or cron has no way into a chat, and a scheduled task starts a new session
+instead of waking the one that holds the worker's context. Each wake claims
+`~/.voicemode/call/wakes/<key>-<date>` with an atomic `mkdir`, so a worker is woken once a
+day however many sessions run the pane. A wake that is not delivered (the chat is not
+running yet) gives its claim back and retries every 10 minutes.
+
+**Run now** on a card sends the same wake at once.
+
+**The outbox.** The charter tells the worker to append one JSON line per item to
+`~/.voicemode/call/outbox/<key>.jsonl`:
+
+```json
+{"at": "2026-01-05T09:04:00Z", "kind": "draft", "title": "a reply to the venue about Friday",
+ "body": "Hi, Friday works for us...", "to": "events@example.com", "needs_approval": true}
+```
+
+`kind` is `draft` (something outward, `needs_approval: true`) or `note` (a finding). The
+card's Outbox button reads `Outbox · 2 drafts` while something is new, and it is the only
+draft indicator. Pressing it lists the newest items with their recipient, age and first
+lines, and marks them seen. The pane never sends anything.
+
+**The spoken heads-up.** Each new outbox line is toasted in the app. During a live call,
+`skills/colleague/bin/outbox-say` also speaks one line for it ("Inbox drafted a reply to
+the venue about Friday"), once per line, however many panes saw it.
+
+**Approvals stay a typed yes in the worker's own chat.** Click the worker's name (or Open
+chat under the feed) to review a draft there, edit it, and type yes to send. A spoken yes
+does not count.
+
+Limits:
+
+- The desktop app must be open. The pane runs inside it; nothing wakes a worker while it is
+  closed.
+- A wake missed while the Mac sleeps or the app is closed fires later the same day, as soon
+  as the pane polls again.
+- A day missed entirely is skipped, not replayed.
 
 ## Repository layout
 
 ```
-skills/colleague/        the skill: SKILL.md, bin/ (call, listen.py, narrate, permit, pill.swift), design/
+skills/colleague/        the skill: SKILL.md, bin/ (call, listen.py, narrate, permit, outbox-say, pill.swift), design/
 mods/workers-pane/       the Workers pane mod
 patches/                 the VoiceMode Bluetooth diff
 config/                  example settings hooks and workers registry

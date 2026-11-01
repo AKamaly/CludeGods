@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, RenderChildren, Timer } from 'claude-code'
 
-import type { FormState, RegistryWorker, SentTask, WorkerStatus } from '../types'
+import type { FormState, OutboxItem, RegistryWorker, Schedule, SentTask, WorkerStatus } from '../types'
 
 // The user's standing worker chats come from the call session's registry, read on every
 // poll. `session` is the app's chat id (what SendMessage and the claude:// link
@@ -12,7 +12,26 @@ import type { FormState, RegistryWorker, SentTask, WorkerStatus } from '../types
 // Every path hangs off $HOME, read once per call through `$.env.get`. The call session
 // opens the pane from the shell with `touch ~/.voicemode/call/open-workers`, so the user
 // is never told to type a command.
-type Paths = { home: string; registry: string; requests: string; openFlag: string; projects: string }
+//
+// Proactive workers. A worker with a `schedule` is woken by this pane: the only local
+// thing that can put a message into an existing desktop chat is a mod's
+// `$.session.send` (launchd cannot reach a chat, a scheduled task starts a new one).
+// Each wake claims `wakes/<key>-<date>` with an atomic mkdir first, so however many
+// sessions run this poll, a worker is woken once per scheduled day. A worker appends
+// what it finds and drafts to `outbox/<key>.jsonl`; `outbox/.seen.json` maps a worker
+// key to the newest item the user has looked at (ms). `outboxSay` speaks one heads-up
+// per new line if a call is live (its own mkdir lock makes that once per line).
+type Paths = {
+  home: string
+  registry: string
+  requests: string
+  openFlag: string
+  projects: string
+  outbox: string
+  seen: string
+  wakes: string
+  outboxSay: string
+}
 type Env = { env: { get: (name: string) => Promise<string | undefined> } }
 
 async function paths($: Env): Promise<Paths> {
@@ -30,6 +49,10 @@ async function paths($: Env): Promise<Paths> {
     requests: `${call}/requests`,
     openFlag: `${call}/open-workers`,
     projects: `${home}/.claude/projects`,
+    outbox: `${call}/outbox`,
+    seen: `${call}/outbox/.seen.json`,
+    wakes: `${call}/wakes`,
+    outboxSay: `${home}/.claude/skills/colleague/bin/outbox-say`,
   }
 }
 
@@ -39,6 +62,9 @@ function transcriptPath(p: Paths, t: string): string {
   if (t.startsWith('~/')) return `${p.home}/${t.slice(2)}`
   return `${p.projects}/${t}`
 }
+
+const FEED_ITEMS = 8
+const WAKE_RETRY_MS = 10 * 60_000
 
 const PANE = 'workers'
 const COLUMNS = 46
@@ -50,6 +76,7 @@ const CONFIRM_MS = 5_000 // how long an armed Delete waits for its second press
 const GREEN = '#34d399'
 const BLUE = '#60a5fa'
 const RED = '#f87171'
+const AMBER = '#fbbf24'
 
 const AVATARS = {
   blue: ['#60a5fa', '#2563eb'],
@@ -80,8 +107,16 @@ const selected = atom({ plugin: 'workers-pane', key: 'selected' } as const, '', 
 const confirming = atom({ plugin: 'workers-pane', key: 'confirming' } as const, {}, { shape: 'confirming-1' })
 const removing = atom({ plugin: 'workers-pane', key: 'removing' } as const, {}, { shape: 'removing-1' })
 const paneShown = atom({ plugin: 'workers-pane', key: 'paneShown' } as const, false, { shape: 'pane-shown-1' })
+const feeds = atom({ plugin: 'workers-pane', key: 'feeds' } as const, {}, { shape: 'feeds-1' })
 
-type Snapshot = { workers: RegistryWorker[]; status: Record<string, WorkerStatus>; error?: string }
+type Snapshot = {
+  workers: RegistryWorker[]
+  status: Record<string, WorkerStatus>
+  /** Worker key to its outbox, oldest first, as the file lists it. */
+  outbox: Record<string, OutboxItem[]>
+  seen: Record<string, number>
+  error?: string
+}
 
 // The minimal surface `$` offers this file's helpers; typed loosely so a helper
 // can take the hook's `$` from any event.
@@ -181,19 +216,172 @@ async function snapshot($: Fs, now: number): Promise<Snapshot> {
       status[w.key] = { isWorking: false, lastActiveMs: 0, isNew: false }
     }
   }
-  return { workers, status, error }
+  const outbox: Record<string, OutboxItem[]> = {}
+  for (const w of workers) outbox[w.key] = await readOutbox($, p, w.key)
+  return { workers, status, outbox, seen: await readSeen($, p), error }
 }
 
 /** What a redraw depends on, coarse enough that an idle pane is not redrawn every poll. */
 function signature(s: Snapshot): string {
   return JSON.stringify([
     s.error ?? '',
-    s.workers.map(w => [w.key, w.name, w.role, w.session, w.transcript, w.avatar]),
+    s.workers.map(w => [w.key, w.name, w.role, w.session, w.transcript, w.avatar, w.charter, w.schedule]),
     s.workers.map(w => {
       const st = s.status[w.key]
       return [st?.isWorking, st?.isNew, Math.floor((st?.lastActiveMs ?? 0) / 60_000)]
     }),
+    s.workers.map(w => [s.outbox[w.key]?.length ?? 0, s.seen[w.key] ?? 0]),
   ])
+}
+
+/** A worker's outbox, oldest first. A line that is not a valid item is skipped. */
+async function readOutbox($: Fs, p: Paths, key: string): Promise<OutboxItem[]> {
+  let raw: unknown
+  try {
+    raw = await $.fs.read(`${p.outbox}/${key}.jsonl`)
+  } catch {
+    return []
+  }
+  const items: OutboxItem[] = []
+  for (const line of String(raw).split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const o = JSON.parse(line) as Partial<OutboxItem>
+      if (typeof o.title !== 'string' || typeof o.at !== 'string') continue
+      items.push({
+        at: o.at,
+        kind: o.kind === 'draft' ? 'draft' : 'note',
+        title: o.title,
+        body: typeof o.body === 'string' ? o.body : '',
+        to: typeof o.to === 'string' && o.to ? o.to : undefined,
+        needs_approval: o.needs_approval === true,
+      })
+    } catch {
+      // a half-written or hand-edited line
+    }
+  }
+  return items
+}
+
+async function readSeen($: Fs, p: Paths): Promise<Record<string, number>> {
+  try {
+    const parsed = JSON.parse(String(await $.fs.read(p.seen))) as unknown
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, number>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function atMs(item: OutboxItem): number {
+  const t = Date.parse(item.at)
+  return Number.isNaN(t) ? 0 : t
+}
+
+/** An outbox item's identity, safe as a file name: its time and a hash of its title. */
+export function itemId(item: OutboxItem): string {
+  let h = 0
+  for (const ch of item.title) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0
+  return `${atMs(item)}-${(h >>> 0).toString(36)}`
+}
+
+/** The card's badge: drafts (else notes) newer than what the user last looked at. */
+export function badge(items: readonly OutboxItem[], seenMs: number): string {
+  const fresh = items.filter(i => atMs(i) > seenMs)
+  const drafts = fresh.filter(i => i.kind === 'draft').length
+  if (drafts > 0) return drafts === 1 ? '1 draft' : `${drafts} drafts`
+  const notes = fresh.length
+  if (notes > 0) return notes === 1 ? '1 note' : `${notes} notes`
+  return ''
+}
+
+/** The spoken heads-up for one new outbox item: "Inbox drafted a reply to Jordan". */
+export function headsUp(name: string, item: OutboxItem): string {
+  const title = item.title.trim().replace(/\s+/g, ' ')
+  const lower = title.charAt(0).toLowerCase() + title.slice(1)
+  return item.kind === 'draft' ? `${name} drafted ${lower}` : `${name} has a note: ${title}`
+}
+
+const DOW = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+
+/** The weekdays (0 = Sunday) a schedule's `days` names; ranges may wrap (fri-mon). */
+export function scheduleDays(days: string): Set<number> {
+  const s = days.trim().toLowerCase()
+  if (s === 'daily' || s === 'every day' || s === '*') return new Set([0, 1, 2, 3, 4, 5, 6])
+  const out = new Set<number>()
+  for (const part of s.split(',')) {
+    const [a, b] = part.split('-').map(x => DOW.indexOf(x.trim().slice(0, 3)))
+    if (a === undefined || a < 0) continue
+    if (b === undefined) {
+      out.add(a)
+      continue
+    }
+    if (b < 0) continue
+    for (let d = a; ; d = (d + 1) % 7) {
+      out.add(d)
+      if (d === b) break
+    }
+  }
+  return out
+}
+
+/** The wall clock in `tz` at `ms`: its date, weekday and minute of the day. */
+function zoned(ms: number, tz: string): { date: string; dow: number; minutes: number } | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(ms))
+    const get = (t: string) => parts.find(p => p.type === t)?.value ?? ''
+    return {
+      date: `${get('year')}-${get('month')}-${get('day')}`,
+      dow: DOW.indexOf(get('weekday').toLowerCase().slice(0, 3)),
+      minutes: Number(get('hour')) * 60 + Number(get('minute')),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The local date of today's wake if it is due at `ms` (a scheduled day, at or past
+ * its time), else undefined. A wake missed while the app was closed or the Mac
+ * asleep still fires later that day; a day missed entirely is skipped, not replayed.
+ */
+export function dueDate(schedule: Schedule, ms: number): string | undefined {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(schedule.time.trim())
+  if (!m) return undefined
+  const z = zoned(ms, schedule.tz)
+  if (!z || !scheduleDays(schedule.days).has(z.dow)) return undefined
+  return z.minutes >= Number(m[1]) * 60 + Number(m[2]) ? z.date : undefined
+}
+
+/** The card's schedule, short and dim beside the role: "Mon–Fri · 9:00". */
+export function scheduleLabel(schedule: Schedule): string {
+  const days = schedule.days.trim().toLowerCase() === 'daily'
+    ? 'Daily'
+    : schedule.days
+        .replace(/[a-z]+/gi, d => d.charAt(0).toUpperCase() + d.slice(1).toLowerCase())
+        .replace(/-/g, '–')
+        .replace(/,\s*/g, ', ')
+  return `${days} · ${schedule.time.trim().replace(/^0(\d)/, '$1')}`
+}
+
+/** The outbox button: "Outbox · 1 draft" while something is fresh, else "Outbox". */
+export function outboxLabel(items: readonly OutboxItem[], seenMs: number, isOpen: boolean): string {
+  if (isOpen) return 'Hide outbox'
+  const fresh = badge(items, seenMs)
+  return fresh ? `Outbox · ${fresh}` : 'Outbox'
+}
+
+/** The message that wakes a worker to run its charter; it carries the whole charter. */
+export function wakeText(w: RegistryWorker, why: string): string {
+  return [
+    `${why}: run your charter now. Read what is new, draft what needs a move, and append each item ` +
+      `to ~/.voicemode/call/outbox/${w.key}.jsonl. Drafts only: send, post or change nothing outward.`,
+    '',
+    'Your charter:',
+    w.charter ?? '',
+  ].join('\n')
 }
 
 // The avatar: the call orb's look rebuilt as SVG (gradients, blur, SMIL), since a
@@ -255,6 +443,13 @@ export const register: Register = on => {
   const drafts = new Map<string, string>()
   // The New worker form's one field ("Name, then what it does"), kept here for the same reason.
   const form = { text: '' }
+  // Wakes this instance has already handled ("<key>-<date>"), when an undelivered one
+  // may try again, and the outbox item ids each worker has had announced (absent until
+  // the first look, which only sets the baseline).
+  const checked = new Set<string>()
+  const retryAt = new Map<string, number>()
+  const heard = new Map<string, Set<string>>()
+  let isPolling = false
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'workers', description: 'Show the Workers pane' })
@@ -264,8 +459,9 @@ export const register: Register = on => {
     let openedAt = await $.clock.now()
     const poll = async () => {
       const now = await $.clock.now()
+      const p = await paths($)
       try {
-        const flag = await $.fs.stat((await paths($)).openFlag)
+        const flag = await $.fs.stat(p.openFlag)
         if (flag.mtimeMs > openedAt) {
           openedAt = flag.mtimeMs
           void $.ui.open({ id: PANE, title: 'Workers', columns: COLUMNS, focus: true })
@@ -284,6 +480,89 @@ export const register: Register = on => {
       const sig = signature(snap)
       await update($, roster, old => (old === sig ? old : sig))
       await syncShown($)
+      // One poll at a time: a slow process.run must not let an older snapshot run last.
+      if (isPolling) return
+      isPolling = true
+      try {
+        await wakeDue(snap, now, p)
+        announce(snap, p)
+      } finally {
+        isPolling = false
+      }
+    }
+
+    // Wakes each scheduled worker once per due day. `checked` spares the mkdir on
+    // every poll; the mkdir is what makes it once across sessions. A wake that is not
+    // delivered (the chat not running yet) gives the claim back and retries later.
+    const wakeDue = async (snap: Snapshot, now: number, p: Paths) => {
+      const self = await $.session.id().catch(() => '')
+      for (const w of snap.workers) {
+        if (!w.schedule || !w.session || !w.charter) continue
+        // The worker's own chat never wakes itself.
+        if (self && w.transcript?.split('/').pop() === `${self}.jsonl`) continue
+        const date = dueDate(w.schedule, now)
+        if (!date) continue
+        const id = `${w.key}-${date}`
+        if (checked.has(id) || (retryAt.get(id) ?? 0) > now) continue
+        checked.add(id)
+        const claimDir = `${p.wakes}/${id}`
+        try {
+          await $.process.run(['/bin/mkdir', '-p', p.wakes])
+          const claim = await $.process.run(['/bin/mkdir', claimDir])
+          if (claim.exitCode !== 0) continue // already woken today, by this or another session
+        } catch {
+          continue
+        }
+        let isDelivered = false
+        let reason: string | undefined
+        try {
+          const result = await $.session.send({
+            to: w.session,
+            text: wakeText(w, `Scheduled run (${date} ${w.schedule.time} ${w.schedule.tz})`),
+          })
+          isDelivered = result.isDelivered !== false
+          reason = result.isDelivered === false ? result.reason : undefined
+        } catch (err) {
+          reason = String(err)
+        }
+        if (!isDelivered) {
+          await $.process.run(['/bin/rmdir', claimDir]).catch(() => undefined)
+          checked.delete(id)
+          retryAt.set(id, now + WAKE_RETRY_MS)
+        } else {
+          await $.fs
+            .write(`${claimDir}/result.json`, JSON.stringify({ at: now, isDelivered, reason }))
+            .catch(() => undefined)
+        }
+        await update($, sent, old => ({
+          ...old,
+          [w.key]: { text: 'Scheduled run of its charter', atMs: now, isDelivered, reason },
+        }))
+        $.ui.toast(isDelivered ? `${w.name} woke for its scheduled run` : `${w.name} didn't wake, retrying in 10 min: ${reason ?? 'not delivered'}`)
+      }
+    }
+
+    // A new outbox item: a toast, and one spoken line if a call is live (outbox-say
+    // checks the call and locks per item, so two sessions never say it twice). Items
+    // are known by id, so a rewritten file re-announces nothing it already had.
+    const announce = (snap: Snapshot, p: Paths) => {
+      for (const w of snap.workers) {
+        const items = snap.outbox[w.key] ?? []
+        const known = heard.get(w.key)
+        if (known === undefined) {
+          heard.set(w.key, new Set(items.map(itemId))) // the first look sets the baseline
+          continue
+        }
+        if (items.length === 0 && known.size > 0) continue // a failed read, not an emptied outbox
+        for (const item of items) {
+          const id = itemId(item)
+          if (known.has(id)) continue
+          known.add(id)
+          const line = headsUp(w.name, item)
+          $.ui.toast(line)
+          void $.process.run([p.outboxSay, w.key, id, line]).catch(() => undefined)
+        }
+      }
     }
     void poll()
     timer = $.clock.every(POLL_MS, () => void poll())
@@ -310,6 +589,7 @@ export const register: Register = on => {
     const picked = await read($, selected)
     const armed = await read($, confirming)
     const leaving = await read($, removing)
+    const expanded = await read($, feeds)
 
     const open = async (w: RegistryWorker) => {
       await update($, selected, old => (old === w.key ? old : w.key))
@@ -342,6 +622,38 @@ export const register: Register = on => {
       }
       await update($, sent, old => ({ ...old, [w.key]: entry }))
       $.ui.toast(entry.isDelivered ? `Sent to ${w.name}` : `${w.name} didn't get it: ${entry.reason ?? 'not delivered'}`)
+    }
+
+    // Run now: the same wake the schedule sends, at once.
+    const runNow = async (w: RegistryWorker) => {
+      if (!w.session) {
+        $.ui.toast(`${w.name} has no chat yet`)
+        return
+      }
+      const result = await $.session.send({ to: w.session, text: wakeText(w, 'Run now, from the Workers pane') })
+      const entry: SentTask = {
+        text: 'Run its charter now',
+        atMs: await $.clock.now(),
+        isDelivered: result.isDelivered !== false,
+        reason: result.isDelivered === false ? result.reason : undefined,
+      }
+      await update($, sent, old => ({ ...old, [w.key]: entry }))
+      $.ui.toast(entry.isDelivered ? `${w.name} is running its charter` : `${w.name} didn't get it: ${entry.reason ?? 'not delivered'}`)
+    }
+
+    // Expanding a feed marks its items seen, which clears the badge. The pane never
+    // sends: a draft is approved by the user's typed yes in the worker's chat.
+    const toggleFeed = async (w: RegistryWorker, items: readonly OutboxItem[]) => {
+      const isOpen = !(await read($, feeds))[w.key]
+      await update($, feeds, old => ({ ...old, [w.key]: isOpen }))
+      const newest = Math.max(0, ...items.map(atMs))
+      if (!isOpen || newest <= (snap.seen[w.key] ?? 0)) return
+      const p = await paths($)
+      try {
+        await $.fs.write(p.seen, JSON.stringify({ ...(await readSeen($ as unknown as Fs, p)), [w.key]: newest }))
+      } catch {
+        // the badge stays until the next look
+      }
     }
 
     // Delete arms on the first press and fires on a second within CONFIRM_MS. The
@@ -525,6 +837,8 @@ export const register: Register = on => {
       const [c] = colours(w.avatar)
       const last = tasks[w.key]
       const draft = drafts.get(w.key) ?? ''
+      const items = snap.outbox[w.key] ?? []
+      const isFeedOpen = expanded[w.key] === true
       const pill = isRemoving
         ? { text: 'Removing…', color: RED }
         : s?.isNew
@@ -577,7 +891,22 @@ export const register: Register = on => {
                   {` ${pill.text} `}
                 </Text>
               </Box>
-              {w.role ? <Text dimColor size="footnote" wrap="truncate-end">{w.role}</Text> : null}
+              {/* One dim line: what it does, then when it wakes. The charter is the
+                  worker's instructions, not display copy, so the card never shows it. */}
+              {w.role || w.schedule ? (
+                <Box key={`about-${w.key}`} flexDirection="row" alignItems="center" gap="xs" width="100%">
+                  {w.role ? (
+                    <Box flexGrow={1} flexShrink={1}>
+                      <Text dimColor size="footnote" wrap="truncate-end">{w.role}</Text>
+                    </Box>
+                  ) : null}
+                  {w.schedule ? (
+                    <Text dimColor size="footnote" wrap="truncate-end">
+                      {w.role ? `· ${scheduleLabel(w.schedule)}` : scheduleLabel(w.schedule)}
+                    </Text>
+                  ) : null}
+                </Box>
+              ) : null}
             </Box>
           </Box>
           {Input && !isRemoving
@@ -594,22 +923,79 @@ export const register: Register = on => {
             : null}
           {isRemoving ? null : (
             <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
+              {/* At most two actions, then a quiet Delete. The name opens the chat. */}
+              {w.charter ? (
+                <Button key={`run-${w.key}`} label="Run now" variant="secondary" onPress={() => void runNow(w)} />
+              ) : null}
+              {items.length > 0 || w.charter ? (
+                <Button
+                  key={`feed-${w.key}`}
+                  label={outboxLabel(items, snap.seen[w.key] ?? 0, isFeedOpen)}
+                  variant="secondary"
+                  onPress={() => void toggleFeed(w, items)}
+                />
+              ) : null}
               <Box flexGrow={1} />
-              <Button key={`open-${w.key}`} label="Open" variant="secondary" onPress={() => void open(w)} />
               {isArmed ? (
                 <Button key={`delete-${w.key}`} label="Confirm delete" variant="secondary" onPress={() => void remove(w)}>
                   <Text bold color={RED}>Confirm delete</Text>
                 </Button>
               ) : (
-                <Button key={`delete-${w.key}`} label="Delete" variant="secondary" dimColor onPress={() => void remove(w)} />
+                <Button key={`delete-${w.key}`} label="Delete" plain onPress={() => void remove(w)} />
               )}
             </Box>
           )}
+          {isFeedOpen && !isRemoving ? feed(w, items, c) : null}
           {last ? (
             <Text dimColor size="footnote" wrap="truncate-end">
               {`${last.isDelivered ? 'Last' : 'Not delivered'}: ${last.text} · ${ago(now - last.atMs)}`}
             </Text>
           ) : null}
+        </Box>
+      )
+    }
+
+    // The outbox, newest first: title, recipient and age, then the body's first lines.
+    // Review happens in the chat ("Open chat"); nothing here sends.
+    function feed(w: RegistryWorker, items: readonly OutboxItem[], c: string) {
+      const shown = [...items].map((item, i) => ({ item, i })).reverse().slice(0, FEED_ITEMS)
+      return (
+        <Box key={`outbox-${w.key}`} flexDirection="column" gap="xs" width="100%">
+          {shown.length === 0 ? <Text dimColor size="footnote">Nothing in the outbox yet</Text> : null}
+          {shown.map(({ item, i }) => {
+            const lines = item.body.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 2)
+            const meta = [item.to ? `to ${item.to}` : '', ago(now - atMs(item))].filter(Boolean).join(' · ')
+            return (
+              <Box
+                key={`item-${w.key}-${i}`}
+                flexDirection="column"
+                borderStyle="round"
+                borderDimColor
+                width="100%"
+                paddingX="sm"
+                paddingY="xs"
+              >
+                <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
+                  <Text size="caption" color={item.kind === 'draft' ? AMBER : undefined} dimColor={item.kind !== 'draft'}>
+                    {item.kind === 'draft' ? '✉️ Draft' : '📝 Note'}
+                  </Text>
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text bold size="footnote" wrap="truncate-end">{item.title}</Text>
+                  </Box>
+                </Box>
+                <Text dimColor size="caption" wrap="truncate-end">{meta}</Text>
+                {lines.map((l, n) => (
+                  <Text key={`item-${w.key}-${i}-l${n}`} size="footnote" wrap="truncate-end">{l}</Text>
+                ))}
+              </Box>
+            )
+          })}
+          <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+            <Box flexGrow={1} flexShrink={1}>
+              <Text dimColor size="caption">Approve or edit in the chat. The pane never sends.</Text>
+            </Box>
+            <Button key={`feed-open-${w.key}`} label="Open chat" variant="primary" onPress={() => void open(w)} />
+          </Box>
         </Box>
       )
     }

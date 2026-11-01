@@ -96,6 +96,20 @@ The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
   `set_session_model` after, which asks the user in the app.
 - **Route** by voice ("new task for Research: …"): `SendMessage` to that worker's `session`.
 - **Open the pane**: `touch ~/.voicemode/call/open-workers`. Never ask them to type `/workers`.
+- **Proactive workers**: a registry entry may carry a `charter` (the worker's standing
+  brief, limits included) and a `schedule` (`{"days": "mon-fri", "time": "09:00", "tz":
+  "UTC"}`; days also take `sun-thu`, `mon,wed,fri` or `daily`). To make a worker proactive,
+  write both into its entry; the Workers pane wakes it at that time, once a day. Do not
+  use a scheduled task or cron for this: neither can put a message into an existing chat.
+  The charter must say: drafts only, never send, and append one JSON line per item to
+  `~/.voicemode/call/outbox/<key>.jsonl`:
+  `{"at", "kind": "draft"|"note", "title", "body", "to" (drafts only), "needs_approval"}`.
+  A worker's own chat runs its charter on "run your charter now" (`SendMessage`), the same
+  text the pane's Run now sends.
+- **Outbox**: each new line is toasted by the pane and, during a call, spoken once by
+  `bin/outbox-say` ("Inbox drafted a reply to …"); do not repeat it. Asked what is in an
+  outbox, read the file and give the short version. Drafts are approved in the worker's own
+  chat with a typed yes, never on a spoken yes and never from this session.
 
 ## Delegated work
 

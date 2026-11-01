@@ -54,7 +54,9 @@ test('the pane draws one full-width card per registry worker, with avatars and s
   expect(await ui.findAll({ type: 'Input' })).toHaveLength(4)
   expect((await ui.find({ key: 'card-work' }))?.props.width).toBe('100%')
   expect(await ui.findAll({ type: 'Link' })).toHaveLength(0)
-  expect(await ui.find({ key: 'open-deep' })).toBeDefined()
+  // The name opens the chat; there is no separate Open button.
+  expect(await ui.find({ key: 'name-deep' })).toBeDefined()
+  expect(await ui.find({ key: 'open-deep' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Lookups, opening things/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '4 standing chats' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Working/ })).toBeDefined()
@@ -88,7 +90,7 @@ test('each Input is the only submit control: no separate Send or Create Buttons'
   await ui.unmount()
 })
 
-test('Open and the name both open the worker chat in the centre', async ($, on) => {
+test('the name opens the worker chat in the centre', async ($, on) => {
   world(on)
   const runs: string[][] = []
   on('process.run', (_, e) => {
@@ -97,7 +99,7 @@ test('Open and the name both open the worker chat in the centre', async ($, on) 
   })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'open-work' })
+  await ui.press({ key: 'name-work' })
   await ui.press({ key: 'name-deep' })
 
   expect(runs).toEqual([
@@ -107,7 +109,7 @@ test('Open and the name both open the worker chat in the centre', async ($, on) 
   await ui.unmount()
 })
 
-test('pressing Open marks that card selected with its persona border', async ($, on) => {
+test('pressing the name marks that card selected with its persona border', async ($, on) => {
   world(on)
   on('process.run', () => ({
     value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
@@ -116,7 +118,7 @@ test('pressing Open marks that card selected with its persona border', async ($,
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect((await ui.find({ key: 'card-work' }))?.props.borderColor).toBeUndefined()
 
-  await ui.press({ key: 'open-work' })
+  await ui.press({ key: 'name-work' })
   const work = await ui.find({ key: 'card-work' })
   expect(work?.props.borderColor).toBe('#a78bfa') // violet persona colour
   expect(work?.props.borderDimColor).toBe(false)
@@ -327,5 +329,142 @@ test('the footer launcher reads "Workers" with no workers and keeps the mode lab
   const ui = await $.ui.mount({ ...FOOTER, surface: 'desktop' })
   expect((await ui.find({ key: 'open-workers-band' }))?.props.label).toBe('Workers')
   expect(await ui.find({ type: 'Text', text: /Bypass permissions/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// A proactive worker: a charter, a weekday schedule, and three outbox lines (two drafts,
+// one note), the second draft newer than what the user last looked at.
+const SALES = {
+  workers: [
+    { key: 'sales', name: 'Sales', role: 'Follow-ups', session: 'local_sales-9', transcript: 'sales.jsonl', avatar: 'blue',
+      charter: 'You are Sales, a standing follow-up worker. Drafts only.\nMore rules here.',
+      schedule: { days: 'mon-fri', time: '09:00', tz: 'Asia/Tokyo' } },
+  ],
+}
+const ISO = (ms: number) => new Date(ms).toISOString()
+const OUTBOX = [
+  { at: ISO(NOW - 3_600_000), kind: 'draft', title: 'Reply to Jordan (Acme)', body: 'Hi Jordan,\nQuick one on the demo call.\nThird line', to: 'jordan@example.com', needs_approval: true },
+  { at: ISO(NOW - 1_800_000), kind: 'note', title: 'Globex went quiet', body: 'No reply in two weeks.', needs_approval: false },
+  { at: ISO(NOW - 60_000), kind: 'draft', title: 'Nudge to Sam Lee', body: 'Hi Sam,\nSeat count?', to: 'sam@example.com', needs_approval: true },
+].map(o => JSON.stringify(o)).join('\n') + '\nnot json\n'
+
+function salesWorld(on: On, seenMs = NOW - 2_000_000) {
+  mock.env(on, { HOME })
+  on('clock.now', () => ({ value: NOW }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('fs.read', (_, e) => {
+    if (e.path.endsWith('/workers.json')) return { value: JSON.stringify(SALES) }
+    if (e.path.endsWith('/outbox/sales.jsonl')) return { value: OUTBOX }
+    if (e.path.endsWith('/outbox/.seen.json')) return { value: JSON.stringify({ sales: seenMs }) }
+    return { deny: `ENOENT ${e.path}` }
+  })
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: NOW - 180_000, isLink: false } }))
+}
+
+test('a proactive card reads as tidy rows: role and schedule on one dim line, no charter, one draft indicator', async ($, on) => {
+  salesWorld(on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // Row 2: the role, then the short schedule, both dim; no timezone, no box, no tint.
+  expect(await ui.find({ type: 'Text', text: 'Follow-ups' })).toBeDefined()
+  const schedule = await ui.find({ type: 'Text', text: '· Mon–Fri · 9:00' })
+  expect(schedule?.props.dimColor).toBe(true)
+  expect(schedule?.props.backgroundColor).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Tokyo|⏰/ })).toBeUndefined()
+  // The charter is the worker's instructions: never on the card.
+  expect(await ui.find({ type: 'Text', text: /You are Sales|More rules here/ })).toBeUndefined()
+  // One draft indicator, on the Outbox button; no badge beside the name.
+  expect(await ui.find({ type: 'Text', text: /draft/ })).toBeUndefined()
+  expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Outbox · 1 draft')
+  expect(await ui.find({ key: 'outbox-sales' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the footer has Run now and Outbox, then a quiet clickable Delete, and no Open', async ($, on) => {
+  salesWorld(on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect((await ui.find({ key: 'run-sales' }))?.props.label).toBe('Run now')
+  expect(await ui.find({ key: 'open-sales' })).toBeUndefined()
+  const del = await ui.find({ key: 'delete-sales' })
+  expect(del?.props.label).toBe('Delete')
+  expect(del?.props.plain).toBe(true)
+  expect(del?.props.dimColor).toBeUndefined()
+  // The visible footer actions, in order.
+  const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /^(run|feed|open|delete)-sales$/.test(k ?? ''))
+  expect(keys).toEqual(['run-sales', 'feed-sales', 'delete-sales'])
+  await ui.unmount()
+})
+
+test('with nothing fresh the Outbox button carries no count', async ($, on) => {
+  salesWorld(on, NOW)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Outbox')
+  await ui.unmount()
+})
+
+test('the badge counts every fresh draft, and notes only when no draft is fresh', async ($, on) => {
+  salesWorld(on, 0)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Outbox · 2 drafts')
+  await ui.unmount()
+})
+
+test('Run now sends the charter wake to that worker chat', async ($, on) => {
+  salesWorld(on)
+  const sends: { to: unknown; text: string }[] = []
+  on('session.send', (_, e) => {
+    sends.push({ to: e.to, text: e.text })
+    return { isDelivered: true }
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'run-sales' })
+
+  expect(sends).toHaveLength(1)
+  expect(JSON.stringify(sends[0]?.to)).toContain('local_sales-9')
+  expect(sends[0]?.text).toMatch(/^Run now, from the Workers pane: run your charter now/)
+  expect(sends[0]?.text).toContain('~/.voicemode/call/outbox/sales.jsonl')
+  expect(sends[0]?.text).toContain('More rules here.')
+  expect(await ui.find({ type: 'Text', text: /^Last: Run its charter now/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the outbox feed lists items newest first, marks them seen, and never sends', async ($, on) => {
+  salesWorld(on)
+  let sendCount = 0
+  on('session.send', () => {
+    sendCount += 1
+    return { isDelivered: true }
+  })
+  const writes: { path: string; text: string }[] = []
+  on('fs.write', (_, e) => {
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  const runs: string[][] = []
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'feed-sales' })
+
+  const cards = (await ui.findAll({ type: 'Box' })).filter(b => b.key?.startsWith('item-sales-'))
+  expect(cards.map(b => b.key)).toEqual(['item-sales-2', 'item-sales-1', 'item-sales-0'])
+  expect(await ui.find({ type: 'Text', text: 'Nudge to Sam Lee' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /to jordan@example\.com/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Quick one on the demo call.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Third line' })).toBeUndefined()
+  expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Hide outbox')
+  expect(writes).toEqual([{ path: `${HOME}/.voicemode/call/outbox/.seen.json`, text: JSON.stringify({ sales: NOW - 60_000 }) }])
+
+  await ui.press({ key: 'feed-open-sales' })
+  expect(runs).toEqual([['open', 'claude://claude.ai/epitaxy/local_sales-9']])
+  expect(sendCount).toBe(0)
+
+  await ui.press({ key: 'feed-sales' })
+  expect(await ui.find({ key: 'outbox-sales' })).toBeUndefined()
   await ui.unmount()
 })
