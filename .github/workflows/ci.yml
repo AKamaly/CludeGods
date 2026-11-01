@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and CallPill build (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Echo gate and barge-in (listen.py)
+        run: python3 -I skills/colleague/bin/listen.py --selftest
+
+      - name: Worker tool permissions (guard)
+        run: python3 -I skills/colleague/bin/guard --selftest
+
+      - name: Spaces and Pages (pages CLI)
+        run: python3 -B -I -m unittest discover -s skills/spaces/tests -v
+
+      - name: Slack bridge
+        run: python3 -B -I -m unittest discover -s skills/colleague/bridges/slack/tests -v
+
+      - name: Shell scripts parse
+        run: |
+          for f in install.sh scripts/build-pill.sh skills/colleague/bin/call \
+                   skills/colleague/bin/outbox-say skills/colleague/bin/bridge; do
+            bash -n "$f" && echo "ok  $f"
+          done
+
+      - name: Manifests are valid JSON
+        run: |
+          for f in .claude-plugin/marketplace.json mods/*/.claude-plugin/plugin.json \
+                   mods/*/hooks/hooks.json config/*.json skills/colleague/bin/gods/index.json; do
+            python3 -m json.tool "$f" > /dev/null && echo "ok  $f"
+          done
+
+      - name: Build CallPill
+        run: scripts/build-pill.sh
+
+      - name: Snapshot every CallPill state
+        continue-on-error: true
+        run: skills/colleague/bin/pill --snapshot callpill-states.png
+
+      - name: Upload the snapshot
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: callpill-states
+          path: callpill-states.png
+          if-no-files-found: ignore
+
+# The mods (mods/*) are tested with Claude Code's own runner, `claude plugin test mods/<name>`,
+# which is not available on CI runners: run it locally before opening a pull request.

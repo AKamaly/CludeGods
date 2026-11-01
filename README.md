@@ -8,8 +8,9 @@
 
 **Voice calls, spoken progress, always-on workers with their own voices, Spaces for your docs, Slack, and click-only approvals, inside the Claude desktop app on your Mac.**
 
-Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [VoiceMode](https://github.com/mbailey/voicemode). · [Get started](#get-started) · [How to use it](#how-to-use-it) · [Overview](#overview) · [Architecture](#architecture) · [Features](#features) · [Safety](#safety-model) · [Contributing](#contributing)
+Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [VoiceMode](https://github.com/mbailey/voicemode). · [Get started](#get-started) · [How to use it](#how-to-use-it) · [Overview](#overview) · [Architecture](#architecture) · [Features](#features) · [Safety](#safety-model) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
+[![CI](https://github.com/AKamaly/CludeGods/actions/workflows/ci.yml/badge.svg)](https://github.com/AKamaly/CludeGods/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 ![Platform: macOS Apple Silicon](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey.svg)
@@ -729,18 +730,10 @@ docs/media/              README images and the hero GIF
 
 ## Contributing
 
-Issues and pull requests are welcome. CludeGods is alpha, so small, focused changes are
-easiest to review. Before sending a change:
-
-- to the echo gate or barge-in: run `skills/colleague/bin/listen.py --selftest`, and
-  `--replay FILE` on a real log if you have one;
-- to a mod (`mods/*`): run its tests with `claude plugin test mods/<name>` and type-check
-  with `tsc` after loading the mod once;
-- to `pages`, `guard` or the Slack bridge: `python3 -m unittest discover -s skills/spaces/tests`,
-  `skills/colleague/bin/guard --selftest`, and
-  `python3 -m unittest discover -s skills/colleague/bridges/slack/tests`;
-- to anything that approves, sends, or starts sessions: keep the [Safety model](#safety-model)
-  intact and say in the PR how the change preserves it.
+Issues and pull requests are welcome. Every change lands through a pull request with CI
+green and a line in [CHANGELOG.md](CHANGELOG.md); [CONTRIBUTING.md](CONTRIBUTING.md) has the
+workflow, the tests to run, and how releases are cut. Anything that approves, sends, or
+starts sessions has to keep the [Safety model](#safety-model) intact.
 
 ## Credits
 
