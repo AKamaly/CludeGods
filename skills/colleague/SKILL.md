@@ -94,7 +94,9 @@ The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
   when its first turn ends. There is no model in it: the user picks the model inside the chat.
   Start it on a mid-tier model, effort `medium`. `start_session` (initiation `user_asked`,
   `fresh`, `use_worktree: false`, title `Worker: <name>`, a short standby prompt), then
-  append `{key, name, role, model, effort, session, avatar}` to the registry. `transcript`
+  append `{key, name, role, model, effort, session, avatar, god, voice, tools}` to the
+  registry (`god`, `voice` and `tools` come from the create prompt's `god=…; voice=…;
+  tools=…` when present). `transcript`
   comes later: find the `.jsonl` under `~/.claude/projects/<project-dir>/` that holds its
   standby prompt, and store it as a path relative to `~/.claude/projects/` (or absolute).
   A model pricier than this session's is ignored by `start_session`: then call

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CludeGods Cast</title>
+<style>
+/* The cast sheet: open this file in a browser. ?t=2 freezes at 2 s, ?loop=2 previews the
+   2 s sprite loop (see scripts/render-gods.mjs). window.seek(t) draws one frame. */
+html,body{margin:0;height:100%;overflow:hidden;background:#eceef6}
+#stage{position:absolute;left:0;top:0;width:1920px;height:1080px;overflow:hidden;background:#eceef6;transform-origin:0 0}
+.blob{position:absolute;border-radius:50%;filter:blur(120px)}
+.lab{position:absolute;font:500 22px system-ui,-apple-system,sans-serif;color:#5d6070;transform:translateX(-50%);white-space:nowrap;text-align:center}
+.lab b{display:block;font-weight:500;color:#15151b;font-size:26px}
+</style></head>
+<body><div id="stage">
+  <div class="blob" style="left:-260px;top:-240px;width:900px;height:760px;background:#dfe3ff"></div>
+  <div class="blob" style="left:1250px;top:-300px;width:900px;height:700px;background:#f1def3"></div>
+  <div class="blob" style="left:500px;top:700px;width:1100px;height:600px;background:#fbe6da;opacity:.8"></div>
+</div>
+<script src="gods.js"></script>
+<script>
+const stage = document.getElementById("stage");
+const q = new URLSearchParams(location.search);
+const LOOP = +q.get("loop") || 0;
+const STATE = { colleague: "talk", research: "listen", scribe: "work", scout: "happy", sales: "idle", herald: "talk" };
+const LOOK = { colleague: [0, 0], research: [0.6, -0.2], scribe: [0, 0.5], scout: [0, 0], sales: [-0.4, 0], herald: [0.3, -0.3] };
+const big = [], small = [], tiny = [];
+const ORDER = ["scout", "colleague", "research", "scribe", "sales", "herald"];
+const XS = [250, 572, 860, 1140, 1415, 1665];
+Gods.names.forEach((n, i) => {
+  const cx = XS[ORDER.indexOf(n)];
+  big.push([Gods.make(stage, n, 230), cx, 420]);
+  const l = document.createElement("div"); l.className = "lab"; l.style.left = cx + "px"; l.style.top = "585px";
+  l.innerHTML = `<b>${n}</b>${STATE[n]}`; stage.appendChild(l);
+  small.push([Gods.make(stage, n, 40), 660 + i * 120, 820]);
+  tiny.push([Gods.make(stage, n, 28), 690 + i * 110, 960]);
+});
+function render(t) {
+  const loop = LOOP || undefined;
+  big.forEach(([e, x, y], i) => { const n = Gods.names[i]; e._set(t, x, y, { state: STATE[n], look: LOOK[n], loop }); });
+  small.forEach(([e, x, y], i) => e._set(t, x, y, { state: STATE[Gods.names[i]], loop }));
+  tiny.forEach(([e, x, y]) => e._set(t, x, y, { state: "idle", shadow: 0, loop }));
+}
+function fit() { stage.style.transform = `scale(${Math.min(innerWidth / 1920, innerHeight / 1080)})`; }
+addEventListener("resize", fit); fit();
+window.seek = t => render(t);
+if (q.has("t")) render(+q.get("t"));
+else { const t0 = performance.now(); const tick = () => { render((performance.now() - t0) / 1000); requestAnimationFrame(tick); }; tick(); }
+</script></body></html>

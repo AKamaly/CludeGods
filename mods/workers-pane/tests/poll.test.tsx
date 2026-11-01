@@ -1,19 +1,30 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-// Mon 2 Nov 2026, 09:05 Tokyo: the Sales schedule is due.
-const DUE = Date.parse('2026-11-02T00:05:00Z')
+// Mon 2 Nov 2026, 09:05 Riyadh: the Sales schedule is due.
+const DUE = Date.parse('2026-11-02T06:05:00Z')
 const HOME = '/home/tester'
+const CALL = `${HOME}/.voicemode/call`
 const SALES = {
   workers: [
     { key: 'sales', name: 'Sales', session: 'local_sales-9', transcript: 'sales-cli.jsonl', avatar: 'blue',
-      charter: 'You are Sales. Drafts only.', schedule: { days: 'mon-fri', time: '09:00', tz: 'Asia/Tokyo' } },
+      charter: 'You are Sales. Drafts only.', schedule: { days: 'mon-fri', time: '09:00', tz: 'Asia/Riyadh' } },
   ],
 }
 const item = (min: number, title: string) =>
   JSON.stringify({ at: new Date(DUE - min * 60_000).toISOString(), kind: 'draft', title, body: 'b', needs_approval: true })
 
-type World = { now: number; outbox: string; claimed: Set<string>; deliver: boolean; self: string }
+type World = {
+  now: number
+  outbox: string
+  registry: unknown
+  claimed: Set<string>
+  deliver: boolean
+  self: string
+  flag?: { mtimeMs: number; text: string }
+  writes: { path: string; text: string }[]
+  opens: unknown[]
+}
 
 function world(on: On, w: World) {
   const runs: string[][] = []
@@ -23,18 +34,31 @@ function world(on: On, w: World) {
   on('clock.now', () => ({ value: w.now }))
   on('clock.every', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_, e) => {
+    w.opens.push({ ...e })
+    return { value: { isPlaced: true } }
+  })
   on('ui.panes', () => ({ value: [] }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.id', () => ({ value: w.self }))
-  on('fs.write', () => ({ value: undefined }))
+  on('fs.write', (_, e) => {
+    w.writes.push({ path: e.path, text: e.text })
+    if (e.path.endsWith('/workers.json')) w.registry = JSON.parse(e.text)
+    return { value: undefined }
+  })
   on('fs.read', (_, e) => {
-    if (e.path.endsWith('/workers.json')) return { value: JSON.stringify(SALES) }
+    if (e.path.endsWith('/workers.json')) return { value: JSON.stringify(w.registry) }
     if (e.path.endsWith('/outbox/sales.jsonl')) return { value: w.outbox }
+    if (e.path === `${CALL}/open-workers` && w.flag) return { value: w.flag.text }
+    return { deny: `ENOENT ${e.path}` }
+  })
+  on('fs.list', (_, e) => {
+    if (e.path === `${HOME}/.claude/projects`) return { value: [{ name: '-home-tester-work', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }
     return { deny: `ENOENT ${e.path}` }
   })
   on('fs.stat', (_, e) => {
     if (e.path.endsWith('.jsonl')) return { value: { kind: 'file', size: 1, mtimeMs: w.now - 600_000, isLink: false } }
+    if (e.path === `${CALL}/open-workers` && w.flag) return { value: { kind: 'file', size: 1, mtimeMs: w.flag.mtimeMs, isLink: false } }
     return { deny: `ENOENT ${e.path}` }
   })
   on('process.run', (_, e) => {
@@ -55,24 +79,41 @@ function world(on: On, w: World) {
   return { runs, sends }
 }
 
+const fresh = (patch: Partial<World> = {}): World => ({
+  now: DUE, outbox: '', registry: SALES, claimed: new Set(), deliver: true, self: 'me', writes: [], opens: [], ...patch,
+})
 const start = ($: any) => $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 50))
 
 test('a due schedule wakes the worker once per day across polls and sessions', async ($, on) => {
-  const w: World = { now: DUE, outbox: '', claimed: new Set(), deliver: true, self: 'me' }
+  const w = fresh()
   const { sends } = world(on, w)
   await start($)
   await settle()
   expect(sends).toHaveLength(1)
-  expect(sends[0]).toMatch(/^Scheduled run \(2026-11-02 09:00 Asia\/Tokyo\): run your charter now/)
-  expect([...w.claimed]).toEqual([`${HOME}/.voicemode/call/wakes/sales-2026-11-02`])
+  expect(sends[0]).toMatch(/^Scheduled run \(2026-11-02 09:00 Asia\/Riyadh\): run your charter now/)
+  expect([...w.claimed]).toEqual([`${CALL}/wakes/sales-2026-11-02`])
   await start($) // a second poll, and the claim another session would see
   await settle()
   expect(sends).toHaveLength(1)
 })
 
+test('a paused worker is not woken, and wakes again once resumed', async ($, on) => {
+  const paused = { workers: [{ ...SALES.workers[0], paused: true }] }
+  const w = fresh({ registry: paused })
+  const { sends } = world(on, w)
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(0)
+  expect(w.claimed.size).toBe(0)
+  w.registry = { workers: [{ ...SALES.workers[0], paused: false }] }
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(1)
+})
+
 test('an undelivered wake gives its claim back and retries after 10 minutes', async ($, on) => {
-  const w: World = { now: DUE, outbox: '', claimed: new Set(), deliver: false, self: 'me' }
+  const w = fresh({ deliver: false })
   const { sends } = world(on, w)
   await start($)
   await settle()
@@ -91,29 +132,97 @@ test('an undelivered wake gives its claim back and retries after 10 minutes', as
 })
 
 test("the worker's own chat never wakes itself", async ($, on) => {
-  const w: World = { now: DUE, outbox: '', claimed: new Set(), deliver: true, self: 'sales-cli' }
+  const w = fresh({ self: 'sales-cli' })
   const { sends } = world(on, w)
   await start($)
   await settle()
   expect(sends).toHaveLength(0)
 })
 
-test('new outbox items are announced once; old ones and failed reads are not', async ($, on) => {
-  const w: World = { now: DUE - 3_600_000, outbox: item(90, 'An old reply'), claimed: new Set(), deliver: true, self: 'me' }
+test('new outbox items are announced once by id; old ones and failed reads are not', async ($, on) => {
+  const w = fresh({ now: DUE - 3_600_000, outbox: item(90, 'An old reply') })
   const { runs } = world(on, w)
-  const said = () => runs.filter(r => r[0]?.endsWith('/outbox-say')).map(r => r[3])
+  const said = () => runs.filter(r => r[0]?.endsWith('/outbox-say')).map(r => [r[2], r[3]])
   await start($)
   await settle()
   expect(said()).toEqual([])
-  w.outbox = `${item(90, 'An old reply')}\n${item(1, 'A reply to Jordan (Acme)')}\n`
+  w.outbox = `${item(90, 'An old reply')}\n${item(1, 'A reply to Jordan')}\n`
   await start($)
   await settle()
-  expect(said()).toEqual(['Sales drafted a reply to Jordan (Acme)'])
+  const id = said()[0]?.[0] ?? ''
+  expect(id).toMatch(/^ob_[0-9a-f]{12}$/)
+  expect(said()).toEqual([[id, 'Sales drafted a reply to Jordan']])
   w.outbox = '' // a read that comes back empty
   await start($)
   await settle()
-  w.outbox = `${item(90, 'An old reply')}\n${item(1, 'A reply to Jordan (Acme)')}\n`
+  w.outbox = `${item(90, 'An old reply')}\n${item(1, 'A reply to Jordan')}\n`
   await start($)
   await settle()
-  expect(said()).toEqual(['Sales drafted a reply to Jordan (Acme)'])
+  expect(said()).toHaveLength(1)
+})
+
+test('the open-workers flag opens the pane; with {"outbox": key} it opens that outbox too', async ($, on) => {
+  const w = fresh({ now: DUE - 3_600_000 })
+  world(on, w)
+  await start($)
+  await settle()
+  const focused = () => w.opens.filter(o => (o as { focus?: boolean }).focus === true)
+  expect(focused()).toHaveLength(0)
+
+  // A plain touch.
+  w.flag = { mtimeMs: DUE - 3_000_000, text: '' }
+  await start($)
+  await settle()
+  expect(focused()).toHaveLength(1)
+
+  // The Spaces pane's Review.
+  w.flag = { mtimeMs: DUE - 2_000_000, text: JSON.stringify({ at: DUE - 2_000_000, outbox: 'sales' }) }
+  await start($)
+  await settle()
+  expect(focused()).toHaveLength(2)
+  const ui = await $.ui.mount({
+    plugin: 'workers-pane', component: 'Pane', requestId: 'workers', surface: 'desktop',
+    props: { title: 'Workers', isFocused: true, bodyColumns: 46, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  expect(await ui.find({ key: 'outbox-sales' })).toBeDefined()
+  expect((await ui.find({ key: 'card-sales' }))?.props.borderColor).toBe('#c96442')
+  await ui.unmount()
+})
+
+test('a worker created here gets the god, voice and tools it was made with, once registered', async ($, on) => {
+  const w = fresh({ now: DUE - 3_600_000 })
+  world(on, w)
+  on('prompt.fill', () => ({ isFilled: true }))
+  const ui = await $.ui.mount({
+    plugin: 'workers-pane', component: 'Pane', requestId: 'workers', surface: 'desktop',
+    props: { title: 'Workers', isFocused: true, bodyColumns: 46, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-god-herald' })
+  await ui.input({ key: 'nw-entry', text: 'Herald, announcements' })
+  // A same-named worker that was already there is never touched.
+  await ui.press({ key: 'new-worker' })
+  await ui.input({ key: 'nw-entry', text: 'Sales, again' })
+  await ui.unmount()
+
+  // The call session registers Herald with the v1 fields only.
+  w.registry = {
+    note: 'kept',
+    workers: [...SALES.workers, { key: 'herald', name: 'Herald', role: 'announcements', session: 'local_h', avatar: 'gold', model: 'm' }],
+  }
+  await start($)
+  await settle()
+  const reg = w.registry as { note: string; workers: Record<string, unknown>[] }
+  expect(reg.note).toBe('kept')
+  expect(reg.workers[0]).toEqual(SALES.workers[0])
+  expect(reg.workers[1]).toEqual({
+    key: 'herald', name: 'Herald', role: 'announcements', session: 'local_h', avatar: 'gold', model: 'm',
+    god: 'herald', voice: 'bm_george', tools: 'drafts',
+  })
+  // Once only.
+  const count = w.writes.filter(x => x.path.endsWith('/workers.json')).length
+  expect(count).toBe(1)
+  await start($)
+  await settle()
+  expect(w.writes.filter(x => x.path.endsWith('/workers.json')).length).toBe(1)
 })
