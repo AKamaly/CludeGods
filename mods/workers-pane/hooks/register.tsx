@@ -3105,7 +3105,7 @@ export const register: Register = on => {
               <Text dimColor size="caption">{hoursAbout(w, true)}</Text>
             </Box>
           </Box>
-          <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+          <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs" width="100%">
             {start}
             {canRun(w) ? <Button key={`run-${w.key}`} label={runLabelOf(w)} variant="primary" onPress={() => void runNow(w)} /> : null}
             <Button key={`open-${w.key}`} label="Open chat" variant="secondary" onPress={() => void openChat(w)} />
@@ -3484,9 +3484,6 @@ export const register: Register = on => {
             <Box flexGrow={1} />
             {live.length > 0 ? (
               <Button key="welcome-workers" label="Go to workers" variant="secondary" onPress={() => void showView('workers')} />
-            ) : null}
-            {hasChecklist ? (
-              <Button key="welcome-dismiss" label="Skip getting started" plain dimColor onPress={() => void dismissOnboarding()} />
             ) : null}
           </Box>
         </Box>
