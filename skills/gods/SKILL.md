@@ -105,9 +105,10 @@ starting it."). They can override ("use Opus for that").
 ## Workers (standing chats with personas)
 
 The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
-- **Create**: **+ New worker** in the pane writes the worker's entry itself (key, name,
-  role, god, voice, tools, `created`) and puts a request in the prompt box for the user's
-  own Enter (a submit by the mod itself is refused by the app as automated). The request's
+- **Create**: **+ New worker** in the pane (one of six ready-made templates, or Blank
+  worker) writes the worker's entry itself (key, name, role, god, voice, tools, `created`;
+  a template also its `schedule`, its `charter` and `template`) and puts a request in the
+  prompt box for the user's own Enter (a submit by the mod itself is refused by the app as automated). The request's
   first line is `Create worker: name=…; role=…; avatar=…; god=…; voice=…; tools=…; key=…`;
   the lines after it say what to do. Do exactly that: `start_session` (initiation
   `user_asked`, `fresh`, `use_worktree: false`, title `Worker: <name>`, a mid-tier model at
@@ -123,17 +124,19 @@ The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
   the standby prompt it started with) and writes its own `transcript`, again after a
   `/clear`. Never look it up by hand. Status, Activity and the `guard` hook key on it: a
   worker without one runs unguarded.
-- **Default tools**: a new worker gets `full` unless `~/.voicemode/call/config.json` says
-  `{"workers": {"default_tools": "drafts"}}` (or `"read"`). The pane owns that key and
+- **Default tools**: a new worker gets `full` (the pane says **Can do anything**) unless
+  `~/.voicemode/call/config.json` says `{"workers": {"default_tools": "drafts"}}` (**Can
+  draft**) or `"read"` (**Can read**). The pane owns that key and
   keeps every other key in the file.
 - **Route** by voice ("new task for Research: …"): `SendMessage` to that worker's `session`.
   "Tell everyone …": the pane's **Today** view has **Ask all**; by voice, `SendMessage` each
   worker with a `session`, names exact.
 - **Open the pane**: `touch ~/.voicemode/call/open-workers`. Never ask them to type `/workers`.
-- **Proactive workers**: a registry entry may carry a `schedule` (`{"days": "mon-fri",
-  "time": "09:00", "tz": "UTC"}`, or every few hours: add `"every": "3h"` with optional
-  `"from"`/`"to"` active hours instead of `"time"`; days also take `sun-thu`, `mon,wed,fri`
-  or `daily`), and a `charter` (the worker's standing brief, limits included). The Workers
+- **Proactive workers**: a registry entry may carry a `schedule` (the pane's **When it
+  works**: `{"days": "mon-fri", "time": "09:00", "tz": "UTC"}`, or every few hours: add
+  `"every": "3h"` with optional `"from"`/`"to"` active hours instead of `"time"`; days
+  also take `sun-thu`, `mon,wed,fri` or `daily`), and a `charter` (the pane calls it its
+  **Instructions**: the worker's standing brief, limits included). The Workers
   pane wakes it at those times: with a charter, to run it; with none, to check in on its
   `role`. Do not use a scheduled task or cron for this: neither can put a message into an
   existing chat. The charter says what the worker does on its own and what waits for a yes
@@ -142,11 +145,11 @@ The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
   `{"at", "kind": "draft"|"note", "title", "body", "to" (drafts only), "needs_approval"}`.
   A worker's own chat runs its charter on "run your charter now" (`SendMessage`), the same
   text the pane's Run now sends.
-- **Outbox**: each new line is toasted by the pane and, during a call, spoken once by
-  `bin/outbox-say` ("Inbox drafted a reply to …"); do not repeat it. Asked what is in an
-  outbox, read the file and give the short version. Drafts are approved with Approve on
-  the card, or in the worker's own chat under the Outward actions rule below; never from
-  this session. The pane's **Change** sends the worker a note on what to revise and records
+- **Outbox** (what waits for a yes shows in the pane's **Needs you**): each new line is
+  toasted by the pane and, during a call, spoken once by `bin/outbox-say` ("Inbox drafted
+  a reply to …"); do not repeat it. Asked what is in an outbox, read the file and give the
+  short version. Drafts are approved with Approve on the card or in Needs you, or in the
+  worker's own chat under the Outward actions rule below; never from this session. The pane's **Change** sends the worker a note on what to revise and records
   `{"id", "decision": "changes", "note", "at"}` in `outbox/<key>.decisions.jsonl`; the
   worker then appends a revised item.
 - **What did they do today?** Each worker's own chat appends one line per finished turn to
@@ -156,9 +159,12 @@ The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
   version; the pane's **Today** view shows the same.
 - **Voice and tools**: each worker speaks in its own voice (registry `voice`, else its god's
   default; `$C say --as <key>` picks it). Its `tools` (`read`, `drafts`, `full`, or a list
-  of tool names; missing means `full`) is enforced by the `guard` PreToolUse hook: a denied
-  tool comes back to the worker with the reason. Never loosen a worker's `tools` without the
-  user's typed yes.
+  of tool names; missing means `full`; the pane says **Can read**, **Can draft**, **Can do
+  anything**) is enforced by the `guard` PreToolUse hook: a denied tool comes back to the
+  worker with the reason. Never loosen a worker's `tools` without the user's typed yes.
+- **Talk to <name>** on a card puts that worker on a live call (`call focus <key>`, so you
+  get a `FOCUS: on` line), the same as "put me on with <name>"; with no call it puts
+  `/gods` in the prompt box first.
 
 ## Put them on with a worker
 
