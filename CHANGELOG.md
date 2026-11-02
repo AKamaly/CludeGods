@@ -7,10 +7,7 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
-### Fixed
-
-- `install.sh` keeps its backups of replaced skills in `~/.claude/cludegods-backups/`. A
-  backup left in `~/.claude/skills/` loaded as a second copy of the skill.
+## [0.4.0] - 2026-11-02
 
 ### Added
 
@@ -75,6 +72,8 @@ release adds features and a patch release fixes things.
 
 ### Fixed
 
+- `install.sh` keeps its backups of replaced skills in `~/.claude/cludegods-backups/`. A
+  backup left in `~/.claude/skills/` loaded as a second copy of the skill.
 - CI: the worker-permissions speed check gives shared CI runners more room (200 ms instead of
   50 ms), so a slow runner no longer fails `main`.
 - Workers never got a `transcript`, so their status stayed New, Activity stayed empty, and
@@ -175,7 +174,8 @@ release adds features and a patch release fixes things.
 - A Bluetooth patch for VoiceMode's mouth.
 - The silent launch film, attached to the release.
 
-[Unreleased]: https://github.com/AKamaly/CludeGods/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/AKamaly/CludeGods/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/AKamaly/CludeGods/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AKamaly/CludeGods/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AKamaly/CludeGods/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AKamaly/CludeGods/releases/tag/v0.1.0
