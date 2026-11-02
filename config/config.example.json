@@ -1,0 +1,19 @@
+{
+  "approvals": {
+    "outward": "spoken",
+    "permission_prompts": "app",
+    "worker_publish": "direct"
+  },
+  "user_label": "USER",
+  "workers": {
+    "default_tools": "full"
+  },
+  "_help": {
+    "about": "CludeGods settings. install.sh copies this file to ~/.voicemode/call/config.json once, if that file is absent, and never overwrites it. Every key is optional: a missing file, a missing key, or a value not listed here means the default. Keys starting with _ are ignored.",
+    "approvals.outward": "How Claude takes your yes for an outward action (sending, posting, publishing outside this Mac, deleting, a purchase, an invite). spoken (default): Claude writes the exact action in the chat, reads it back in one sentence, and a clear spoken yes such as 'yes, send it' counts. typed: only a yes typed in the chat counts.",
+    "approvals.permission_prompts": "Where Claude Code's permission prompts show. app (default): the app's own dialog, as without CludeGods. pill: on CallPill while a call is live, answered only by a mouse click; with no live call the app's dialog shows as usual.",
+    "approvals.worker_publish": "How workers save Spaces pages. direct (default): a worker may save pages itself (pages new, pages publish, pages mkspace) in the spaces it may write. approve: workers save drafts and a page lands only on your Approve in the Workers pane. Either way Memory changes are drafts you approve, and a worker with the drafts or read preset never publishes.",
+    "user_label": "How your turns are labelled on a call. Default USER.",
+    "workers.default_tools": "The tools preset a new worker gets: full (default), drafts, read, or a list of tool names. drafts and read are opt-in restrictions the guard hook enforces."
+  }
+}
