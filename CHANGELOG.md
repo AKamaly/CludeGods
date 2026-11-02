@@ -17,6 +17,7 @@ release adds features and a patch release fixes things.
 
 - The README's launch film link opens the film on YouTube.
 - The README's release link always points to the latest release.
+- The README opens with "Always-on Claude Code Gods that you can talk to" and the feature list.
 
 ## [0.4.0] - 2026-11-02
 
