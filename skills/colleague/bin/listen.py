@@ -91,10 +91,12 @@ ECHO_TEXT_MIN = 3         # ...whatever its timing, if it has at least this many
 ECHO_RECENT_S = 60.0      # how long a line of mine can still come back through a slow STT
 ECHO_RUN = 2              # his words around an echo come as a run of at least this many;
                           # single survivors scattered through my line are garble ("2nd", "92")
-ECHO_CHARS = 0.62         # speakers: a partial whose letters match a stretch of my line this
-                          # well is my echo, however garbled its words ("outbox dir" -> "out
-                          # Box Dyer"); measured on real calls: echoes 0.82-1.0, his barge-ins
-                          # 0.28-0.52
+ECHO_CHARS = 0.58         # speakers: a partial whose letters match a stretch of my line this
+                          # well is my echo, however garbled its words ("Gin's tuna" heard over
+                          # "...questions to a..."). On two days of real calls, every barge-in
+                          # candidate of his scored 0.27-0.54 and the echoes 0.59-0.62. A miss
+                          # here only delays the cut to the end of his turn.
+ECHO_CHARS_TURN = 0.62    # ...and a turn's leftover over me: stricter, a miss here drops words
 ECHO_CHARS_MIN = 8        # ...judged only on partials with at least this many letters
 CATCHUP_MAX_S = 3600.0    # a cursor older than this is not resumed
 CATCHUP_MAX_LINES = 10    # at most this many earlier turns are delivered on re-arm
@@ -298,20 +300,25 @@ def letters(text):
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def char_echo(text, lines):
+def char_echo(text, lines, enough=1.0):
     """How well the heard text's letters match the best stretch of one of my lines (0..1).
-    Catches an echo whose words come back wrong but whose sounds come back right."""
+    Catches an echo whose words come back wrong but whose sounds come back right. Stops
+    early once `enough` is reached."""
     h = letters(text)
     if not h:
         return 0.0
     n, best = len(h), 0.0
     for line in lines:
+        if best >= enough:
+            break
         s = letters(line)
-        for i in range(0, max(1, len(s) - n + 1), 2):
-            for w in (n - 1, n + 2):
+        for i in range(0, max(1, len(s) - n + 1)):
+            for w in (n - 2, n, n + 3):
                 sm = difflib.SequenceMatcher(None, h, s[i:i + max(1, w)], autojunk=False)
                 if sm.quick_ratio() > best:
                     best = max(best, sm.ratio())
+            if best >= enough:
+                break
     return best
 
 
@@ -331,7 +338,7 @@ def his_words(text, lines):
     need = BARGE_MIN_CONTENT + (1 if heard and 1 - len(his) / len(heard) >= ECHO_SHARE else 0)
     if len(content) < need:
         return []
-    if len(letters(text)) >= ECHO_CHARS_MIN and char_echo(text, lines) >= ECHO_CHARS:
+    if len(letters(text)) >= ECHO_CHARS_MIN and char_echo(text, lines, ECHO_CHARS) >= ECHO_CHARS:
         return []
     return his
 
@@ -564,7 +571,8 @@ class Gate:
                     content = [w for w in rest.split() if w not in STOPWORDS]
                     if len(rest.split()) < MIN_OVER_WORDS or len(content) < MIN_OVER_CONTENT:
                         return ("drop", "echo of me")
-                    if len(letters(rest)) >= ECHO_CHARS_MIN and char_echo(rest, lines) >= ECHO_CHARS:
+                    if (len(letters(rest)) >= ECHO_CHARS_MIN
+                            and char_echo(rest, lines, ECHO_CHARS_TURN) >= ECHO_CHARS_TURN):
                         return ("drop", "echo of me (garbled)")
                     return ("emit", f"{self.label} (over you): {rest}", False)
                 if echoed:
