@@ -682,10 +682,12 @@ def selftest():
         json.dump(reg, f)
     times = sorted(run("s-other", "Bash", {"command": "ls"})[1] for _ in range(15))
     checks += 1
-    ok = times[len(times) // 2] < 50
+    # 50 ms on a Mac in use; shared CI runners are slower and noisier, so they get more room
+    budget = 200 if os.environ.get("CI") else 50
+    ok = times[len(times) // 2] < budget
     fails += not ok
     print(f"{'PASS' if ok else 'FAIL'}  speed: median {times[len(times) // 2]:.0f} ms per call "
-          f"(process start included), max {times[-1]:.0f} ms")
+          f"(process start included, budget {budget} ms), max {times[-1]:.0f} ms")
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{checks - fails} passed, {fails} failed")
