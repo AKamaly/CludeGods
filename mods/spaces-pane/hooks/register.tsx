@@ -7,10 +7,10 @@ import type { AskReceipt, FormKind, Nav, Page, PendingDraft, RegistryWorker, Spa
 
 // Spaces and Pages, after CopilotKit's OpenDots (MIT): a space is a folder of Markdown pages
 // under ~/.voicemode/call/spaces/, a page a file with front matter, a subpage a page whose
-// `parent` names another. Workers never write a page directly: they save a draft with
-// `pages draft`, which also lands as a `page` item in their outbox, and the owner approves
-// it in the Workers pane. This pane reads the folder, and writes through the `pages` CLI so
-// slugs, front matter and locking live in one place.
+// `parent` names another. Workers save through `pages`, directly in the spaces they may
+// write or as a draft (a `page` item in their outbox) the owner approves in the Workers
+// pane; Memory always takes a draft. This pane reads the folder, and writes through the
+// `pages` CLI so slugs, front matter and locking live in one place.
 
 const PANE = 'spaces'
 const TITLE = 'Spaces'
@@ -18,6 +18,10 @@ const COLUMNS = 46
 const POLL_MS = 3_000
 const MEMORY = 'memory'
 const NOTES = 'notes'
+/** What Spaces are, in one line, where they first appear. */
+export const SPACES_LINE = 'Spaces are folders of pages you and your workers share.'
+/** What Memory is, in one line, wherever it appears. */
+export const MEMORY_LINE = 'Rules every worker reads before it starts'
 
 // The film's palette (claude-ui.js), as the spec lists it.
 const C = {
@@ -37,13 +41,40 @@ const DRAFT_RE = /^(ob_[0-9a-f]{12})\.md$/
 const NAME_MAX = 60
 const TITLE_MAX = 160
 
+/**
+ * One-click first rules for an empty Memory: each lands as a Memory page the owner then
+ * edits. Short and general on purpose; the owner's own words replace them.
+ */
+export const STARTER_RULES: readonly { slug: string; title: string; body: string }[] = [
+  {
+    slug: 'write-in-my-voice',
+    title: 'Write in my voice',
+    body: '# Write in my voice\n\n- Write as I would: first person, plain words, short sentences.\n- Keep my usual greeting and sign-off.\n- No buzzwords and no exclamation marks.\n',
+  },
+  {
+    slug: 'ask-before-sending-anything',
+    title: 'Ask before sending anything',
+    body: '# Ask before sending anything\n\n- Never send, post, publish or reply to anyone without my yes.\n- Show me the exact text and who it goes to first, then wait.\n',
+  },
+  {
+    slug: 'keep-replies-short',
+    title: 'Keep replies short',
+    body: '# Keep replies short\n\n- Lead with the answer.\n- A few short lines or bullets, no long paragraphs.\n- Skip greetings and recaps unless I ask.\n',
+  },
+  {
+    slug: 'say-when-youre-not-sure',
+    title: "Say when you're not sure",
+    body: "# Say when you're not sure\n\n- If you're not sure of a fact, say so and say how to check it.\n- Never make up numbers, names or quotes.\n",
+  },
+]
+
 // The Memory space is built in: created with this page when it is missing. Notes is seeded
 // once, on the first run. The same words are in the `pages` CLI, which seeds them too.
 const MEMORY_WELCOME = `# About Memory
 
-Pages here are preferences and standing facts every worker may read before it starts: how you like replies written, names to use, things to never do.
+Rules every worker reads before it starts: how you like replies written, names to use, things to never do.
 
-- One topic per page, a few short lines each.
+- One rule per page, a few short lines each.
 - Workers read Memory. They change it only through a draft you approve.
 - Edit any page in your editor, or ask a worker to draft a change.
 `
@@ -53,7 +84,7 @@ const NOTES_WELCOME = `# Welcome to Notes
 Notes is a space for working documents: briefs, research, meeting notes and drafts.
 
 - Ask a worker about a page from the Spaces pane.
-- Workers save pages as drafts. You approve them in the Workers pane before they land.
+- Workers save pages here, or leave drafts for your Approve in the Workers pane.
 - Add a subpage to keep related pages together.
 `
 
@@ -74,7 +105,11 @@ type Paths = {
   registry: string
   /** The `pages` CLI. */
   pages: string
-  /** `touch` it and the pane opens: how Claude opens Spaces from the shell. */
+  /**
+   * `touch` it and the pane opens: how Claude opens Spaces from the shell. Written as JSON
+   * `{"at", "space", "action": "open" | "new-page"}` it also opens that space (another
+   * pane's "add a rule" writes `{"space": "memory", "action": "new-page"}`).
+   */
   openFlag: string
   /** The Workers pane's own open flag: its poll opens it when the file changes. */
   workersFlag: string
@@ -98,6 +133,27 @@ export function pathsFor(home: string): Paths {
 
 export function isSlug(s: string): boolean {
   return SLUG_RE.test(s)
+}
+
+/** What another pane asks for in the open-spaces file: a space, and whether to start a page. */
+export type OpenRequest = { space: string; action: 'open' | 'new-page' }
+
+/**
+ * The open-spaces file's request, or undefined for a plain `touch` (empty, or not the JSON
+ * object above). An unknown action is a plain open of the space.
+ */
+export function parseOpenRequest(text: string): OpenRequest | undefined {
+  const t = text.trim()
+  if (!t.startsWith('{')) return undefined
+  try {
+    const v = JSON.parse(t) as { space?: unknown; action?: unknown } | null
+    if (!v || typeof v !== 'object') return undefined
+    const space = typeof v.space === 'string' ? v.space.trim() : ''
+    if (!isSlug(space)) return undefined
+    return { space, action: v.action === 'new-page' ? 'new-page' : 'open' }
+  } catch {
+    return undefined
+  }
 }
 
 /** Front matter (flat `key: value` lines, YAML-quoted where needed) and the Markdown body. */
@@ -432,13 +488,56 @@ async function openPane($: EngineInterface, focus: boolean): Promise<void> {
   await $.ui.open(focus ? { id: PANE, title: TITLE, columns: COLUMNS, focus: true } : { id: PANE, title: TITLE, columns: COLUMNS })
 }
 
+/** What the person has typed in the pane's fields, kept so a redraw never wipes it. */
+type Typed = { search: string; title: string; body: string; ask: string }
+
+/** Shows a space or a page (or the list of spaces), with `form` open, from any hook. */
+async function navigate($: EngineInterface, typed: Typed, to: Nav, form: FormKind = ''): Promise<void> {
+  const was = await read($, navAtom)
+  typed.title = ''
+  typed.body = ''
+  typed.ask = ''
+  if (to.space !== was.space) typed.search = ''
+  await update($, navAtom, old => (old.space === to.space && old.page === to.page ? old : to))
+  if (to.space !== was.space) await update($, queryAtom, old => (old === '' ? old : ''))
+  await update($, formAtom, old => (old === form ? old : form))
+  await update($, formError, old => (old === '' ? old : ''))
+}
+
+/** The open-spaces file changed: open the pane, on the space a JSON request names. */
+async function honourOpen($: EngineInterface, p: Paths, typed: Typed): Promise<void> {
+  const req = parseOpenRequest((await readText($, p.openFlag)) ?? '')
+  let isNew = false
+  if (req) {
+    const known = (await readSpaces($, p)).some(s => s.slug === req.space)
+    if (known) {
+      isNew = req.action === 'new-page'
+      await navigate($, typed, { space: req.space, page: '' }, isNew ? 'page' : '')
+    } else {
+      await navigate($, typed, { space: '', page: '' })
+      $.ui.toast(`There's no space "${req.space}", so here are all your spaces`)
+    }
+  }
+  await openPane($, true)
+  // The new-page form's title field draws with autoFocus; this also moves the ring there
+  // when the pane already held the keys. Best effort: the field is drawn either way.
+  if (isNew) void $.ui.focus({ requestId: PANE, key: 'form-title' }).catch(() => undefined)
+}
+
+/** Memory's seeded welcome page is no rule: Memory with only that one still offers starters. */
+function isRule(page: Page): boolean {
+  return page.slug !== 'welcome'
+}
+
 // ---------------------------------------------------------------- the mod
 
 export const register: Register = on => {
   let timer: Timer | undefined
   const memo: Memo = { cache: new Map() }
   // What the person has typed, kept here so a redraw from the poll never wipes it.
-  const typed = { search: '', title: '', ask: '' }
+  const typed: Typed = { search: '', title: '', body: '', ask: '' }
+  // A starter rule being added: a second press while the first runs adds nothing.
+  let adding = false
 
   on('session.start', async ($, e, next) => {
     // `/spaces` is the workers' Spaces skill, so the pane's command is `/spaces-pane`. A refused
@@ -454,14 +553,19 @@ export const register: Register = on => {
       await ensureDefaults($, p, new Date(await $.clock.now()).toISOString())
       let openedAt = await $.clock.now()
       const poll = async () => {
+        let flagMs = 0
         try {
-          const flag = await $.fs.stat(p.openFlag)
-          if (flag.mtimeMs > openedAt) {
-            openedAt = flag.mtimeMs
-            void openPane($, true)
-          }
+          flagMs = (await $.fs.stat(p.openFlag)).mtimeMs
         } catch {
           // no flag yet
+        }
+        if (flagMs > openedAt) {
+          openedAt = flagMs
+          try {
+            await honourOpen($, p, typed)
+          } catch {
+            // the pane could not open now; the next change of the flag tries again
+          }
         }
         // What a redraw depends on: every space folder's files, the drafts, the decisions
         // and the registry, by name, size and time. A quiet folder redraws nothing.
@@ -517,15 +621,7 @@ export const register: Register = on => {
     const pickedKey = await read($, asker)
     const lastAsks = await read($, asked)
 
-    const go = async (to: Nav) => {
-      typed.title = ''
-      typed.ask = ''
-      if (to.space !== nav.space) typed.search = ''
-      await update($, navAtom, old => (old.space === to.space && old.page === to.page ? old : to))
-      if (to.space !== nav.space) await update($, queryAtom, () => '')
-      await update($, formAtom, () => '')
-      await update($, formError, () => '')
-    }
+    const go = (to: Nav) => navigate($, typed, to)
 
     const icn = (name: IconName, key: string, color: string = C.sub, size = 16) =>
       Svg ? (
@@ -558,25 +654,52 @@ export const register: Register = on => {
       </Box>
     )
 
-    const badge = (key: string, text: string) => (
-      <Text key={key} size="caption" color={C.accent} backgroundColor={C.accentSoft}>{` ${text} `}</Text>
+    // An empty state: what is missing, what to do, and one primary action.
+    const emptyState = (key: string, title: string, hint: string, action: RenderChildren) => (
+      <Box key={key} flexDirection="column" width="100%" paddingY="sm" alignItems="center" gap="xs">
+        <Text weight="semibold">{title}</Text>
+        <Text dimColor size="footnote">{hint}</Text>
+        {action}
+      </Box>
     )
 
     // ---------------------------------------------------------------- actions
 
-    const runPages = async (argv: string[]): Promise<Run> => {
+    const runPages = async (argv: string[], stdin?: string): Promise<Run> => {
       try {
-        return await $.process.run([p.pages, ...argv], { timeoutMs: 15_000 })
+        return await $.process.run([p.pages, ...argv], stdin === undefined ? { timeoutMs: 15_000 } : { timeoutMs: 15_000, stdin })
       } catch (err) {
-        return { exitCode: 1, stdout: '', stderr: String(err) }
+        const isThere = await $.fs.exists(p.pages).catch(() => false)
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: isThere ? String(err) : "The pages tool isn't installed (~/.claude/skills/gods/bin/pages). Run install.sh again.",
+        }
       }
     }
 
     const failure = (r: Run) => (r.stderr.trim().replace(/^pages: /, '') || `exit ${r.exitCode}`).split('\n')[0] ?? ''
 
-    const createFrom = async (kind: FormKind, text: string) => {
-      const title = text.replace(/\s+/g, ' ').trim()
-      if (!title) return
+    const openInEditor = async (path: string) => {
+      // The default app for .md first; with none set, the default text editor.
+      try {
+        const r = await $.process.run(['open', path])
+        if (r.exitCode === 0) return
+        const t = await $.process.run(['open', '-t', path])
+        if (t.exitCode !== 0) $.ui.toast(`Couldn't open the page: ${t.stderr.trim() || `exit ${t.exitCode}`}`)
+      } catch (err) {
+        $.ui.toast(`Couldn't open the page: ${String(err)}`)
+      }
+    }
+
+    /** Creates what the open form describes from what was typed; `edit` opens it in the editor. */
+    const create = async (kind: FormKind, edit = false) => {
+      const title = typed.title.replace(/\s+/g, ' ').trim()
+      const body = typed.body.replace(/\s+$/, '')
+      if (!title) {
+        if (body) await update($, formError, () => 'Add a title first')
+        return
+      }
       const limit = kind === 'space' ? NAME_MAX : TITLE_MAX
       if (title.length > limit) {
         await update($, formError, () => `Up to ${limit} characters`)
@@ -593,39 +716,53 @@ export const register: Register = on => {
       if (!space) return
       const argv = ['new', space.slug, title, '--json']
       if (kind === 'subpage' && page) argv.push('--parent', page.slug)
-      const r = await runPages(argv)
+      if (body) argv.push('--from', '-')
+      const r = await runPages(argv, body ? `${body}\n` : undefined)
       if (r.exitCode !== 0) return void (await update($, formError, () => failure(r)))
-      const made = JSON.parse(r.stdout) as { slug: string }
+      const made = JSON.parse(r.stdout) as { slug: string; path?: string }
       await go({ space: space.slug, page: made.slug })
+      if (edit) await openInEditor(made.path ?? `${p.spaces}/${space.slug}/${made.slug}.md`)
     }
 
+    /** Opens a form, or closes it when it is the one open. */
     const openForm = async (kind: FormKind) => {
       typed.title = ''
+      typed.body = ''
       await update($, formError, () => '')
       await update($, formAtom, old => (old === kind ? '' : kind))
     }
 
-    const openInEditor = async (target: Page) => {
-      // The default app for .md first; with none set, the default text editor.
+    const addStarter = async (rule: (typeof STARTER_RULES)[number]) => {
+      if (adding) return
+      adding = true
       try {
-        const r = await $.process.run(['open', target.path])
-        if (r.exitCode === 0) return
-        const t = await $.process.run(['open', '-t', target.path])
-        if (t.exitCode !== 0) $.ui.toast(`Couldn't open the page: ${t.stderr.trim() || `exit ${t.exitCode}`}`)
+        const r = await runPages(['new', MEMORY, rule.title, '--json', '--from', '-'], rule.body)
+        if (r.exitCode !== 0) {
+          $.ui.toast(`Couldn't add the rule: ${failure(r)}`)
+          return
+        }
+        const made = JSON.parse(r.stdout) as { slug: string }
+        await go({ space: MEMORY, page: made.slug })
+        $.ui.toast(`Added the rule "${rule.title}". Edit it to fit you.`)
+      } finally {
+        adding = false
+      }
+    }
+
+    const openWorkers = async (outbox: string) => {
+      // The Workers pane opens itself when its flag file changes; the content names the
+      // worker whose outbox to show, for a pane that reads it.
+      try {
+        await $.fs.write(p.workersFlag, `${JSON.stringify(outbox ? { at: now, outbox } : { at: now })}\n`)
+        return true
       } catch (err) {
-        $.ui.toast(`Couldn't open the page: ${String(err)}`)
+        $.ui.toast(`Couldn't open the Workers pane: ${String(err)}`)
+        return false
       }
     }
 
     const reviewInWorkers = async (first: PendingDraft | undefined) => {
-      // The Workers pane opens itself when its flag file changes; the content names the
-      // worker whose outbox holds the first draft, for a pane that reads it.
-      try {
-        await $.fs.write(p.workersFlag, `${JSON.stringify({ at: now, outbox: first?.by ?? '' })}\n`)
-        $.ui.toast('Approve or decline drafts in the Workers pane')
-      } catch (err) {
-        $.ui.toast(`Couldn't open the Workers pane: ${String(err)}`)
-      }
+      if (await openWorkers(first?.by ?? '')) $.ui.toast('Approve or decline drafts in the Workers pane')
     }
 
     const ask = async (target: Page, w: RegistryWorker | undefined, text: string) => {
@@ -655,33 +792,86 @@ export const register: Register = on => {
 
     // ---------------------------------------------------------------- pieces
 
-    const formBox =
-      form && Input
-        ? card(
-            'new-form',
-            <Box flexDirection="column" width="100%" gap="xs">
-              <Box flexDirection="row" alignItems="center" justifyContent="space-between" width="100%">
-                <Text weight="semibold">
-                  {form === 'space' ? 'New space' : form === 'subpage' && page ? `New subpage of ${page.title}` : 'New page'}
-                </Text>
-                <Button key="form-cancel" label="Cancel" plain dimColor onPress={() => void openForm(form)} />
-              </Box>
-              {fill(
+    const isMemory = space?.slug === MEMORY
+
+    const formBox = (() => {
+      if (!Input || !form || form === 'ask') return null
+      const isSpace = form === 'space'
+      const isRuleForm = !isSpace && isMemory
+      const heading = isSpace
+        ? 'New space'
+        : form === 'subpage' && page
+          ? `New subpage of ${page.title}`
+          : isRuleForm
+            ? 'New rule'
+            : `New page in ${space?.name ?? 'this space'}`
+      const what = isSpace ? 'space' : isRuleForm ? 'rule' : 'page'
+      return card(
+        'new-form',
+        <Box flexDirection="column" width="100%" gap="xs">
+          <Box flexDirection="row" alignItems="center" justifyContent="space-between" width="100%">
+            <Text weight="semibold">{heading}</Text>
+            <Button key="form-cancel" label="Cancel" plain dimColor onPress={() => void openForm(form)} />
+          </Box>
+          {isSpace ? (
+            <Text dimColor size="footnote">{SPACES_LINE}</Text>
+          ) : isRuleForm ? (
+            <Text dimColor size="footnote">{`${MEMORY_LINE}. One rule per page, a few short lines.`}</Text>
+          ) : null}
+          {fill(
+            <Input
+              key="form-title"
+              placeholder={isSpace ? 'Space name' : isRuleForm ? 'Rule, like Keep replies short' : 'Page title'}
+              value={typed.title}
+              submitLabel="create"
+              autoFocus
+              onInput={(v: string) => void (typed.title = v)}
+              onSubmit={(v: string) => {
+                typed.title = v
+                void create(form)
+              }}
+            />,
+          )}
+          {isSpace
+            ? null
+            : fill(
                 <Input
-                  key="form-title"
-                  placeholder={form === 'space' ? 'Space name' : 'Page title'}
-                  value={typed.title}
+                  key="form-body"
+                  placeholder={isRuleForm ? 'What workers should do, in a few lines' : 'A few lines to start (optional)'}
+                  value={typed.body}
+                  rows={4}
                   submitLabel="create"
-                  autoFocus
-                  onInput={(v: string) => void (typed.title = v)}
-                  onSubmit={(v: string) => void createFrom(form, v)}
+                  onInput={(v: string) => void (typed.body = v)}
+                  onSubmit={(v: string) => {
+                    typed.body = v
+                    void create(form)
+                  }}
                 />,
               )}
-              {error ? <Text size="footnote" color={C.red}>{error}</Text> : null}
-            </Box>,
-            true,
-          )
-        : null
+          {error ? <Text size="footnote" color={C.red}>{error}</Text> : null}
+          <Box flexDirection="row" alignItems="center" gap="xs" width="100%" flexWrap="wrap">
+            <Button
+              key="form-create"
+              label={isSpace ? 'Create space' : isRuleForm ? 'Add rule' : 'Create page'}
+              variant="primary"
+              onPress={() => void create(form)}
+            />
+            {isSpace ? null : (
+              <Button key="form-create-editor" label="Create and open in editor ↗" variant="secondary"
+                onPress={() => void create(form, true)} />
+            )}
+          </Box>
+          {isSpace ? null : (
+            <Text dimColor size="caption">
+              {isGraphical
+                ? `Enter creates the ${what}. Shift+Enter adds a line.`
+                : `Enter creates the ${what}. Write more in your editor.`}
+            </Text>
+          )}
+        </Box>,
+        true,
+      )
+    })()
 
     const draftsStrip = (list: readonly PendingDraft[]) => {
       if (list.length === 0) return null
@@ -727,7 +917,8 @@ export const register: Register = on => {
         <Button
           key="new-space"
           label="+ New space"
-          variant={form === 'space' ? 'secondary' : 'primary'}
+          // The main action on the list of spaces only; inside a space its own actions lead.
+          variant={nav.space || form === 'space' || spaces.length === 0 ? 'secondary' : 'primary'}
           dimColor={form === 'space'}
           onPress={() => void (async () => {
             if (nav.space) await go({ space: '', page: '' })
@@ -741,9 +932,20 @@ export const register: Register = on => {
 
     const spacesView = () => (
       <Box flexDirection="column" width="100%" gap="sm">
+        <Text key="intro" dimColor size="footnote">{SPACES_LINE}</Text>
         {formBox}
         {draftsStrip(drafts)}
-        {spaces.length === 0 ? <Text dimColor>No spaces yet</Text> : null}
+        {spaces.length === 0
+          ? emptyState(
+              'empty-home',
+              'No spaces yet',
+              `${SPACES_LINE} Start with one for your notes.`,
+              form === 'space' ? null : (
+                <Button key="empty-new-space" label="Create your first space" variant="primary"
+                  onPress={() => void openForm('space')} />
+              ),
+            )
+          : null}
         {spaces.map(s =>
           card(
             `space-${s.slug}`,
@@ -761,7 +963,7 @@ export const register: Register = on => {
               </Box>
               <Text dimColor size="footnote" wrap="truncate-end">
                 {s.slug === MEMORY
-                  ? 'Preferences every worker may read'
+                  ? MEMORY_LINE
                   : s.newestMs > 0
                     ? `Edited ${ago(now - s.newestMs)}`
                     : 'No pages yet'}
@@ -772,9 +974,33 @@ export const register: Register = on => {
       </Box>
     )
 
+    // Memory with no rule yet: one primary "Add your first rule", and starters a press adds.
+    const starters = () => (
+      <Box key="starters" flexDirection="column" width="100%" gap="xs" alignItems="center" paddingY="sm">
+        <Text weight="semibold">No rules yet</Text>
+        <Text dimColor size="footnote">Write one, or start from a common rule and edit it to fit you.</Text>
+        {form === 'page' ? null : (
+          <Button key="add-first-rule" label="Add your first rule" variant="primary" onPress={() => void openForm('page')} />
+        )}
+        <Box flexDirection="column" width="100%" gap="xs">
+          {STARTER_RULES.filter(r => !pages.some(x => x.slug === r.slug)).map(r => (
+            <Box key={`starter-row-${r.slug}`} flexDirection="row" alignItems="center" gap="xs" width="100%">
+              {icn('file', `starter-icon-${r.slug}`, C.faint, 14)}
+              <Box flexGrow={1} flexShrink={1}>
+                <Text wrap="truncate-end">{r.title}</Text>
+              </Box>
+              <Button key={`starter-${r.slug}`} label="+ Add" variant="secondary" onPress={() => void addStarter(r)} />
+            </Box>
+          ))}
+        </Box>
+      </Box>
+    )
+
     const library = (s: Space) => {
       const rows = q.trim() ? search(pages, q).map(page => ({ page, depth: 0 })) : outline(pages)
       const byslug = new Map(pages.map(x => [x.slug, x]))
+      const needsRules = isMemory && !q.trim() && !pages.some(isRule)
+      const isEmpty = !q.trim() && pages.length === 0
       return (
         <Box flexDirection="column" width="100%" gap="sm">
           <Box key="crumbs" flexDirection="row" alignItems="center" gap="xs" width="100%">
@@ -788,16 +1014,16 @@ export const register: Register = on => {
             <Button
               key="new-page"
               label="+ New page"
-              variant={form === 'page' ? 'secondary' : 'primary'}
+              variant={form === 'page' || isEmpty || needsRules ? 'secondary' : 'primary'}
               dimColor={form === 'page'}
               onPress={() => void openForm('page')}
             />
           </Box>
-          {s.slug === MEMORY ? (
-            <Text dimColor size="footnote">Workers read these pages before they start. They change them only through a draft you approve.</Text>
+          {isMemory ? (
+            <Text dimColor size="footnote">{`${MEMORY_LINE}. Workers change them only through a draft you approve.`}</Text>
           ) : null}
           {formBox}
-          {Input
+          {Input && !isEmpty
             ? fill(
                 <Input
                   key="search"
@@ -815,18 +1041,26 @@ export const register: Register = on => {
                 />,
               )
             : null}
-          <Box key="count" flexDirection="row" justifyContent="space-between" width="100%">
-            <Text dimColor size="footnote">{q.trim() ? 'Search results' : 'All pages'}</Text>
-            <Text dimColor size="footnote">{plural(rows.length, 'page')}</Text>
-          </Box>
-          {rows.length === 0 ? (
-            <Box key="empty" flexDirection="column" width="100%" paddingY="sm" alignItems="center" gap="xs">
-              <Text weight="semibold">{q.trim() ? 'No matching pages' : 'No pages yet'}</Text>
-              <Text dimColor size="footnote">
-                {q.trim() ? 'Try a different title or phrase.' : 'Make the first page, or ask a worker to draft one.'}
-              </Text>
+          {isEmpty ? null : (
+            <Box key="count" flexDirection="row" justifyContent="space-between" width="100%">
+              <Text dimColor size="footnote">{q.trim() ? 'Search results' : 'All pages'}</Text>
+              <Text dimColor size="footnote">{plural(rows.length, 'page')}</Text>
             </Box>
-          ) : null}
+          )}
+          {needsRules ? starters() : null}
+          {isEmpty && !isMemory
+            ? emptyState(
+                'empty',
+                'No pages yet',
+                'Write the first one here, or ask a worker to draft one.',
+                form === 'page' ? null : (
+                  <Button key="empty-new-page" label="Write the first page" variant="primary" onPress={() => void openForm('page')} />
+                ),
+              )
+            : null}
+          {q.trim() && rows.length === 0
+            ? emptyState('empty', 'No matching pages', 'Try a different title or phrase.', null)
+            : null}
           {rows.map(({ page: x, depth }) => {
             const parent = q.trim() && x.parent ? byslug.get(x.parent)?.title : undefined
             const line = q.trim() ? pageExcerpt(x.body) : ''
@@ -872,6 +1106,12 @@ export const register: Register = on => {
       const picked = live.find(w => w.key === pickedKey) ?? live[0]
       const last = lastAsks[`${x.space}/${x.slug}`]
       const body = withoutTitle(x.body, x.title)
+      const isBlank = !body.trim()
+      const lastLine = last ? (
+        <Text key="ask-last" dimColor size="footnote" wrap="truncate-end">
+          {`${last.isDelivered ? `Asked ${last.worker}` : `Not delivered to ${last.worker}`}: ${last.text} · ${ago(now - last.atMs)}`}
+        </Text>
+      ) : null
       return (
         <Box flexDirection="column" width="100%" gap="sm">
           <Box key="crumbs" flexDirection="row" alignItems="center" gap="xs" width="100%" flexWrap="wrap">
@@ -897,18 +1137,36 @@ export const register: Register = on => {
             ) : null}
             <Text dimColor size="footnote" wrap="truncate-end">{`Edited ${ago(now - x.editedMs)}${by ? ` · by ${by}` : ''}`}</Text>
           </Box>
+          {s.slug === MEMORY ? (
+            <Text key="memory-line" dimColor size="footnote">{`A Memory rule. ${MEMORY_LINE}.`}</Text>
+          ) : null}
           <Box key="page-actions" flexDirection="row" alignItems="center" gap="xs" width="100%" flexWrap="wrap">
-            <Button key="open-editor" label="Open in editor ↗" variant="secondary" onPress={() => void openInEditor(x)} />
+            {Input && Select ? (
+              <Button
+                key="ask-open"
+                label="Ask a worker about this page"
+                variant={form === 'ask' || isBlank ? 'secondary' : 'primary'}
+                dimColor={form === 'ask'}
+                onPress={() => void openForm('ask')}
+              />
+            ) : null}
+            <Button key="open-editor" label="Open in editor ↗" variant="secondary" onPress={() => void openInEditor(x.path)} />
             <Button key="new-subpage" label="New subpage" variant="secondary" onPress={() => void openForm('subpage')} />
             <Button key="new-page" label="New page" plain dimColor onPress={() => void openForm('page')} />
           </Box>
           {formBox}
-          {Input && Select
+          {form === 'ask' && Input && Select
             ? card(
                 'ask',
                 <Box flexDirection="column" width="100%" gap="xs">
                   {live.length === 0 || !picked ? (
-                    <Text dimColor size="footnote">No worker chats yet. Add one in the Workers pane, then ask it about this page.</Text>
+                    <Box flexDirection="column" width="100%" gap="xs">
+                      <Text dimColor size="footnote">No worker chats yet. Add a worker in the Workers pane, then ask it about this page.</Text>
+                      <Box flexDirection="row" width="100%">
+                        <Button key="open-workers" label="Open the Workers pane" variant="primary"
+                          onPress={() => void openWorkers('')} />
+                      </Box>
+                    </Box>
                   ) : (
                     <Box flexDirection="column" width="100%" gap="xs">
                       <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
@@ -931,6 +1189,7 @@ export const register: Register = on => {
                           placeholder={`Ask ${picked.name} about this page…`}
                           value={typed.ask}
                           submitLabel="ask"
+                          autoFocus
                           onInput={(v: string) => void (typed.ask = v)}
                           onSubmit={(v: string) => void ask(x, picked, v)}
                         />,
@@ -942,19 +1201,23 @@ export const register: Register = on => {
                       </Text>
                     </Box>
                   )}
-                  {last ? (
-                    <Text dimColor size="footnote" wrap="truncate-end">
-                      {`${last.isDelivered ? `Asked ${last.worker}` : `Not delivered to ${last.worker}`}: ${last.text} · ${ago(now - last.atMs)}`}
-                    </Text>
-                  ) : null}
+                  {lastLine}
                 </Box>,
               )
-            : null}
+            : lastLine}
           <Box key="page-body" flexDirection="column" width="100%" paddingY="xs">
-            {body.trim() ? (
-              Markdown ? <Markdown key="page-markdown" text={body} /> : <Text>{body}</Text>
+            {isBlank ? (
+              emptyState(
+                'empty-body',
+                'This page is empty',
+                'Write it in your editor, or ask a worker to draft it.',
+                <Button key="empty-open-editor" label="Write it in your editor ↗" variant="primary"
+                  onPress={() => void openInEditor(x.path)} />,
+              )
+            ) : Markdown ? (
+              <Markdown key="page-markdown" text={body} />
             ) : (
-              <Text dimColor>An empty page, ready to write. Open it in your editor.</Text>
+              <Text>{body}</Text>
             )}
           </Box>
           {subpages.length > 0 ? (
@@ -995,11 +1258,11 @@ export const register: Register = on => {
     const count = await read($, pending) // subscribe: the label follows the drafts
     const ui = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Svg?: any }
     const { Box, Button, Svg } = ui
-    const label = count > 0 ? `Spaces · ${plural(count, 'draft')}` : 'Spaces'
+    const label = count > 0 ? `${TITLE} · ${plural(count, 'draft')}` : TITLE
     return (
       <Box flexDirection="row" alignItems="center" gap="sm">
         <Box flexDirection="row" alignItems="center" gap="xs">
-          {Svg ? <Svg source={icon('book', C.accent, 14)} alt="Spaces" width={14} height={14} /> : null}
+          {Svg ? <Svg source={icon('book', C.accent, 14)} alt={TITLE} width={14} height={14} /> : null}
           <Button key="open-spaces-band" label={label} plain onPress={() => void openPane($, true)} />
         </Box>
         {theirs}

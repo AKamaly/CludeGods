@@ -1,8 +1,11 @@
 /** Where the pane is: the spaces list (`space` empty), a space's library, or one page. */
 export type Nav = { space: string; page: string }
 
-/** Which inline "new" form is open: none, a space, a page, or a subpage of the open page. */
-export type FormKind = '' | 'space' | 'page' | 'subpage'
+/**
+ * Which inline form is open: none, a new space, a new page, a subpage of the open page, or
+ * the open page's Ask a worker box.
+ */
+export type FormKind = '' | 'space' | 'page' | 'subpage' | 'ask'
 
 /** `spaces/<slug>/space.json` and what the pane counts beside it. */
 export type Space = {
@@ -65,7 +68,7 @@ declare module 'claude-code' {
       /** The library's search text. */
       query: Shaped<string>
       form: Shaped<FormKind>
-      /** The last failure of a "new" form, shown under its field. */
+      /** The last failure of a "new" form, shown under its fields. */
       formError: Shaped<string>
       /** The worker key the Ask box sends to; '' for the first one listed. */
       asker: Shaped<string>

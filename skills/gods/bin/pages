@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """pages: Spaces and Pages for CludeGods, as plain Markdown files.
 
+Spaces are folders of pages you and your workers share; a subpage is a page whose `parent`
+names another page in its space. The built-in Memory space holds rules every worker reads
+before it starts.
+
   pages spaces                               the spaces, with page counts
   pages mkspace "Name" [--emoji E]           make a space
   pages list [--space S] [--q text]          the pages, as a tree (flat with --q)
@@ -69,9 +73,9 @@ KEY_ORDER = ["title", "created", "updated", "by", "parent", "space", "page",
 
 MEMORY_WELCOME = """# About Memory
 
-Pages here are preferences and standing facts every worker may read before it starts: how you like replies written, names to use, things to never do.
+Rules every worker reads before it starts: how you like replies written, names to use, things to never do.
 
-- One topic per page, a few short lines each.
+- One rule per page, a few short lines each.
 - Workers read Memory. They change it only through a draft you approve.
 - Edit any page in your editor, or ask a worker to draft a change.
 """
@@ -116,22 +120,23 @@ def guard(path: Path) -> Path:
     root = spaces_dir().resolve()
     real = path.resolve()
     if real != root and root not in real.parents:
-        raise Fail(f"Refused: {path} is outside the spaces folder")
+        raise Fail(f"Refused: {path} is outside the spaces folder, so pages won't touch it")
     return path
 
 
 def check_slug(value: str, what: str) -> str:
     if not isinstance(value, str) or not SLUG_RE.fullmatch(value):
-        raise Fail(f"Not a valid {what}: {value!r} (letters, digits, '-' or '_', up to {SLUG_MAX})")
+        raise Fail(f"{value!r} isn't a valid {what}. Use letters, digits, '-' or '_' "
+                   f"(up to {SLUG_MAX}), like notes or launch-brief")
     return value
 
 
 def space_path(space: str) -> Path:
-    return guard(spaces_dir() / check_slug(space, "space"))
+    return guard(spaces_dir() / check_slug(space, "space name"))
 
 
 def page_path(space: str, page: str) -> Path:
-    return guard(space_path(space) / f"{check_slug(page, 'page')}.md")
+    return guard(space_path(space) / f"{check_slug(page, 'page name')}.md")
 
 
 def slugify(text: str) -> str:
@@ -303,10 +308,20 @@ def load_space(slug: str) -> dict | None:
     return out
 
 
+def space_names() -> str:
+    """The spaces by the names the CLI takes, for a message: "memory, notes"."""
+    try:
+        slugs = [s["slug"] for s in all_spaces()]
+    except (Fail, OSError):
+        slugs = []
+    return ", ".join(slugs) if slugs else "none yet"
+
+
 def require_space(slug: str) -> dict:
     space = load_space(slug)
     if space is None:
-        raise Fail(f"No space {slug!r}. Make one with: pages mkspace \"Name\"")
+        raise Fail(f"The space {slug!r} doesn't exist. Spaces: {space_names()}. "
+                   f"Create one with: pages mkspace \"Name\"")
     return space
 
 
@@ -362,7 +377,8 @@ def load_page(space: str, slug: str) -> dict | None:
 def require_page(space: str, slug: str) -> dict:
     page = load_page(space, slug)
     if page is None:
-        raise Fail(f"No page {space}/{slug}")
+        raise Fail(f"There's no page {space}/{slug}. See the pages in that space with: "
+                   f"pages list --space {space}")
     return page
 
 
@@ -370,7 +386,7 @@ def unique_slug(space: str, base: str) -> str:
     base = base or "page"
     if len(base) > SLUG_MAX - 4:
         base = base[:SLUG_MAX - 4].rstrip("-")
-    check_slug(base, "page")
+    check_slug(base, "page name")
     slug, n = base, 2
     while page_path(space, slug).exists():
         slug, n = f"{base}-{n}", n + 1
@@ -381,9 +397,9 @@ def split_target(value: str) -> tuple[str, str | None]:
     if "/" in value:
         space, _, page = value.partition("/")
         if not page or "/" in page:
-            raise Fail(f"Expected S/page, got {value!r}")
-        return check_slug(space, "space"), check_slug(page, "page")
-    return check_slug(value, "space"), None
+            raise Fail(f"Expected space/page, like notes/launch-brief, not {value!r}")
+        return check_slug(space, "space name"), check_slug(page, "page name")
+    return check_slug(value, "space name"), None
 
 
 def read_content(source: str | None) -> str:
@@ -395,16 +411,19 @@ def read_content(source: str | None) -> str:
         try:
             text = Path(source).expanduser().read_text(encoding="utf-8")
         except OSError as err:
-            raise Fail(f"Can't read {source}: {err.strerror or err}")
+            raise Fail(f"Can't read {source}: {err.strerror or err}. Check the path, or pipe "
+                       "the text in with --from -")
     if len(text) > CONTENT_MAX:
-        raise Fail(f"Pages hold up to {CONTENT_MAX:,} characters; this one has {len(text):,}")
+        raise Fail(f"A page holds up to {CONTENT_MAX:,} characters; this one has {len(text):,}. "
+                   "Split it into a page and subpages (--parent)")
     return text
 
 
 def clean_title(title: str) -> str:
     t = re.sub(r"\s+", " ", title or "").strip()
     if len(t) > TITLE_MAX:
-        raise Fail(f"A title is up to {TITLE_MAX} characters")
+        raise Fail(f"A title is up to {TITLE_MAX} characters; this one has {len(t)}. "
+                   "Shorten it and put the rest in the page")
     return t
 
 
@@ -413,18 +432,22 @@ def clean_title(title: str) -> str:
 
 def registry_worker(key: str) -> dict:
     if not WORKER_RE.fullmatch(key or ""):
-        raise Fail(f"Not a valid worker key: {key!r}", EXIT_USAGE)
+        raise Fail(f"{key!r} isn't a worker key. Pass your own key from workers.json, "
+                   "like --worker scribe", EXIT_USAGE)
     path = call_dir() / "workers.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise Fail("No workers.json: drafts come from a registered worker", EXIT_DENIED)
+        raise Fail("There's no workers.json, so there is no worker to save as. Add a worker "
+                   "in the Workers pane first", EXIT_DENIED)
     except (ValueError, OSError):
-        raise Fail("workers.json is not valid JSON")
+        raise Fail("workers.json isn't valid JSON, so pages can't tell which worker you are. "
+                   "Fix the file, then try again")
     for w in data.get("workers", []) if isinstance(data, dict) else []:
         if isinstance(w, dict) and w.get("key") == key:
             return w
-    raise Fail(f"No worker {key!r} in workers.json", EXIT_DENIED)
+    raise Fail(f"There's no worker {key!r} in workers.json. Pass your own key with --worker",
+               EXIT_DENIED)
 
 
 def writable_spaces(worker: dict) -> list[str]:
@@ -442,10 +465,11 @@ def writable_spaces(worker: dict) -> list[str]:
 def require_write(worker: dict, space: str) -> None:
     allowed = writable_spaces(worker)
     if "*" not in allowed and space not in allowed:
-        listed = ", ".join(allowed) if allowed else "none"
+        listed = f"it may save to: {', '.join(allowed)}" if allowed else "it may not save to any space"
         raise Fail(
-            f"{worker.get('name') or worker.get('key')} may not write to {space!r} "
-            f"(its spaces: {listed}). The owner adds it under \"spaces\" in workers.json.",
+            f"{worker.get('name') or worker.get('key')} may not save to the {space!r} space "
+            f"({listed}). The owner can allow that space in the Workers pane (\"spaces\" in "
+            "workers.json)",
             EXIT_DENIED,
         )
 
@@ -540,7 +564,7 @@ def cmd_spaces(args) -> int:
     for s in spaces:
         count = f"{s['pages']} page" + ("" if s["pages"] == 1 else "s")
         lines.append(f"{s['slug']}\t{s['name']}\t{count}")
-    emit(args, spaces, "\n".join(lines) if lines else "No spaces yet")
+    emit(args, spaces, "\n".join(lines) if lines else "No spaces yet. Make one with: pages mkspace \"Name\"")
     return 0
 
 
@@ -550,13 +574,16 @@ def cmd_mkspace(args) -> int:
         raise Fail(f"A space name is 1 to {NAME_MAX} characters", EXIT_USAGE)
     slug = slugify(name)
     if not slug:
-        raise Fail(f"Can't make a folder name from {name!r}", EXIT_USAGE)
+        raise Fail(f"Can't make a folder name from {name!r}. Use at least one letter or digit",
+                   EXIT_USAGE)
     ensure_defaults()
     with locked():
         if space_path(slug).exists():
-            raise Fail(f"A space {slug!r} exists already")
+            raise Fail(f"A space {slug!r} exists already. Pick another name")
         make_space(slug, name, emoji=args.emoji)
-    emit(args, require_space(slug), slug)
+    emit(args, require_space(slug),
+         f"Made the space \"{name}\" ({slug}).\n"
+         f"Add a page to it with: pages new {slug} \"Title\"")
     return 0
 
 
@@ -593,7 +620,7 @@ def tree(pages: list[dict]) -> list[tuple[int, dict]]:
 def cmd_list(args) -> int:
     ensure_defaults()
     if args.space:
-        require_space(check_slug(args.space, "space"))
+        require_space(check_slug(args.space, "space name"))
         spaces = [args.space]
     else:
         spaces = [s["slug"] for s in all_spaces()]
@@ -612,7 +639,10 @@ def cmd_list(args) -> int:
         for depth, p in rows
     ]
     data = [dict(public(p), depth=depth) for depth, p in rows]
-    empty = "No matching pages" if q else "No pages yet"
+    if q:
+        empty = f"No pages match {args.q.strip()!r}. Try a shorter word, or see every page with: pages list"
+    else:
+        empty = f"No pages yet. Add one with: pages new {args.space or '<space>'} \"Title\""
     emit(args, data, "\n".join(lines) if lines else empty)
     return 0
 
@@ -620,7 +650,7 @@ def cmd_list(args) -> int:
 def cmd_show(args) -> int:
     space, slug = split_target(args.target)
     if slug is None:
-        raise Fail("show takes S/page", EXIT_USAGE)
+        raise Fail("show takes space/page, like: pages show notes/launch-brief", EXIT_USAGE)
     page = require_page(space, slug)
     if args.json:
         emit(args, public(page, with_body=True), "")
@@ -630,29 +660,30 @@ def cmd_show(args) -> int:
 
 
 def cmd_new(args) -> int:
-    space = check_slug(args.space, "space")
+    space = check_slug(args.space, "space name")
     title = clean_title(args.title)
     if not title:
-        raise Fail("A page needs a title", EXIT_USAGE)
+        raise Fail(f"A page needs a title, in quotes after the space, like: pages new {space} \"Plan\"",
+                   EXIT_USAGE)
     by = "you"
     if args.worker:
         worker = registry_worker(args.worker)
         require_write(worker, space)
         if space == "memory":
-            raise Fail("Memory changes only through a draft the owner approves (every worker "
-                       f"follows it): pages draft memory \"{title}\" --worker {args.worker} --from -",
-                       EXIT_DENIED)
+            raise Fail("Memory changes only through a draft the owner approves, since every worker "
+                       f"follows it. Save it with: pages draft memory \"{title}\" --worker {args.worker} "
+                       "--from -", EXIT_DENIED)
         if worker_publish() == "approve":
             raise Fail("Workers save pages as drafts for the owner's Approve here "
-                       f"(approvals.worker_publish is \"approve\"): pages draft {space} \"{title}\" "
-                       f"--worker {args.worker} --from -", EXIT_DENIED)
+                       f"(approvals.worker_publish is \"approve\"). Save it with: pages draft {space} "
+                       f"\"{title}\" --worker {args.worker} --from -", EXIT_DENIED)
         by = args.worker
     content = read_content(args.source)
     ensure_defaults()
     with locked():
-        require_space(space)
+        info = require_space(space)
         if args.parent:
-            require_page(space, check_slug(args.parent, "parent page"))
+            require_page(space, check_slug(args.parent, "parent page name"))
         slug = unique_slug(space, slugify(title))
         stamp = now_iso()
         meta = {"title": title, "created": stamp, "updated": stamp, "by": by}
@@ -660,7 +691,12 @@ def cmd_new(args) -> int:
             meta["parent"] = args.parent
         write_atomic(page_path(space, slug), render_page(meta, content))
     page = require_page(space, slug)
-    emit(args, public(page), f"{space}/{slug}")
+    kind = "subpage" if args.parent else "page"
+    after = ("It's live in the Spaces pane. Tell the owner in one line in your chat." if by != "you"
+             else f"Add a subpage with: pages new {space} \"Title\" --parent {slug}")
+    emit(args, public(page),
+         f"Saved the {kind} \"{title}\" in {info['name']} as {space}/{slug}.\n"
+         f"File: {page['path']}\n{after}")
     return 0
 
 
@@ -670,7 +706,8 @@ def cmd_draft(args) -> int:
     require_write(worker, space)
     content = read_content(args.source)
     if not content.strip():
-        raise Fail("A draft needs content: --from file, or --from - for stdin", EXIT_USAGE)
+        raise Fail("A draft needs content. Pass the text with --from - (stdin) or --from <file>",
+                   EXIT_USAGE)
     ensure_defaults()
     info = require_space(space)
     title = clean_title(args.title)
@@ -686,9 +723,10 @@ def cmd_draft(args) -> int:
         parent = args.parent or ""
         what = f"New page in {info['name']}"
     if not title:
-        raise Fail("A page needs a title", EXIT_USAGE)
+        raise Fail(f"A draft needs a title, like: pages draft {space} \"Plan\" --worker {args.worker} "
+                   "--from -", EXIT_USAGE)
     if parent:
-        require_page(space, check_slug(parent, "parent page"))
+        require_page(space, check_slug(parent, "parent page name"))
     draft_id = "ob_" + secrets.token_hex(6)
     stamp = now_iso()
     head = {"title": title, "created": stamp, "updated": stamp, "by": args.worker}
@@ -713,9 +751,14 @@ def cmd_draft(args) -> int:
     if target:
         item["page"] = target
     append_outbox(args.worker, item)
-    emit(args, item, f"Draft {draft_id} saved for review: {path}\n"
-                     f"It lands as a page on the owner's Approve in the Workers pane, or "
-                     f"when published with `pages publish {draft_id}`.")
+    if space == "memory":
+        lands = ("It becomes a page only when the owner approves it in the Workers pane. "
+                 "Don't publish it yourself.")
+    else:
+        lands = ("It becomes a page when the owner approves it in the Workers pane, or when you "
+                 f"publish it with pages publish {draft_id} where your settings allow that.")
+    emit(args, item, f"Saved draft {draft_id} of \"{title}\" in {info['name']} for review.\n"
+                     f"File: {path}\n{lands}")
     return 0
 
 
@@ -727,7 +770,8 @@ def draft_file(ref: str) -> Path:
     guard(path)
     real_dir = drafts_dir().resolve()
     if path.resolve().parent != real_dir or path.suffix != ".md" or not SLUG_RE.fullmatch(path.stem):
-        raise Fail(f"Not a draft: {ref} (drafts live in {drafts_dir()})")
+        raise Fail(f"{ref} isn't a draft. Pass a draft id (ob_ and 12 hex digits) or a file in "
+                   f"{drafts_dir()}")
     return path
 
 
@@ -739,37 +783,41 @@ def cmd_publish(args) -> int:
         if receipt_path.is_file():
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             if args.space and receipt.get("space") != args.space:
-                raise Fail(f"Draft {draft_id} was already published to {receipt.get('space')!r}")
+                raise Fail(f"Draft {draft_id} was already published to the {receipt.get('space')!r} "
+                           f"space, so it can't go to {args.space!r} too")
             emit(args, dict(receipt, already=True),
-                 f"Already published: {receipt.get('space')}/{receipt.get('page')}")
+                 f"Already published as {receipt.get('space')}/{receipt.get('page')}. Nothing more to do.")
             return 0
         if not path.is_file():
-            raise Fail(f"No draft {draft_id}")
+            raise Fail(f"There's no draft {draft_id}. Check the id: drafts waiting for review are "
+                       "in the Workers pane")
         meta, body = parse_page(path.read_text(encoding="utf-8"))
         space = meta.get("space", "")
         if args.space and args.space != space:
-            raise Fail(f"Draft {draft_id} is for space {space!r}, not {args.space!r}")
-        check_slug(space, "space")
-        require_space(space)
+            raise Fail(f"Draft {draft_id} is for the {space!r} space, not {args.space!r}. "
+                       f"Publish it with --space {space}, or without --space")
+        check_slug(space, "space name")
+        info = require_space(space)
         title = clean_title(meta.get("title", "")) or "Untitled"
         by = meta.get("by") or "you"
         stamp = now_iso()
         target = meta.get("page")
         notes: list[str] = []
         if target:
-            check_slug(target, "page")
+            check_slug(target, "page name")
             current = load_page(space, target)
             if current is None:
                 if not args.force:
                     raise Fail(f"{space}/{target} was removed after this draft was made. "
-                               "Publish with --force to save it again.", EXIT_CONFLICT)
+                               "Publish with --force to save it again, or leave it removed",
+                               EXIT_CONFLICT)
                 page_meta = {"created": stamp}
             else:
                 changed = (current["updated"] or "none") != meta.get("base_updated", "none") \
                     or (meta.get("base_hash") and file_hash(Path(current["path"])) != meta["base_hash"])
                 if changed and not args.force:
                     raise Fail(f"{space}/{target} changed after this draft was made. Ask for a fresh "
-                               "draft, or publish with --force to overwrite it.", EXIT_CONFLICT)
+                               "draft, or publish with --force to overwrite it", EXIT_CONFLICT)
                 page_meta = dict(current["meta"])
             slug = target
         else:
@@ -794,7 +842,7 @@ def cmd_publish(args) -> int:
         record_approved(by, draft_id, stamp)
     for note in notes:
         print(f"Note: {note}", file=sys.stderr)
-    emit(args, receipt, f"Published {space}/{slug}: {dest}")
+    emit(args, receipt, f"Published \"{title}\" in {info['name']} as {space}/{slug}.\nFile: {dest}")
     return 0
 
 

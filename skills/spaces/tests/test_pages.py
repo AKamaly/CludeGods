@@ -76,7 +76,7 @@ class PagesTest(unittest.TestCase):
         meta, body = self.front(self.spaces / "memory" / "welcome.md")
         self.assertEqual(meta["title"], "About Memory")
         self.assertEqual(meta["by"], "you")
-        self.assertIn("every worker may read", body)
+        self.assertIn("Rules every worker reads before it starts", body)
         info = json.loads((self.spaces / "notes" / "space.json").read_text())
         self.assertEqual(info["name"], "Notes")
         self.assertIn("created", info)
@@ -89,26 +89,27 @@ class PagesTest(unittest.TestCase):
         self.assertEqual([s["slug"] for s in spaces], ["memory"])
 
     def test_mkspace_makes_a_slug_and_refuses_a_duplicate(self):
-        out = self.run_pages("mkspace", "Launch Plans", "--emoji", "🚀").stdout.strip()
-        self.assertEqual(out, "launch-plans")
+        out = self.run_pages("mkspace", "Launch Plans", "--emoji", "🚀").stdout
+        self.assertEqual(out, 'Made the space "Launch Plans" (launch-plans).\n'
+                              'Add a page to it with: pages new launch-plans "Title"\n')
         info = json.loads((self.spaces / "launch-plans" / "space.json").read_text())
         self.assertEqual(info["name"], "Launch Plans")
         self.assertEqual(info["emoji"], "🚀")
         err = self.run_pages("mkspace", "launch plans", code=1).stderr
-        self.assertIn("exists already", err)
+        self.assertIn("A space 'launch-plans' exists already. Pick another name", err)
         self.run_pages("mkspace", "   ", code=2)
         self.run_pages("mkspace", "!!!", code=2)
 
     def test_unicode_names_make_unicode_slugs(self):
-        self.assertEqual(self.run_pages("mkspace", "ملاحظات").stdout.strip(), "ملاحظات")
-        slug = self.run_pages("new", "ملاحظات", "خطة الإطلاق").stdout.strip()
-        self.assertEqual(slug, "ملاحظات/خطة-الإطلاق")
+        self.assertEqual(self.json_of("mkspace", "ملاحظات")["slug"], "ملاحظات")
+        page = self.json_of("new", "ملاحظات", "خطة الإطلاق")
+        self.assertEqual((page["space"], page["slug"]), ("ملاحظات", "خطة-الإطلاق"))
 
     # ------------------------------------------------------------ new, list, show
 
     def test_new_list_and_show_with_subpages(self):
         self.run_pages("spaces")
-        self.assertEqual(self.run_pages("new", "notes", "Launch brief: v2").stdout.strip(), "notes/launch-brief-v2")
+        self.assertEqual(self.json_of("new", "notes", "Launch brief: v2")["slug"], "launch-brief-v2")
         self.run_pages("new", "notes", "Risks", "--parent", "launch-brief-v2", "--from", "-", stdin="# Risks\n\nShipping late.\n")
         self.run_pages("new", "notes", "Deep risk", "--parent", "risks")
         rows = self.json_of("list", "--space", "notes")
@@ -129,16 +130,16 @@ class PagesTest(unittest.TestCase):
     def test_new_takes_a_unique_slug_and_needs_a_real_parent_and_space(self):
         self.run_pages("spaces")
         self.run_pages("new", "notes", "Plan")
-        self.assertEqual(self.run_pages("new", "notes", "Plan").stdout.strip(), "notes/plan-2")
-        self.assertIn("No page notes/nope", self.run_pages("new", "notes", "X", "--parent", "nope", code=1).stderr)
-        self.assertIn("No space 'ghost'", self.run_pages("new", "ghost", "X", code=1).stderr)
+        self.assertEqual(self.json_of("new", "notes", "Plan")["slug"], "plan-2")
+        self.assertIn("There's no page notes/nope", self.run_pages("new", "notes", "X", "--parent", "nope", code=1).stderr)
+        self.assertIn("The space 'ghost' doesn't exist", self.run_pages("new", "ghost", "X", code=1).stderr)
         self.run_pages("new", "notes", "  ", code=2)
 
     def test_new_by_a_worker_records_it_and_respects_its_spaces(self):
         self.run_pages("spaces")
         page = self.json_of("new", "notes", "Asked for", "--worker", "scribe")
         self.assertEqual(page["by"], "scribe")
-        self.assertIn("may not write to 'memory'", self.run_pages(
+        self.assertIn("may not save to the 'memory' space", self.run_pages(
             "new", "memory", "Tone", "--worker", "scribe", code=4).stderr)
 
     def test_search_matches_title_and_text_newest_first(self):
@@ -148,7 +149,8 @@ class PagesTest(unittest.TestCase):
         self.run_pages("new", "notes", "Fox facts")
         rows = self.json_of("list", "--q", "FOX")
         self.assertEqual([r["slug"] for r in rows], ["fox-facts", "alpha"])
-        self.assertEqual(self.run_pages("list", "--q", "zebra").stdout.strip(), "No matching pages")
+        self.assertEqual(self.run_pages("list", "--q", "zebra").stdout.strip(),
+                         "No pages match 'zebra'. Try a shorter word, or see every page with: pages list")
 
     def test_a_parent_loop_and_a_missing_parent_still_list_every_page(self):
         self.run_pages("spaces")
@@ -227,14 +229,14 @@ class PagesTest(unittest.TestCase):
 
     def test_draft_permissions_and_inputs(self):
         self.run_pages("spaces")
-        self.assertIn("may not write to 'memory'", self.run_pages(
+        self.assertIn("may not save to the 'memory' space (it may save to: notes)", self.run_pages(
             "draft", "memory", "Tone", "--worker", "scribe", "--from", "-", stdin="x", code=4).stderr)
         # No `spaces` in the registry: Notes only.
         self.run_pages("draft", "notes", "Ok", "--worker", "scout", "--from", "-", stdin="x")
         self.run_pages("draft", "memory", "No", "--worker", "scout", "--from", "-", stdin="x", code=4)
         # "*" opens every space.
         self.run_pages("draft", "memory", "Tone", "--worker", "keeper", "--from", "-", stdin="Short replies.")
-        self.assertIn("No worker 'ghost'", self.run_pages(
+        self.assertIn("There's no worker 'ghost'", self.run_pages(
             "draft", "notes", "X", "--worker", "ghost", "--from", "-", stdin="x", code=4).stderr)
         self.run_pages("draft", "notes", "X", "--worker", "Bad Key", "--from", "-", stdin="x", code=2)
         self.assertIn("needs content", self.run_pages(
@@ -263,14 +265,14 @@ class PagesTest(unittest.TestCase):
         self.assertTrue(again["already"])
         self.assertEqual(again["page"], "release-notes-2")
         self.assertEqual(self.run_pages("publish", item["id"]).stdout.strip(),
-                         "Already published: notes/release-notes-2")
+                         "Already published as notes/release-notes-2. Nothing more to do.")
         self.assertFalse((self.spaces / "notes" / "release-notes-3.md").exists())
 
     def test_publish_refuses_a_space_other_than_the_drafts(self):
         self.run_pages("spaces")
         self.run_pages("mkspace", "Other")
         item = self.json_of("draft", "notes", "T", "--worker", "scribe", "--from", "-", stdin="x")
-        self.assertIn("is for space 'notes'", self.run_pages(
+        self.assertIn("is for the 'notes' space, not 'other'", self.run_pages(
             "publish", item["draft_path"], "--space", "other", code=1).stderr)
         self.assertTrue(Path(item["draft_path"]).exists())
 
@@ -393,6 +395,88 @@ class PagesTest(unittest.TestCase):
         lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 2)
         self.assertNotIn("via", json.loads(lines[1]))
+
+    # ------------------------------------------------------------ plain messages
+
+    def test_errors_say_what_to_do_next_on_one_line(self):
+        self.run_pages("spaces")
+        self.run_pages("mkspace", "Launch")
+        cases = [
+            (("new", "ghost", "X"), 1,
+             "The space 'ghost' doesn't exist. Spaces: memory, launch, notes. "
+             "Create one with: pages mkspace \"Name\""),
+            (("show", "notes/nope"), 1,
+             "There's no page notes/nope. See the pages in that space with: pages list --space notes"),
+            (("mkspace", "Notes"), 1, "A space 'notes' exists already. Pick another name"),
+            (("mkspace", "!!!"), 2, "Can't make a folder name from '!!!'. Use at least one letter or digit"),
+            (("new", "notes", "  "), 2, 'A page needs a title, in quotes after the space, like: pages new notes "Plan"'),
+            (("show", "notes"), 2, "show takes space/page, like: pages show notes/launch-brief"),
+            (("new", "memory", "Tone", "--worker", "scribe"), 4,
+             "Scribe may not save to the 'memory' space (it may save to: notes). The owner can allow "
+             "that space in the Workers pane (\"spaces\" in workers.json)"),
+            (("publish", "ob_ffffffffffff"), 1,
+             "There's no draft ob_ffffffffffff. Check the id: drafts waiting for review are in the Workers pane"),
+        ]
+        for argv, code, message in cases:
+            err = self.run_pages(*argv, code=code).stderr
+            self.assertEqual(err, f"pages: {message}\n", argv)
+        (self.call / "workers.json").write_text(json.dumps({"workers": [{"key": "solo", "name": "Solo", "spaces": []}]}))
+        self.assertIn("(it may not save to any space)", self.run_pages(
+            "draft", "notes", "X", "--worker", "solo", "--from", "-", stdin="x", code=4).stderr)
+        (self.call / "workers.json").unlink()
+        self.assertIn("Add a worker in the Workers pane first", self.run_pages(
+            "draft", "notes", "X", "--worker", "scribe", "--from", "-", stdin="x", code=4).stderr)
+
+    def test_confirmations_are_plain_and_name_the_next_step(self):
+        self.run_pages("spaces")
+        out = self.run_pages("new", "notes", "Plan").stdout
+        path = self.spaces / "notes" / "plan.md"
+        self.assertEqual(out, f'Saved the page "Plan" in Notes as notes/plan.\nFile: {path}\n'
+                              'Add a subpage with: pages new notes "Title" --parent plan\n')
+        out = self.run_pages("new", "notes", "Step one", "--parent", "plan").stdout
+        self.assertTrue(out.startswith('Saved the subpage "Step one" in Notes as notes/step-one.\n'), out)
+        out = self.run_pages("new", "notes", "By scribe", "--worker", "scribe", "--from", "-", stdin="x\n").stdout
+        self.assertTrue(out.endswith("It's live in the Spaces pane. Tell the owner in one line in your chat.\n"), out)
+
+        out = self.run_pages("draft", "notes", "Brief", "--worker", "scribe", "--from", "-", stdin="x\n").stdout
+        draft_id = out.split()[2]
+        self.assertRegex(draft_id, r"^ob_[0-9a-f]{12}$")
+        self.assertTrue(out.startswith(f'Saved draft {draft_id} of "Brief" in Notes for review.\n'), out)
+        self.assertIn(f"or when you publish it with pages publish {draft_id}", out)
+        memo = self.run_pages("draft", "memory", "Tone", "--worker", "keeper", "--from", "-", stdin="x\n").stdout
+        self.assertIn("It becomes a page only when the owner approves it in the Workers pane. Don't publish it yourself.", memo)
+        self.assertNotIn("pages publish", memo)
+
+        out = self.run_pages("publish", draft_id).stdout
+        self.assertEqual(out, f'Published "Brief" in Notes as notes/brief.\nFile: {self.spaces / "notes" / "brief.md"}\n')
+
+        self.run_pages("mkspace", "Launch")
+        self.assertEqual(self.run_pages("list", "--space", "launch").stdout,
+                         'No pages yet. Add one with: pages new launch "Title"\n')
+        self.assertEqual(self.run_pages("spaces").stdout.splitlines()[0], "memory\tMemory\t1 page")
+
+    def test_messages_are_plain_copy(self):
+        """No em dashes and no exclamation marks in anything pages says."""
+        source = PAGES.read_text(encoding="utf-8")
+        self.assertNotIn("\u2014", source)
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("raise Fail(", "f\"", "\"", "emit(")) or "Fail(f" in stripped:
+                self.assertNotIn("!", stripped.replace("!r}", "}").replace("!=", "="), line)
+
+    def test_json_outputs_keep_their_shape(self):
+        page_keys = {"space", "slug", "title", "created", "updated", "by", "parent", "path"}
+        spaces = self.json_of("spaces")
+        self.assertEqual(set(spaces[0]), {"slug", "name", "created", "pages"})
+        self.assertEqual(set(self.json_of("mkspace", "Launch", "--emoji", "🚀")), {"slug", "name", "created", "emoji"})
+        self.assertEqual(set(self.json_of("new", "notes", "Plan", "--from", "-", stdin="x\n")), page_keys)
+        self.assertEqual(set(self.json_of("list", "--space", "notes")[0]), page_keys | {"depth"})
+        self.assertEqual(set(self.json_of("show", "notes/plan")), page_keys | {"body"})
+        item = self.json_of("draft", "notes/plan", "", "--worker", "scribe", "--from", "-", stdin="y\n")
+        self.assertEqual(set(item), {"id", "at", "kind", "title", "body", "needs_approval", "space",
+                                     "draft_path", "page"})
+        self.assertEqual(set(self.json_of("publish", item["id"])), {"id", "space", "page", "path", "at"})
+        self.assertEqual(set(self.json_of("publish", item["id"])), {"id", "space", "page", "path", "at", "already"})
 
     def test_front_matter_round_trips_risky_titles(self):
         self.run_pages("spaces")
