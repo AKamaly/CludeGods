@@ -7,11 +7,6 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
-### Changed
-
-- The example workers in `config/workers.example.json` all have full tools; presets are
-  there to add when you want one, not the starting point.
-
 ### Added
 
 - **Tutorial video in the README**: the Overview now opens with a 54-second walkthrough (a
@@ -61,6 +56,8 @@ release adds features and a patch release fixes things.
 - Status reads the worker's own report: Working and for how long, Idle, Stopped, an error, or
   No chat yet.
 - The example Inbox worker files mail and sends drafts once you approve them.
+- The example workers in `config/workers.example.json` all have full tools; presets are
+  there to add when you want one, not the starting point.
 - **A faster first word**: `call start --greet` speaks the greeting as soon as the voice is
   up, warmed in the call's own voice, and the skill starts the call in fewer steps.
 - **Cut in and get an answer**: when you talk over Claude, the listener cuts the speech itself
