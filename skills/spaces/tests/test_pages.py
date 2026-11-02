@@ -335,6 +335,65 @@ class PagesTest(unittest.TestCase):
         self.assertIn("saved at the top level", proc.stderr)
         self.assertNotIn("parent", self.front(self.spaces / "notes" / "child.md")[0])
 
+    # ------------------------------------------------------------ approvals.worker_publish
+
+    def decisions(self, key: str) -> list[dict]:
+        path = self.call / "outbox" / f"{key}.decisions.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def test_a_worker_saves_directly_by_default_but_never_to_memory(self):
+        self.run_pages("spaces")
+        self.assertEqual(self.json_of("new", "notes", "Direct", "--worker", "keeper",
+                                      "--from", "-", stdin="x\n")["by"], "keeper")
+        # keeper may write every space, Memory included, but only through a draft
+        self.assertIn("Memory changes only through a draft", self.run_pages(
+            "new", "memory", "Tone", "--worker", "keeper", "--from", "-", stdin="x", code=4).stderr)
+        self.run_pages("draft", "memory", "Tone", "--worker", "keeper", "--from", "-", stdin="x")
+        # the owner (no --worker) still writes Memory directly
+        self.run_pages("new", "memory", "Tone", "--from", "-", stdin="Short replies.\n")
+
+    def test_approve_mode_refuses_new_from_a_worker_and_keeps_drafts_and_the_owner(self):
+        self.run_pages("spaces")
+        for config in ('{"approvals": {"worker_publish": "approve"}, "user_label": "USER"}',
+                       '{"approvals": {"worker_publish": " Approve "}}'):
+            (self.call / "config.json").write_text(config, encoding="utf-8")
+            self.assertIn("worker_publish is \"approve\"", self.run_pages(
+                "new", "notes", "Plan", "--worker", "scribe", "--from", "-", stdin="x", code=4).stderr)
+        self.run_pages("draft", "notes", "Plan", "--worker", "scribe", "--from", "-", stdin="x")
+        self.run_pages("new", "notes", "Owner's page", "--from", "-", stdin="x")
+        # the owner's Approve in the pane runs publish, which is never gated here
+        item = self.json_of("draft", "notes", "Later", "--worker", "scribe", "--from", "-", stdin="x\n")
+        self.run_pages("publish", item["id"])
+
+    def test_an_invalid_config_means_direct(self):
+        self.run_pages("spaces")
+        for config in ('{"approvals": ', "[]", '{"approvals": "approve"}',
+                       '{"approvals": {"worker_publish": "maybe"}}'):
+            (self.call / "config.json").write_text(config, encoding="utf-8")
+            self.run_pages("new", "notes", "Plan", "--worker", "scribe", "--from", "-", stdin="x")
+        (self.call / "config.json").unlink()
+        (self.call / "config.json").mkdir()
+        self.run_pages("new", "notes", "Plan", "--worker", "scribe", "--from", "-", stdin="x")
+
+    def test_publish_marks_the_outbox_item_approved_once(self):
+        self.run_pages("spaces")
+        item = self.json_of("draft", "notes", "Brief", "--worker", "scribe", "--from", "-", stdin="x\n")
+        self.run_pages("publish", item["id"])
+        self.run_pages("publish", item["id"])  # a second run: already published, no second line
+        got = self.decisions("scribe")
+        self.assertEqual([(d["id"], d["decision"]) for d in got], [(item["id"], "approved")])
+        # already decided in the pane (its Approve wrote the line first): nothing added
+        other = self.json_of("draft", "notes", "Other", "--worker", "scribe", "--from", "-", stdin="y\n")
+        path = self.call / "outbox" / "scribe.decisions.jsonl"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": other["id"], "decision": "approved", "at": "2026-01-01T00:00:00Z"}))
+        self.run_pages("publish", other["id"])
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertNotIn("via", json.loads(lines[1]))
+
     def test_front_matter_round_trips_risky_titles(self):
         self.run_pages("spaces")
         for title in ['Q3: plan', '#1 priority', 'yes', '2026', '"quoted"', "it's", 'a # b', '- dash', 'ends:']:
