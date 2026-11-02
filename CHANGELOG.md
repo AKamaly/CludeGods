@@ -7,6 +7,11 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh` keeps its backups of replaced skills in `~/.claude/cludegods-backups/`. A
+  backup left in `~/.claude/skills/` loaded as a second copy of the skill.
+
 ### Added
 
 - **Tutorial video in the README**: the Overview now opens with a 54-second walkthrough (a

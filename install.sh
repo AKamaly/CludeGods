@@ -18,6 +18,7 @@ VM_PY="${VOICEMODE_PY:-$HOME/.local/share/uv/tools/voice-mode/bin/python}"
 SILERO="$HOME/.voicemode/models/silero_vad.onnx"
 SILERO_URL="https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUPS="$HOME/.claude/cludegods-backups/$STAMP"
 PATCH=0 PILL=1
 for arg in "$@"; do
   case "$arg" in
@@ -82,7 +83,8 @@ mkdir -p "$SKILLS"
 for s in colleague spaces; do
   dst="$SKILLS/$s"
   if [ -d "$dst" ] && ! diff -rq -x CallPill.app -x pill -x __pycache__ "$REPO/skills/$s" "$dst" >/dev/null 2>&1; then
-    cp -R "$dst" "$dst.bak-$STAMP" && note "backed up your current $s skill to $s.bak-$STAMP"
+    # Back up outside ~/.claude/skills: a copy left there would load as a second skill.
+    mkdir -p "$BACKUPS" && cp -R "$dst" "$BACKUPS/$s" && note "backed up your current $s skill to ~/.claude/cludegods-backups/$STAMP/$s"
   fi
   rsync -a --exclude __pycache__ "$REPO/skills/$s/" "$dst/"
   ok "$s skill in ~/.claude/skills/$s"
