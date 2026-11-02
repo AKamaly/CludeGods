@@ -9,9 +9,17 @@ release adds features and a patch release fixes things.
 
 ### Added
 
+- **Tutorial video in the README**: the Overview now opens with a 54-second walkthrough (a
+  call, narrated steps, click to approve, a worker task, a worker on the call) in place of the
+  static app screenshot.
 - **One-paste install**: the README's Get started now opens with a prompt you paste into
   Claude Code; Claude installs VoiceMode, CludeGods and the panes, checks them, and tells you
   how to start your first call.
+
+### Fixed
+
+- CI: the worker-permissions speed check gives shared CI runners more room (200 ms instead of
+  50 ms), so a slow runner no longer fails `main`.
 
 ## [0.3.0] - 2026-11-01
 
