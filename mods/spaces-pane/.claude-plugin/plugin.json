@@ -1,7 +1,7 @@
 {
   "name": "spaces-pane",
-  "version": "0.2.0",
-  "description": "A Spaces pane beside the chat: Markdown pages in spaces, nested subpages, search, Ask a worker about a page, and drafts that land only after review",
+  "version": "0.5.0",
+  "description": "A Spaces pane beside the chat: folders of Markdown pages you and your workers share, with quick page creation, nested subpages, search, Ask a worker about a page, starter Memory rules, and drafts that land only after review",
   "author": {
     "name": "AKamaly"
   },
