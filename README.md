@@ -4,9 +4,11 @@
 
 # CludeGods
 
-### Talk to Claude Code out loud, and keep always-on workers right beside you.
+### Always-on Claude Code Gods that you can talk to.
 
-**Voice calls, spoken progress, always-on workers with their own voices, Spaces for your docs, Slack, and read-back approvals, inside the Claude desktop app on your Mac.**
+**Always-on AI Gods that work inside Claude Code.**
+
+Always-on proactive workers · Computer use: browser, terminal & files · Real-time voice, like Jarvis (RIP Iron Man) · Put any worker on a call, in its own voice · Bring workers into Slack · Spaces and Pages for projects
 
 Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [VoiceMode](https://github.com/mbailey/voicemode). · [Get started](#get-started) · [How to use it](#how-to-use-it) · [Overview](#overview) · [Architecture](#architecture) · [Features](#features) · [Safety](#safety-model) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
