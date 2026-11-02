@@ -193,6 +193,7 @@ preflight() {
   local why inst gb
   why=$(voice_missing_why)
   read -r inst gb <<< "$(voice_installed)"
+  { [ -x "$PY" ] && [ -s "$SILERO" ]; } || inst=no   # a missing local piece needs the setup either way
   if [ "$inst" = no ]; then
     [ "$gb" = - ] && gb=3
     echo "voice: missing ($why). The call needs local speech models: about $gb GB to download," \
@@ -212,7 +213,7 @@ preflight() {
     whisper_up || "$VMCLI" service start whisper > /dev/null 2>&1 || true
     local end=$((SECONDS + ${CALL_SERVICE_WAIT_S:-30}))
     while [ "$SECONDS" -lt "$end" ]; do
-      voice_up && whisper_up && return 0
+      voice_ready && return 0
       sleep 1
     done
   fi
