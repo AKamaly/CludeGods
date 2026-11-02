@@ -14,7 +14,8 @@
 #   call mute|unmute   turn the mic fully off / back on (the pill's mic button)
 #   call mic           toggle mute: bind it to a key (see SKILL.md, "When voice breaks")
 #   call stopwork      cut speech and tell the call session to halt (the pill's stop button)
-#   call stop          hang up: stop the ears and the mouth, write the call receipt
+#   call stop [--now]  hang up: let the last line (the goodbye) finish, up to 8 s unless
+#                      --now, then stop the ears and the mouth and write the call receipt
 #   call status        what is running, what the ears hear, whether a listener is armed
 set -euo pipefail
 
@@ -78,6 +79,17 @@ checked_voice() {
     voice="${CALL_VOICE:-af_heart}"
   fi
   printf '%s' "$voice"
+}
+
+# Wait while the mouth is still speaking or has lines queued, at most $1 seconds.
+drain() {
+  local end=$((SECONDS + $1))
+  while [ "$SECONDS" -lt "$end" ]; do
+    mouth status 2>/dev/null | python3 -c 'import json, sys
+s = json.load(sys.stdin)
+sys.exit(0 if s.get("queued") or s.get("playing") else 1)' 2>/dev/null || return 0
+    sleep 0.3
+  done
 }
 
 up() { curl -s -m 0.5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null | grep -q 200; }
@@ -236,6 +248,7 @@ case "${1:-status}" in
     ;;
   stop)
     touch "$DIR/ears.stop"
+    [ "${2:-}" = "--now" ] || drain "${CALL_STOP_WAIT_S:-8}"
     mouth stop > /dev/null 2>&1 || true
     pkill -f "voice_mode.mouth (serve|mail)" 2>/dev/null || true
     rm -f "$DIR/mouth.pid"
@@ -264,6 +277,6 @@ case "${1:-status}" in
     true
     ;;
   *)
-    sed -n '2,18p' "$0"; exit 2
+    sed -n '2,19p' "$0"; exit 2
     ;;
 esac
