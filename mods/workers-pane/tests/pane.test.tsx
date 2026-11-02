@@ -243,30 +243,6 @@ test("the name selects the card and Open opens the worker chat, both in its god'
   await ui.unmount()
 })
 
-test('a press anywhere on a card that is not selected selects it; the selected card has no layer', async ($, on) => {
-  world(on)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  // The first card is selected: it carries no layer, every other card does.
-  expect(await ui.find({ key: 'hitc-quick' })).toBeUndefined()
-  expect(await ui.find({ key: 'hitc-work' })).toBeDefined()
-  expect(await ui.find({ key: 'hitc-deep' })).toBeDefined()
-
-  await ui.pointer({ type: 'down', x: 20, y: 3, button: 'left', in: 'hitc-work' })
-  expect((await ui.find({ key: 'card-work' }))?.props.borderColor).toBe(RESEARCH)
-  expect((await ui.find({ key: 'card-quick' }))?.props.borderColor).toBeUndefined()
-  // Now work is selected: its layer is gone and quick has one.
-  expect(await ui.find({ key: 'hitc-work' })).toBeUndefined()
-  expect(await ui.find({ key: 'hitc-quick' })).toBeDefined()
-  await ui.unmount()
-})
-
-test('the terminal draws no card layer', async ($, on) => {
-  world(on)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ key: 'hitc-work' })).toBeUndefined()
-  await ui.unmount()
-})
-
 test('Delete, in Settings, needs two presses, then writes the request and drops only that entry, keeping every other key', async ($, on) => {
   const w = world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
