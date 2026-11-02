@@ -1,6 +1,6 @@
 {
   "name": "inbox-relay",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Hands each chat-bridge message (Slack first) waiting in ~/.voicemode/call/inbox to its worker's standing chat, once, and holds it while the worker is paused",
   "author": {
     "name": "AKamaly"

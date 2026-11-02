@@ -70,6 +70,16 @@ export function parseWorkers(raw: string): RelayWorker[] | undefined {
   }
 }
 
+/**
+ * Whether this chat is that worker's own: its transcript's file name (bare, or as a
+ * path) is this chat's, or its `session` is the desktop's id for this chat. A worker's
+ * own chat never relays to itself.
+ */
+export function isOwnChat(w: Pick<RelayWorker, 'session' | 'transcript'>, self: string, host: string): boolean {
+  const name = typeof w.transcript === 'string' ? (w.transcript.trim().split('/').pop() ?? '') : ''
+  return (Boolean(self) && name === `${self}.jsonl`) || (Boolean(host) && w.session === host)
+}
+
 /** What the worker reads: who, where, the id, the text, and how to answer in the thread. */
 export function relayText(line: InboxLine): string {
   const source = line.source === 'slack' ? 'Slack' : oneLine(line.source, 24)
@@ -118,7 +128,7 @@ export const register: Register = on => {
     }
 
     // One inbox file: everything not yet recorded, in order, to its worker.
-    const relayFile = async (key: string, workers: RelayWorker[], self: string, now: number): Promise<boolean> => {
+    const relayFile = async (key: string, workers: RelayWorker[], self: string, host: string, now: number): Promise<boolean> => {
       const raw = await readText(`${INBOX}/${key}.jsonl`)
       if (raw === undefined) return true // unreadable this time: look again next poll
       const pending = parseInbox(raw).filter(l => !l.delivered && !done.has(l.id))
@@ -135,7 +145,7 @@ export const register: Register = on => {
           `${n === 1 ? 'A Slack message waits' : `${n} Slack messages wait`} for "${key}", which has no chat yet`)
         return true
       }
-      if (self && w.transcript === `${self}.jsonl`) return true // a worker's own chat never relays to itself
+      if (isOwnChat(w, self, host)) return true // a worker's own chat never relays to itself
       if (w.paused === true) {
         for (const l of todo) tellOnce(`paused:${l.id}`, `${w.name} is paused: holding a Slack message from ${oneLine(l.from, 40)}`)
         return true
@@ -198,10 +208,11 @@ export const register: Register = on => {
       if (!workers) return // registry unreadable: hold everything until it reads
       const now = await $.clock.now()
       const self = await $.session.id().catch(() => '')
+      const host = ((await $.env.get('CLAUDE_CODE_HOST_SESSION_ID').catch(() => undefined)) ?? '').trim()
       for (const x of changed) {
         const key = x.name.slice(0, -'.jsonl'.length)
         if (!KEY_RE.test(key)) continue
-        const isWaiting = await relayFile(key, workers, self, now)
+        const isWaiting = await relayFile(key, workers, self, host, now)
         seen.set(x.name, { mtimeMs: x.mtimeMs, isWaiting })
       }
     }
