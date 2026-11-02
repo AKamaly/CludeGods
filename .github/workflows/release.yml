@@ -1,0 +1,54 @@
+name: Release CallPill
+
+# Attaches a prebuilt CallPill.app (CallPill-macos.zip) to every published release, so
+# install.sh can install the pill on a Mac without the Xcode command line tools. It re-signs
+# the download ad-hoc on that Mac (scripts/fetch-pill.sh), so the build here needs no
+# certificate. Run it by hand (Actions, Release CallPill, Run workflow) to attach the zip to a
+# release that predates this workflow.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach CallPill-macos.zip to (e.g. v0.4.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  callpill:
+    name: Build and attach CallPill (macOS)
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Build CallPill
+        env:
+          # runs on macOS 13 and later, not only on the runner's version
+          CALLPILL_TARGET: arm64-apple-macos13
+        run: scripts/build-pill.sh
+
+      - name: Zip CallPill.app
+        run: |
+          cd skills/gods/bin
+          # no resource forks or extended attributes: they unzip as ._ files that break the seal
+          ditto -c -k --norsrc --noextattr --noacl --keepParent CallPill.app "$GITHUB_WORKSPACE/CallPill-macos.zip"
+          unzip -l "$GITHUB_WORKSPACE/CallPill-macos.zip"
+
+      - name: Check the zip installs and signs
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          CALLPILL_URL="file://$GITHUB_WORKSPACE/CallPill-macos.zip" scripts/fetch-pill.sh "$RUNNER_TEMP/bin"
+          codesign -v "$RUNNER_TEMP/bin/CallPill.app"
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" CallPill-macos.zip --clobber --repo "$GITHUB_REPOSITORY"
