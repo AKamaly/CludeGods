@@ -34,11 +34,15 @@ jobs:
       - name: Slack bridge
         run: python3 -B -I -m unittest discover -s skills/gods/bridges/slack/tests -v
 
+      - name: Installer and the cludegods CLI (temp HOME, fake tools)
+        run: python3 -B -I -m unittest discover -s skills/gods/tests -v
+
       - name: Shell scripts parse
         run: |
-          for f in install.sh scripts/build-pill.sh skills/gods/bin/call \
+          for f in install.sh bootstrap.sh uninstall.sh scripts/*.sh skills/gods/bin/call \
                    skills/gods/bin/outbox-say skills/gods/bin/bridge; do
-            bash -n "$f" && echo "ok  $f"
+            bash -n "$f" || { echo "parse error in $f"; exit 1; }
+            echo "ok  $f"
           done
 
       - name: Manifests are valid JSON
