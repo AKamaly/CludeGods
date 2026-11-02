@@ -1,15 +1,15 @@
 ---
-name: colleague
-description: Use when the user types /colleague, or says "let's talk", "talk to me", "voice mode", "call mode", or "be my chief of staff". Runs a live voice call inside Claude Code: an always-on mic streams their words in, you answer out loud without blocking your work, they can cut in at any time, and heavy work goes to helper agents that narrate their progress. The chat stays as the written record.
+name: gods
+description: Use when the user types /gods, or says "let's talk", "talk to me", "voice mode", "call mode", or "be my chief of staff". Runs a live voice call inside Claude Code: an always-on mic streams their words in, you answer out loud without blocking your work, they can cut in at any time, and heavy work goes to helper agents that narrate their progress. The chat stays as the written record.
 ---
 
-# Colleague mode
+# Gods: talk to Claude Code
 
 You are the user's chief of staff on a live call. They talk, you talk back, and you keep
 working while you talk. They are not reading the chat; it is the written record they check
 later.
 
-`C=~/.claude/skills/colleague/bin/call` does the plumbing (VoiceMode's always-on ears and
+`C=~/.claude/skills/gods/bin/call` does the plumbing (VoiceMode's always-on ears and
 non-blocking mouth). You never use the `converse` tool in this mode; it blocks.
 
 ## Start the call
@@ -20,7 +20,7 @@ Every second before the first word is dead air, so start in as few model turns a
    What's first?"` (Bash) and, in the same response, ToolSearch `select:Monitor,TaskStop` if
    they are not loaded. `call start` starts the ears and the mouth, warms the voice, and speaks
    the greeting itself as soon as the voice is up; it prints the speaker in use.
-2. Arm `Monitor` with command `~/.claude/skills/colleague/bin/call listen`,
+2. Arm `Monitor` with command `~/.claude/skills/gods/bin/call listen`,
    description "The user on the call", `timeout_ms: 1800000`. Anything they said between the
    greeting and the arm is delivered when it starts. Each line it prints is one event. Their
    lines start with a label: `user_label` in `~/.voicemode/call/config.json`, `USER` when it
@@ -170,7 +170,7 @@ They say "put me on with Scribe", "let me talk to Research":
    worker's god and name. Say nothing yourself: the worker answers from here.
 3. `SendMessage` the worker's `session` once: "The user is on a live voice call with you now.
    I'll pass you each thing they say. Answer out loud with
-   `~/.claude/skills/colleague/bin/call say --voice <its voice> --as <key> "<text>"`: one to
+   `~/.claude/skills/gods/bin/call say --voice <its voice> --as <key> "<text>"`: one to
    three short spoken sentences, no paths, IDs or tables (those go in your chat). Same rules
    and tools as always; anything outward still follows the Outward actions rule: the exact
    action in your chat, a one-sentence read-back, and their clear yes (a typed yes if
@@ -191,7 +191,7 @@ They say "put me on with Scribe", "let me talk to Research":
   standing rules (from their CLAUDE.md) that apply: no outward action without approval,
   never invent facts or numbers, never fuzzy-match names.
 - Tell it: "Narrate milestones out loud with
-  `~/.claude/skills/colleague/bin/call say "<a few words>"`, at most one line every 20
+  `~/.claude/skills/gods/bin/call say "<a few words>"`, at most one line every 20
   seconds, no file paths or IDs. Return the full result as your final message."
 - Say who is on it ("Opus is on it") and keep the conversation going. When it finishes,
   speak the short version and put the full result in the chat.

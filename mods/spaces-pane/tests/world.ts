@@ -6,7 +6,7 @@ import type { On } from 'claude-code'
 export const HOME = '/home/owner'
 export const CALL = `${HOME}/.voicemode/call`
 export const SPACES = `${CALL}/spaces`
-export const PAGES_BIN = `${HOME}/.claude/skills/colleague/bin/pages`
+export const PAGES_BIN = `${HOME}/.claude/skills/gods/bin/pages`
 export const NOW = Date.parse('2026-11-01T12:00:00.000Z')
 
 export type File = { text: string; mtimeMs: number }

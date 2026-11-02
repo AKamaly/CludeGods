@@ -9,6 +9,12 @@ release adds features and a patch release fixes things.
 
 ### Changed
 
+- **`/gods` starts a call** (was `/colleague`). The skill folder is `~/.claude/skills/gods`;
+  `install.sh` moves an old `colleague` install out of the skills folder and updates the hook
+  and worker paths that named it.
+
+### Changed
+
 - The README's launch film link opens the film on YouTube.
 - The README's release link always points to the latest release.
 

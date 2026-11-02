@@ -4,8 +4,8 @@
 #   scripts/build-pill.sh [BIN_DIR]
 #
 # BIN_DIR defaults to the skill's bin directory in this repo. Run it again after copying the
-# skill to ~/.claude/skills/colleague/bin if you want the app built in place there:
-#   scripts/build-pill.sh ~/.claude/skills/colleague/bin
+# skill to ~/.claude/skills/gods/bin if you want the app built in place there:
+#   scripts/build-pill.sh ~/.claude/skills/gods/bin
 #
 # The call card draws the gods from BIN_DIR/gods/<kind>-<state>.png + index.json (rendered by
 # scripts/render-gods.mjs). Without them the card still runs; the god's space stays empty until
@@ -17,11 +17,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${1:-$ROOT/skills/colleague/bin}"
+BIN="${1:-$ROOT/skills/gods/bin}"
 BIN="$(cd "$BIN" && pwd)"
 ID="${CALLPILL_BUNDLE_ID:-dev.cludegods.callpill}"
 SRC="$BIN/pill.swift"
-[ -f "$SRC" ] || SRC="$ROOT/skills/colleague/bin/pill.swift"
+[ -f "$SRC" ] || SRC="$ROOT/skills/gods/bin/pill.swift"
 
 command -v swiftc > /dev/null || { echo "swiftc not found: install the Xcode command line tools (xcode-select --install)" >&2; exit 1; }
 

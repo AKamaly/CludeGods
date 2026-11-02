@@ -182,7 +182,7 @@ final class Sprites {
         let b = Bundle.main.bundleURL
         let beside = (b.pathExtension == "app" ? b.deletingLastPathComponent() : b).appendingPathComponent("gods")
         if FileManager.default.fileExists(atPath: beside.path) { return beside }
-        return home.appendingPathComponent(".claude/skills/colleague/bin/gods")
+        return home.appendingPathComponent(".claude/skills/gods/bin/gods")
     }
 
     private func loadMeta() {
@@ -1305,7 +1305,7 @@ final class Pill: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/bash")
-            p.arguments = ["-lc", "\"$HOME/.claude/skills/colleague/bin/call\" \(arg)"]
+            p.arguments = ["-lc", "\"$HOME/.claude/skills/gods/bin/call\" \(arg)"]
             p.standardInput = FileHandle.nullDevice
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice

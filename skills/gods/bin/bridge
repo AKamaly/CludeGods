@@ -30,7 +30,7 @@ which_bridge() {
   case "${1:-slack}" in
     slack) ;;
     teams)
-      echo "teams: not supported yet. Teams only delivers to a public HTTPS endpoint behind an Azure Bot registration, so it cannot run from this Mac alone. See ~/.claude/skills/colleague/bridges/slack/README.md"
+      echo "teams: not supported yet. Teams only delivers to a public HTTPS endpoint behind an Azure Bot registration, so it cannot run from this Mac alone. See ~/.claude/skills/gods/bridges/slack/README.md"
       exit 2 ;;
     *) echo "bridge: unknown bridge '$1' (there is slack)"; exit 2 ;;
   esac

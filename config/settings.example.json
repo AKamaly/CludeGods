@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/skills/colleague/bin/narrate",
+            "command": "$HOME/.claude/skills/gods/bin/narrate",
             "timeout": 3,
             "async": true
           }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/skills/colleague/bin/guard",
+            "command": "$HOME/.claude/skills/gods/bin/guard",
             "timeout": 5
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/skills/colleague/bin/permit",
+            "command": "$HOME/.claude/skills/gods/bin/permit",
             "timeout": 60
           }
         ]

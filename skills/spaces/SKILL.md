@@ -19,7 +19,7 @@ about a page from there, and sees every page you save, with your key as its auth
 
 A subpage is a page whose `parent` is another page's slug in the same space.
 
-The CLI is `~/.claude/skills/colleague/bin/pages` (call it `pages` below). Add `--json` for
+The CLI is `~/.claude/skills/gods/bin/pages` (call it `pages` below). Add `--json` for
 machine-readable output.
 
 ## Read

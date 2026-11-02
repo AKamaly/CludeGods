@@ -1,4 +1,4 @@
-"""Unit tests for the `pages` CLI (skills/colleague/bin/pages).
+"""Unit tests for the `pages` CLI (skills/gods/bin/pages).
 
 Each test runs the real script in a subprocess against a fresh temporary HOME, so nothing
 touches the owner's own ~/.voicemode. Run:
@@ -17,7 +17,7 @@ import time
 import unittest
 from pathlib import Path
 
-PAGES = Path(os.environ.get("PAGES_BIN") or Path(__file__).resolve().parents[2] / "colleague" / "bin" / "pages")
+PAGES = Path(os.environ.get("PAGES_BIN") or Path(__file__).resolve().parents[2] / "gods" / "bin" / "pages")
 
 REGISTRY = {
     "workers": [

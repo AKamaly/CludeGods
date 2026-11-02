@@ -20,7 +20,7 @@ const HOME = '/home/tester'
 const CALL = `${HOME}/.voicemode/call`
 const PROJECTS = `${HOME}/.claude/projects`
 const PROJ = `${PROJECTS}/-home-tester-work`
-const PAGES = `${HOME}/.claude/skills/colleague/bin/pages`
+const PAGES = `${HOME}/.claude/skills/gods/bin/pages`
 const AMBER = '#b7791f'
 // Each god's accent (register.tsx GOD_ACCENT): a worker's colour in the pane.
 const SCRIBE = '#3b82f6'
