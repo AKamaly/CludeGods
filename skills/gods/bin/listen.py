@@ -122,7 +122,8 @@ ECHO_CHARS = 0.58         # speakers: a partial whose letters match a stretch of
 ECHO_CHARS_TURN = 0.62    # ...and a turn's leftover over me: stricter, a miss here drops words
 ECHO_CHARS_MIN = 8        # ...judged only on partials with at least this many letters
 CATCHUP_MAX_S = 3600.0    # a cursor older than this is not resumed
-CATCHUP_MAX_LINES = 10    # at most this many earlier turns are delivered on re-arm
+CATCHUP_MAX_LINES = 30    # at most this many earlier turns are delivered on re-arm; any
+                          # older ones are counted in one line, never silently dropped
 FRESH_S = 60.0            # a caught-up turn younger than this goes out as a normal turn
 START_WINDOW_S = 120.0    # a listener armed this soon after `call start` hears the whole call
 EARS_GRACE_S = 10.0       # after starting, how long before "the ears are not running" is said
@@ -775,7 +776,8 @@ def catch_up(fh, gate, label, offset=None, since=None, now=None):
     epoch) only build the gate's state (the capture start, my recent lines, a barge-in in
     flight), at their own time, as the listener that saw them did; the ones after are judged,
     because no listener saw them. Returns his turns from that stretch, oldest first: as the
-    gate says them if under FRESH_S old, else as `<label> (earlier, HH:MM, ...)`.
+    gate says them if under FRESH_S old, else as `<label> (earlier, HH:MM, ...)`. Uncapped:
+    catch_up_all caps what goes to the call.
     With neither set, everything is read silently (a fresh listener follows from the end)."""
     now = now if now is not None else time.time()
     lines = []
@@ -798,7 +800,16 @@ def catch_up(fh, gate, label, offset=None, since=None, now=None):
             else:
                 lines.append(f"{label} (earlier, {datetime.fromtimestamp(ts(rec)):%H:%M}, said "
                              f"while no listener was running): {out[1].split(': ', 1)[1]}")
-    return lines[-CATCHUP_MAX_LINES:]
+    return lines
+
+
+def capped(lines, label):
+    """At most CATCHUP_MAX_LINES caught-up turns, the newest; the ones left out are counted."""
+    if len(lines) <= CATCHUP_MAX_LINES:
+        return lines
+    n = len(lines) - CATCHUP_MAX_LINES + 1
+    return ([f"{label} (earlier, said while no listener was running): [{n} older turns not "
+             "repeated here; ask what you missed if it matters]"] + lines[-(CATCHUP_MAX_LINES - 1):])
 
 
 def start_point(cursor, log, call, now=None):
@@ -829,10 +840,10 @@ def catch_up_all(gate, label, cursor, newest, call, now=None):
                 lines += catch_up(old, gate, label, off, None, now)
         fh = open(plan[-1][0], "rb")
         lines += catch_up(fh, gate, label, plan[-1][1], None, now)
-        return lines[-CATCHUP_MAX_LINES:], fh, True
+        return capped(lines, label), fh, True
     fh = open(newest, "rb")
     offset, since = start_point(None, newest, call, now)
-    return catch_up(fh, gate, label, offset, since, now), fh, False
+    return capped(catch_up(fh, gate, label, offset, since, now), label), fh, False
 
 
 def ears_alive(call_dir=None):
@@ -1859,6 +1870,13 @@ def selftest():
     check("re-arm across midnight: yesterday's rest, then today's log from its start",
           (resumed, [norm(x) for x in got], resume_logs(read_cursor(cur), day2, "9", base + 75)),
           (True, ["Also the release notes.", "And the changelog."], []))
+
+    many = [f"USER: turn {k}" for k in range(CATCHUP_MAX_LINES + 4)]
+    out = capped(many, "USER")
+    check("catch-up cap: the newest turns, and one line that counts the rest",
+          (len(out), out[0], out[-1], capped(many[:3], "USER")),
+          (CATCHUP_MAX_LINES, "USER (earlier, said while no listener was running): [5 older turns "
+           "not repeated here; ask what you missed if it matters]", many[-1], many[:3]))
 
     # 22. what was pressed or switched while no listener ran is reported first, Stop leading
     before = {"focus": "", "muted": False, "mic": "open", "stop": 100.0}
