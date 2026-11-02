@@ -7,6 +7,12 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+### Added
+
+- **One-paste install**: the README's Get started now opens with a prompt you paste into
+  Claude Code; Claude installs VoiceMode, CludeGods and the panes, checks them, and tells you
+  how to start your first call.
+
 ## [0.3.0] - 2026-11-01
 
 ### Added
