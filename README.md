@@ -42,10 +42,12 @@ chats, each with a task box.
 files under `~/.voicemode/call/`. Speech to text and text to speech run locally; the
 transcript of what you say goes to Claude, the same as anything you type into the session.
 
+**Press play, then click the speaker icon:** GitHub starts every video muted, and this one talks.
+
 https://github.com/user-attachments/assets/f384d329-f26c-4d89-b912-9ed2e24fbf38
 
 _CludeGods in 54 seconds: a voice call with Claude, every step said out loud, a click to approve, a task for an
-always-on worker, and a worker on the call. Turn the sound on._
+always-on worker, and a worker on the call._
 
 The parts:
 
