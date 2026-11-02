@@ -658,6 +658,11 @@ class TestDoctor(Base):
                    ago_s=300)
         c = self.checks()["mic"]
         self.assertTrue(c["ok"])
+        # Not in a call: how an old call went is history, not a problem.
+        self.assertIn("Not in a call", c["detail"])
+        self.write(".voicemode/call/ears.pid", str(os.getpid()))
+        c = self.checks()["mic"]
+        self.assertTrue(c["ok"])
         self.assertIn("not heard a turn", c["detail"])
         self.heard({"kind": "turn", "source": "mic", "device": "Desk Mic", "text": "hi"}, ago_s=180)
         c = self.checks()["mic"]
@@ -672,7 +677,16 @@ class TestDoctor(Base):
                    {"kind": "event", "event": "listen-stopped", "source": "mic", "error": "device lost"})
         c = self.checks()["mic"]
         self.assertFalse(c["ok"])
-        self.assertIn("device lost", c["detail"])
+        self.assertIn("stopped sending sound", c["detail"])
+        # Once the call is over and the stop is old, it isn't shown as a problem.
+        os.remove(self.home / ".voicemode/call/ears.pid")
+        shutil.rmtree(self.home / ".voicemode/logs/conversations")
+        self.heard({"kind": "event", "event": "listen-started", "source": "mic", "device": "Desk Mic"},
+                   ago_s=7200)
+        self.heard({"kind": "event", "event": "listen-stopped", "source": "mic", "error": "device lost"},
+                   ago_s=7100)
+        c = self.checks()["mic"]
+        self.assertTrue(c["ok"], c)
 
     def test_pill(self):
         c = self.checks()["pill"]
@@ -704,12 +718,15 @@ class TestDoctor(Base):
             {"key": "b", "name": "Beta"},
             {"key": "c", "name": "Gamma", "session": "local_3"},
             {"key": "d", "name": "Delta", "session": "local_4", "transcript": "gone.jsonl"},
+            {"key": "e", "name": "Echo", "paused": True},
         ]})
         c = self.checks()["worker-chats"]
         self.assertEqual((c["ok"], c["severity"]), (False, "warn"))
-        self.assertIn("Beta: no chat", c["detail"])
-        self.assertIn("Gamma: no transcript", c["detail"])
-        self.assertIn("Delta: transcript not found", c["detail"])
+        self.assertIn("Beta has no chat yet", c["detail"])
+        self.assertIn("Delta's chat can't be found", c["detail"])
+        # A worker links its transcript on its first turn, and a paused one isn't expected to run.
+        self.assertNotIn("Gamma", c["detail"])
+        self.assertNotIn("Echo", c["detail"])
         self.assertNotIn("Alpha", c["detail"])
 
     def test_human_output(self):

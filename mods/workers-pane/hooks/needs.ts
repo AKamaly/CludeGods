@@ -67,10 +67,16 @@ export function parseDoctor(stdout: string): DoctorReport | undefined {
   }
 }
 
-/** The checks that need the owner: failed, at error or warn (info never does), errors first. */
+/** A failed check the owner should see: every error, and a warning only when it has a fix.
+ * A warning with nothing to press is noise, so the pane neither lists it nor turns a dot amber. */
+function needsOwner(c: DoctorCheck): boolean {
+  return !c.ok && (c.severity === 'error' || (c.severity === 'warn' && !!c.fix))
+}
+
+/** The checks that need the owner, errors first. */
 export function problems(report: DoctorReport | undefined): DoctorCheck[] {
   if (!report) return []
-  const bad = report.checks.filter(c => !c.ok && c.severity !== 'info')
+  const bad = report.checks.filter(needsOwner)
   return [...bad.filter(c => c.severity === 'error'), ...bad.filter(c => c.severity === 'warn')]
 }
 
@@ -99,7 +105,7 @@ export function groupState(report: DoctorReport, group: HealthGroup): GroupState
   const mine = report.checks.filter(c => groupOf(c) === group)
   if (mine.length === 0) return 'none'
   if (mine.some(c => !c.ok && c.severity === 'error')) return 'error'
-  if (mine.some(c => !c.ok && c.severity === 'warn')) return 'warn'
+  if (mine.some(c => needsOwner(c) && c.severity === 'warn')) return 'warn'
   return 'ok'
 }
 
