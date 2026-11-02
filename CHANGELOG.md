@@ -9,6 +9,8 @@ release adds features and a patch release fixes things.
 
 ### Fixed
 
+- Workers pane: it no longer opens by itself in every chat. Open it from the footer's
+  Workers button or with `/workers`.
 - Workers pane: the click-anywhere layer on cards is gone. In the desktop app it blocked hover
   and swallowed clicks; a card is selected from its name, role line, status or any of its
   actions, and only the selected card is highlighted.
