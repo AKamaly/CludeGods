@@ -25,19 +25,32 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
+      # the scripts come from this workflow's ref; the pill's source from the release's tag
+      # (the same commit for a published release; an older tag when backfilling by hand)
+      - uses: actions/checkout@v4
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
+          path: release-src
 
       - name: Build CallPill
         env:
           # runs on macOS 13 and later, not only on the runner's version
           CALLPILL_TARGET: arm64-apple-macos13
-        run: scripts/build-pill.sh
+        run: |
+          # the skill folder was skills/colleague before 0.5
+          bin=""
+          for d in skills/gods/bin skills/colleague/bin; do
+            if [ -f "release-src/$d/pill.swift" ]; then bin="release-src/$d"; break; fi
+          done
+          [ -n "$bin" ] || { echo "no pill.swift at $TAG"; exit 1; }
+          echo "PILL_BIN=$bin" >> "$GITHUB_ENV"
+          scripts/build-pill.sh "$bin"
 
       - name: Zip CallPill.app
         run: |
-          cd skills/gods/bin
+          cd "$PILL_BIN"
           # no resource forks or extended attributes: they unzip as ._ files that break the seal
           ditto -c -k --norsrc --noextattr --noacl --keepParent CallPill.app "$GITHUB_WORKSPACE/CallPill-macos.zip"
           unzip -l "$GITHUB_WORKSPACE/CallPill-macos.zip"
