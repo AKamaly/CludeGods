@@ -236,6 +236,15 @@ test('the checklist stays on top with workers until dismissed, keeping every key
   await ui.unmount()
 })
 
+test("Memory's seeded welcome page is no rule: the step stays open until a rule is written", async ($, on) => {
+  const w = makeWorld(on, { now: NOW, registry: TWO, files: { [`${CALL}/spaces/memory/welcome.md`]: '# About Memory\n' } })
+  w.dirs.set(`${CALL}/spaces/memory`, NOW)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await doneCount(ui)).toBe('1 of 3 done')
+  expect((await ui.find({ type: 'Text', text: '○ Memory rule' }))?.props.dimColor).toBe(true)
+  await ui.unmount()
+})
+
 test('a first run begun and not finished opens on Welcome; an upgrade with workers and no file does not', async ($, on) => {
   makeWorld(on, { now: NOW, registry: TWO, files: { [ONBOARDING]: JSON.stringify({ done: ['worker'] }) } })
   await start($)

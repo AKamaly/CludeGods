@@ -3767,10 +3767,15 @@ async function saveOnboarding(
   return undefined
 }
 
-/** Whether the Memory space holds a page: the Memory step, done without the button. */
+/**
+ * Whether the Memory space holds a rule: the Memory step, done without the button. The
+ * page Memory is seeded with (`welcome.md`, "About Memory") is no rule.
+ */
 async function memoryHasPage($: Host, p: Paths): Promise<boolean> {
   try {
-    return (await $.fs.list(p.memory)).some(e => e.kind === 'file' && e.name.endsWith('.md'))
+    return (await $.fs.list(p.memory)).some(
+      e => e.kind === 'file' && e.name.endsWith('.md') && e.name !== 'welcome.md' && !e.name.startsWith('.'),
+    )
   } catch {
     return false
   }
