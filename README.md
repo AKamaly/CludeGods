@@ -42,17 +42,10 @@ chats, each with a task box.
 files under `~/.voicemode/call/`. Speech to text and text to speech run locally; the
 transcript of what you say goes to Claude, the same as anything you type into the session.
 
-<div align="center">
+https://github.com/user-attachments/assets/f384d329-f26c-4d89-b912-9ed2e24fbf38
 
-<table><tr><td>
-
-<img src="docs/media/app-scene.jpg" alt="Claude desktop app with a chat, the Workers pane, and the call card" width="100%" />
-
-</td></tr></table>
-
-</div>
-
-_The chat, the Workers pane, and the call card, side by side in the Claude desktop app._
+_CludeGods in 54 seconds: a voice call with Claude, every step said out loud, a click to approve, a task for an
+always-on worker, and a worker on the call. Turn the sound on._
 
 The parts:
 
