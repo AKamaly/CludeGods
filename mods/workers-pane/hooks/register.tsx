@@ -1580,21 +1580,9 @@ export const register: Register = on => {
     return { text: 'Workers pane opened.' }
   })
 
-  // A card's clear layer (hooks/cardhit.ts) posts { select: key } when pressed.
-  on('ui.message', async ($, e, next) => {
-    const data = e.data as { select?: unknown } | null
-    if (e.module.endsWith('cardhit.ts') && data && typeof data.select === 'string') {
-      const key = data.select
-      await update($, selected, old => (old === key ? old : key))
-      return {}
-    }
-    return next(e)
-  })
-
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const ui = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Input?: any; Select?: any; Svg?: any }
     const { Box, Text, Button, Input, Select, Svg } = ui
-    const Client = (ui as { Client?: any }).Client
     // The terminal paints no alpha hex and draws no Svg; tints, icons and gods are for
     // the graphical surfaces.
     const isGraphical = e.surface !== 'terminal'
@@ -1660,15 +1648,6 @@ export const register: Register = on => {
 
     const select = (w: RegistryWorker) => update($, selected, old => (old === w.key ? old : w.key))
 
-    // A press anywhere on a card that isn't selected selects it: a clear Client layer over
-    // the whole card catches the press (hooks/cardhit.ts posts the key; the `ui.message` hook
-    // selects it). The selected card has no layer, so its buttons and fields work as usual.
-    const hitLayer = (w: RegistryWorker, isSelected: boolean) =>
-      Client && e.surface === 'desktop' && !isSelected ? (
-        <Box key={`hit-${w.key}`} position="absolute" top={0} left={0} right={0} bottom={0}>
-          <Client key={`hitc-${w.key}`} module="./cardhit.ts" props={{ k: w.key }} width="100%" height="100%" />
-        </Box>
-      ) : null
 
     const setTab = (w: RegistryWorker, tab: Panel) =>
       update($, panels, old => {
@@ -2282,8 +2261,8 @@ export const register: Register = on => {
     // An Input takes no flex props of its own: a growing column inside a full-width
     // row is what makes it span the pane as the pane widens.
     const fill = (child: RenderChildren) => (
-      <Box flexDirection="row" width="100%">
-        <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+      <Box flexDirection="row" width="100%" alignItems="stretch">
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} width="100%" alignItems="stretch">
           {child}
         </Box>
       </Box>
@@ -2539,6 +2518,7 @@ export const register: Register = on => {
           ? fill(
               <Input
                 key="nw-entry"
+                rows={2}
                 placeholder="Name, then what it does (optional)"
                 value={form.text}
                 submitLabel="create"
@@ -2594,11 +2574,14 @@ export const register: Register = on => {
         </Text>
       ) : null
 
+    // Text fields take rows={2}: the desktop stretches a multi-line field to the card's width,
+    // while a one-line field keeps a fixed width.
     const askField = (w: RegistryWorker) =>
       Input
         ? fill(
             <Input
               key={`task-${w.key}`}
+              rows={2}
               placeholder={`Ask ${w.name}…`}
               value={drafts.get(w.key) ?? ''}
               submitLabel="send"
@@ -2751,6 +2734,7 @@ export const register: Register = on => {
             ? fill(
                 <Input
                   key={`changenote-${w.key}-${item.id}`}
+                  rows={2}
                   placeholder="What should change?"
                   value={notes.get(item.id) ?? ''}
                   submitLabel="send"
@@ -3160,7 +3144,6 @@ export const register: Register = on => {
       return (
         <Box
           key={`card-${w.key}`}
-          position="relative"
           flexDirection="column"
           borderStyle="round"
           borderColor={isSelected ? th.accent : undefined}
@@ -3219,7 +3202,6 @@ export const register: Register = on => {
           {isSelected ? tabStrip(w, tab, th.accent, waiting) : null}
           {isSelected ? await tabBody(w, tab, th.accent, false) : null}
           {lastLine(w)}
-          {hitLayer(w, isSelected)}
         </Box>
       )
     }
@@ -3235,7 +3217,6 @@ export const register: Register = on => {
       return (
         <Box
           key={`row-${w.key}`}
-          position="relative"
           flexDirection="row"
           alignItems="center"
           gap="xs"
@@ -3257,7 +3238,6 @@ export const register: Register = on => {
               {status.text}
             </Text>
           </Box>
-          {hitLayer(w, isSelected)}
         </Box>
       )
     }
@@ -3581,6 +3561,7 @@ export const register: Register = on => {
             ? fill(
                 <Input
                   key="ask-all"
+                  rows={2}
                   placeholder={withChat === 1 ? 'Ask your worker…' : `Ask all ${withChat} workers…`}
                   value={drafts.get(ASK_ALL) ?? ''}
                   submitLabel="send"

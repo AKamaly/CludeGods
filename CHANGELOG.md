@@ -7,6 +7,14 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+### Fixed
+
+- Workers pane: the click-anywhere layer on cards is gone. In the desktop app it blocked hover
+  and swallowed clicks; a card is selected from its name, role line, status or any of its
+  actions, and only the selected card is highlighted.
+- Workers pane: the Ask, Ask all, Change and New worker fields stretch to the card's full
+  width (two-line fields; the desktop keeps a one-line field narrow).
+
 ## [0.5.0] - 2026-11-02
 
 ### Added
