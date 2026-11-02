@@ -172,7 +172,7 @@ export type EditValue = string | number | boolean | null | readonly EditValue[] 
  * `isTried` turns on once a create was attempted with an invalid name, so the
  * hint shows only after a failed try, never before typing. `god` is a god kind.
  */
-export type FormState = { isOpen: boolean; isValid: boolean; isTried: boolean; god: string; tools?: string }
+export type FormState = { isOpen: boolean; isValid: boolean; isTried: boolean; god: string; tools?: string; isBlank?: boolean }
 
 /**
  * A create the pane put in the prompt box. The pane writes the entry itself (`key`);
@@ -182,8 +182,75 @@ export type FormState = { isOpen: boolean; isValid: boolean; isTried: boolean; g
  */
 export type PendingCreate = { god: string; voice: string; tools: ToolsPreset; atMs: number; known: string[]; key?: string }
 
-/** What the pane body shows: the workers, or the Today digest across them. */
-export type PaneView = 'workers' | 'today'
+/**
+ * What the pane body shows: the workers, the Today digest across them, the Needs you
+ * list (everything waiting on the owner), or the Welcome view (first run).
+ */
+export type PaneView = 'workers' | 'today' | 'needs' | 'welcome'
+
+/** One check of `cludegods doctor --json`, as the CLI prints it. */
+export type DoctorCheck = {
+  id: string
+  label: string
+  ok: boolean
+  severity: 'error' | 'warn' | 'info'
+  detail: string
+  /** What `cludegods doctor --fix <id>` does, or null when there is no automatic fix. */
+  fix: string | null
+  /** The fix button's label ("Start it"), or null. */
+  fix_label: string | null
+}
+
+/** `cludegods doctor --json`: the install's health. */
+export type DoctorReport = { version: string; voice_installed: boolean; checks: DoctorCheck[] }
+
+/**
+ * The health strip's state. `isMissing`: the CLI is not installed (an older install), so
+ * the strip hides; so does a report that could not be read (`error`). `fixing` is the
+ * check id whose fix runs, '' for none.
+ */
+export type HealthState = {
+  report?: DoctorReport
+  isMissing: boolean
+  isChecking: boolean
+  fixing: string
+  error?: string
+}
+
+/** How many things wait on the owner, and a signature of them: the footer badge and the redraw trigger. */
+export type NeedsState = { n: number; sig: string }
+
+/** The Welcome view's Enable voice run: its state, the last line it printed, and a summary once it ended. */
+export type VoiceSetup = { state: 'idle' | 'running' | 'done' | 'failed'; line: string; summary: string; at: number }
+
+/** The first-run steps, as `~/.voicemode/call/onboarding.json` records them in `done`. */
+export type OnboardingStep = 'worker' | 'memory' | 'voice'
+
+/**
+ * `~/.voicemode/call/onboarding.json`: the steps done and whether the checklist was
+ * dismissed. The file may carry more keys; every one is kept on a write.
+ */
+export type Onboarding = { done: OnboardingStep[]; dismissed: boolean; exists: boolean; error?: string }
+
+/**
+ * One thing waiting on the owner, from one of four places: an outbox item that needs a
+ * yes, a permission request the call card shows, a scheduled wake that did not go
+ * through, or a health problem from `cludegods doctor`.
+ */
+export type NeedsItem =
+  | { kind: 'approval'; id: string; key: string; atMs: number }
+  | { kind: 'permit'; id: string; title: string; tool: string; short: string; sessionId: string; atMs: number }
+  | { kind: 'wake'; id: string; key: string; slot: string; retryAtMs: number; isRetrying: boolean; atMs: number }
+  | {
+      kind: 'health'
+      id: string
+      label: string
+      detail: string
+      severity: 'error' | 'warn'
+      fix: string | null
+      fixLabel: string | null
+      atMs: number
+    }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -220,6 +287,12 @@ declare module 'claude-code' {
       view: Shaped<PaneView>
       /** Outbox item id to true while its "What should change?" field is open. */
       changing: Shaped<Record<string, boolean>>
+      /** The health strip: the last `cludegods doctor --json`, and a fix in flight. */
+      health: Shaped<HealthState>
+      /** What waits on the owner across the four sources: the footer badge's count. */
+      needs: Shaped<NeedsState>
+      /** Enable voice, run from the Welcome view. */
+      voiceSetup: Shaped<VoiceSetup>
     }
   }
 }

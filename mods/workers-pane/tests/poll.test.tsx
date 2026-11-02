@@ -199,10 +199,12 @@ test('a worker created here gets the god, voice and tools it was made with, once
     props: { title: 'Workers', isFocused: true, bodyColumns: 46, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.press({ key: 'nw-god-herald' })
   await ui.input({ key: 'nw-entry', text: 'Herald, announcements' })
   // A second worker of an existing name is refused, and the existing one never touched.
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.input({ key: 'nw-entry', text: 'Sales, again' })
   await ui.unmount()
   // The pane wrote Herald's entry at once (one write), and nothing for the second Sales.

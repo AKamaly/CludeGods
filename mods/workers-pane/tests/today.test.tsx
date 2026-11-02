@@ -81,7 +81,8 @@ test('the digest: finished turns and notes since midnight, newest first; what wa
 test('Today: what waits across workers with its buttons, Ask all, and what each did today', async ($, on) => {
   const w = todayWorld(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ key: 'today' }))?.props.label).toBe('Today · 1')
+  expect((await ui.find({ key: 'today' }))?.props.label).toBe('Today')
+  expect((await ui.find({ key: 'needs' }))?.props.label).toBe('Needs you · 1')
   await ui.press({ key: 'today' })
   expect(await ui.find({ key: 'today-panel' })).toBeDefined()
   expect((await ui.find({ key: 'today' }))?.props.label).toBe('All workers')
@@ -89,8 +90,8 @@ test('Today: what waits across workers with its buttons, Ask all, and what each 
   // Ask all reaches the two workers with a chat.
   expect((await ui.find({ key: 'ask-all' }))?.props.placeholder).toBe('Ask all 2 workers…')
   expect(await ui.find({ type: 'Text', text: 'None wakes on its own: give one hours in its Settings.' })).toBeDefined()
-  // Needs your yes: the draft, with who drafted it, its subject, and its buttons.
-  expect(await ui.find({ type: 'Text', text: 'Needs your yes · 1' })).toBeDefined()
+  // Needs you: the draft, with who drafted it, its subject, and its buttons.
+  expect(await ui.find({ type: 'Text', text: 'Needs you · 1' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Alpha · draft · to events@example\.com · "Friday"/ })).toBeDefined()
   expect((await ui.findAll({ type: 'Svg' })).some(s => s.props.alt === 'Alpha' && s.props.width === 16)).toBe(true)
   for (const k of ['decline', 'change', 'approve']) expect(await ui.find({ key: `${k}-alpha-ob_000000000001` })).toBeDefined()
@@ -114,7 +115,7 @@ test('Today: what waits across workers with its buttons, Ask all, and what each 
     to: 'local_alpha',
     text: 'Approved in the Workers pane: a reply to the venue (ob_000000000001). Go ahead with exactly what the draft says, then report back.',
   })
-  expect(await ui.find({ type: 'Text', text: 'Nothing waits for you.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Nothing needs you\./ })).toBeDefined()
   expect((await ui.find({ key: 'today' }))?.props.label).toBe('All workers')
   await ui.press({ key: 'today' })
   expect(await ui.find({ key: 'card-alpha' })).toBeDefined()
@@ -200,20 +201,21 @@ test('New worker starts with the default tools from config.json; another pick ca
   const w = makeWorld(on, { now: NOW, registry: TWO, files: { [`${CALL}/config.json`]: JSON.stringify(config) } })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   const ringed = async () =>
     (await ui.findAll({ type: 'Box' })).filter(b => b.key?.startsWith('nw-tools-tile-') && b.props.borderColor !== undefined).map(b => b.key)
   expect(await ringed()).toEqual(['nw-tools-tile-drafts'])
   expect((await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('nw-tools-')).map(b => b.props.label)).toEqual([
-    'Full access', 'Drafts only', 'Read only',
+    'Can do anything', 'Can draft', 'Can read',
   ])
-  expect(await ui.find({ type: 'Text', text: /· drafts only\. Change both later/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /· can draft\. Change both later/ })).toBeDefined()
   expect(await ui.find({ key: 'nw-default' })).toBeUndefined()
 
   await ui.press({ key: 'nw-tools-read' })
   expect(await ringed()).toEqual(['nw-tools-tile-read'])
   await ui.press({ key: 'nw-default' })
   expect(JSON.parse(w.files.get(`${CALL}/config.json`)!.text)).toEqual({ ...config, workers: { default_tools: 'read' } })
-  expect(w.toasts.at(-1)).toBe('New workers now start with read only')
+  expect(w.toasts.at(-1)).toBe('New workers now start with "Can read"')
   expect(await ui.find({ key: 'nw-default' })).toBeUndefined()
 
   await ui.input({ key: 'nw-entry', text: 'Reader, reads things' })
@@ -226,7 +228,8 @@ test('a config.json that is not JSON means the defaults, and is never overwritte
   const w = makeWorld(on, { now: NOW, registry: TWO, files: { [`${CALL}/config.json`]: '{ "user_label": "Bo' } })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
-  expect(await ui.find({ type: 'Text', text: /· full access\. Change both later/ })).toBeDefined()
+  await ui.press({ key: 'nw-blank' })
+  expect(await ui.find({ type: 'Text', text: /· can do anything\. Change both later/ })).toBeDefined()
   await ui.press({ key: 'nw-tools-drafts' })
   await ui.press({ key: 'nw-default' })
   expect(w.files.get(`${CALL}/config.json`)!.text).toBe('{ "user_label": "Bo')
@@ -237,8 +240,10 @@ test('a config.json that is not JSON means the defaults, and is never overwritte
 test('create: the card shows at once, selected; a name in use is refused; the first worker starts the registry', async ($, on) => {
   const w = makeWorld(on, { now: NOW })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /^No workers yet/ })).toBeDefined()
-  await ui.press({ key: 'new-worker' })
+  // No workers: the pane opens on Welcome, whose first step opens the picker.
+  expect(await ui.find({ type: 'Text', text: 'Welcome to CludeGods' })).toBeDefined()
+  await ui.press({ key: 'welcome-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.input({ key: 'nw-entry', text: 'Scribe, drafts the notes' })
   expect(w.runs.some(r => r.argv.join(' ') === `/bin/mkdir -p ${CALL}`)).toBe(true)
   expect(JSON.parse(w.files.get(REG)!.text)).toEqual({
@@ -250,6 +255,7 @@ test('create: the card shows at once, selected; a name in use is refused; the fi
   expect(w.toasts.at(-1)).toBe("Press Enter to start Scribe's chat")
 
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.input({ key: 'nw-entry', text: 'scribe, again' })
   expect(registryOf(w).workers).toHaveLength(1)
   expect(w.prompts).toHaveLength(1)
@@ -261,6 +267,7 @@ test('a registry that is not JSON is never overwritten by a create', async ($, o
   const w = makeWorld(on, { now: NOW, files: { [REG]: '{"workers": [' } })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.input({ key: 'nw-entry', text: 'Scribe' })
   expect(w.files.get(REG)!.text).toBe('{"workers": [')
   expect(w.prompts).toEqual([])
@@ -292,6 +299,7 @@ test('a create an older call session registers a second time is folded into the 
   const w = makeWorld(on, { now: NOW, registry: { workers: [TWO.workers[0]] } })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.press({ key: 'nw-god-herald' })
   await ui.input({ key: 'nw-entry', text: 'Herald, announcements' })
   await ui.unmount()

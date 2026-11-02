@@ -20,6 +20,24 @@ import {
 } from './self'
 import { startOfDay, todayEntries } from './today'
 import type { TodayEntry } from './today'
+import { STEPS, STEP_LABEL, parseOnboarding, progress, progressLabel, showsChecklist, withOnboarding } from './onboarding'
+import { TEMPLATES, freeName, templateEntry } from './templates'
+import type { WorkerTemplate } from './templates'
+import {
+  HEALTH_GROUPS,
+  PERMIT_FRESH_MS,
+  WAKE_FRESH_MS,
+  groupState,
+  needsBadge,
+  needsItems,
+  needsSig,
+  parseDoctor,
+  parsePermit,
+  problems,
+  slotTime,
+  wakeOf,
+} from './needs'
+import type { GroupState, PermitRecord } from './needs'
 import {
   ALL_DAY,
   END_OF_DAY,
@@ -31,6 +49,7 @@ import {
   fromOptions,
   scheduleMode,
   scheduleSentence,
+  shortTime,
   timeOptions,
   toOptions,
 } from './schedule'
@@ -40,6 +59,11 @@ import type {
   Decision,
   EditValue,
   FormState,
+  HealthState,
+  NeedsItem,
+  NeedsState,
+  Onboarding,
+  OnboardingStep,
   OutboxItem,
   PaneView,
   Panel,
@@ -51,6 +75,7 @@ import type {
   Schedule,
   SentTask,
   ToolsPreset,
+  VoiceSetup,
   WorkerState,
   WorkerStatus,
 } from '../types'
@@ -70,6 +95,9 @@ export {
 export { parseConfig, withDefaultTools } from './config'
 export { keyFor, liveState, markerKey, parseRuns, parseState, runLine, standbyPrompt, whoAmI } from './self'
 export { runLabel, startOfDay, todayEntries } from './today'
+export { parseOnboarding, progress, progressLabel, showsChecklist, withOnboarding } from './onboarding'
+export { TEMPLATES, freeName, outboxRules, templateCharter, templateEntry } from './templates'
+export { groupOf, groupState, needsBadge, needsItems, needsSig, parseDoctor, parsePermit, problems, slotTime, wakeOf } from './needs'
 
 // The pane draws one card per worker (the launch film's card) while it is narrow; once
 // it is expanded to WIDE_AT columns or more, a list of compact rows beside the selected
@@ -115,6 +143,14 @@ export { runLabel, startOfDay, todayEntries } from './today'
 // The Today view lists what every worker did since midnight and what waits for a yes,
 // with Ask all. A waiting item can be approved, declined, or sent back with "Change":
 // a note to the worker saying what to revise (`changes` in the decisions file).
+//
+// v0.5, the two-minute start. With no workers (or a first run not finished) the pane
+// opens on Welcome: three one-click steps (a worker from a template, a Memory rule, a
+// voice call) and a "1 of 3 done" checklist kept in onboarding.json. + New worker offers
+// six ready-made workers before the blank form (./templates). "Needs you" is one list of
+// everything waiting on the owner across four sources (./needs), with its action on each
+// row, and its count on the footer launcher. A health strip reads `cludegods doctor
+// --json` (at most once a minute while the pane shows) and runs `doctor --fix <id>`.
 
 type Paths = {
   home: string
@@ -131,6 +167,17 @@ type Paths = {
   config: string
   status: string
   runs: string
+  onboarding: string
+  openSpaces: string
+  memory: string
+  permit: string
+  /** The `cludegods` CLI: doctor and setup. */
+  cli: string
+  /** The call plumbing (`call focus`), its live-call marker, and who the call is with. */
+  call: string
+  callSession: string
+  focus: string
+  pill: string
 }
 
 // The minimal surface of `$` the helpers below take, typed loosely so a helper can
@@ -144,9 +191,24 @@ type Host = {
     list: (path?: string) => Promise<readonly { name: string; kind: string }[]>
   }
   process: {
-    run: (argv: readonly string[]) => Promise<{ exitCode: number; stdout: string; stderr: string }>
+    run: (
+      argv: readonly string[],
+      init?: { stdin?: string; timeoutMs?: number },
+    ) => Promise<{ exitCode: number; stdout: string; stderr: string }>
   }
 }
+
+// What the health, voice-setup and onboarding helpers take: the helpers' `$`, plus the
+// clock, toasts, the state atoms and, where the host has it, a streaming spawn.
+type SpawnStream = {
+  next: () => Promise<{ done?: boolean; value: { stream?: string; text?: string; code?: number | null } | undefined }>
+}
+type Eng = Parameters<typeof update>[0] &
+  Host & {
+    clock: { now: () => Promise<number> }
+    ui: { toast: (text: string) => unknown }
+    process: Host['process'] & { spawn: (request: { argv: readonly string[] }) => SpawnStream }
+  }
 
 async function paths($: Host): Promise<Paths> {
   let home = ''
@@ -173,6 +235,15 @@ async function paths($: Host): Promise<Paths> {
     config: `${call}/config.json`,
     status: `${call}/status`,
     runs: `${call}/runs`,
+    onboarding: `${call}/onboarding.json`,
+    openSpaces: `${call}/open-spaces`,
+    memory: `${call}/spaces/memory`,
+    permit: `${call}/permit`,
+    cli: `${bin}/cludegods`,
+    call: `${bin}/call`,
+    callSession: `${call}/session`,
+    focus: `${call}/focus`,
+    pill: `${bin}/CallPill.app`,
   }
 }
 
@@ -190,6 +261,15 @@ const CLAIM_STALE_MS = 10 * 60_000 // a claim with no result this old: its pane 
 const CLAIM_LOOK_MS = 60_000 // how soon a claim held elsewhere, with no result yet, is looked at again
 const RUNS_TAIL_BYTES = 131_072 // the Today view reads this much of each worker's runs file
 const TODAY_ITEMS = 30
+const HEALTH_EVERY_MS = 60_000 // the health strip's refresh while the pane shows
+const HEALTH_IDLE_MS = 10 * 60_000 // and while it does not (the footer badge still counts problems)
+const DOCTOR_TIMEOUT_MS = 60_000
+const FIX_TIMEOUT_MS = 5 * 60_000
+const SETUP_TIMEOUT_MS = 10 * 60_000 // Enable voice without a stream: the longest a run may take
+const NO_REGISTRY = 'No workers.json yet'
+/** The Welcome view's one sentence. */
+export const WELCOME_LINE =
+  'CludeGods puts a voice and always-on workers into Claude Code: standing chats that work on their own hours and wait for your yes before anything goes out.'
 
 const PANE = 'workers'
 const COLUMNS = 46
@@ -279,12 +359,13 @@ export const VOICES = [
 ] as const
 const VOICE_HINT: Record<string, string> = { af: 'US, female', bf: 'UK, female', am: 'US, male', bm: 'UK, male' }
 
+// What a worker may do, in plain words; the values stay read, drafts and full.
 const TOOL_PRESETS: readonly { value: ToolsPreset; label: string; about: string }[] = [
-  { value: 'read', label: 'Read only', about: 'Reads files and the web. Writes nothing.' },
-  { value: 'drafts', label: 'Drafts only', about: 'Reads, and writes drafts under ~/.voicemode/call only.' },
-  { value: 'full', label: 'Full access', about: 'No guard: anything this Mac lets Claude Code do.' },
+  { value: 'read', label: 'Can read', about: 'Reads files and the web. Changes nothing.' },
+  { value: 'drafts', label: 'Can draft', about: 'Reads, and writes drafts for your yes under ~/.voicemode/call. Sends nothing.' },
+  { value: 'full', label: 'Can do anything', about: 'No guard: anything this Mac lets Claude Code do.' },
 ]
-const TOOLS_SHORT: Record<ToolsPreset, string> = { full: 'full access', drafts: 'drafts only', read: 'read only' }
+const TOOLS_SHORT: Record<ToolsPreset, string> = { full: 'can do anything', drafts: 'can draft', read: 'can read' }
 
 const DAY_PRESETS: readonly { value: string; label: string }[] = [
   { value: 'mon-fri', label: 'Mon to Fri' },
@@ -296,7 +377,7 @@ const DAY_PRESETS: readonly { value: string; label: string }[] = [
 
 /** The Hours control's modes: no schedule, once a day, or every N hours. */
 const MODES: readonly { value: string; label: string }[] = [
-  { value: 'off', label: 'Manual, no schedule' },
+  { value: 'off', label: 'Only when you ask' },
   { value: 'daily', label: 'Once a day' },
   ...EVERY_HOURS.map(n => ({ value: `${n}h`, label: `Every ${n}h` })),
 ]
@@ -331,6 +412,17 @@ const view = atom({ plugin: 'workers-pane', key: 'view' } as const, 'workers' as
 const changing = atom({ plugin: 'workers-pane', key: 'changing' } as const, {} as Record<string, boolean>, {
   shape: 'changing-1',
 })
+const health = atom(
+  { plugin: 'workers-pane', key: 'health' } as const,
+  { isMissing: false, isChecking: false, fixing: '' } as HealthState,
+  { shape: 'health-1' },
+)
+const needs = atom({ plugin: 'workers-pane', key: 'needs' } as const, { n: 0, sig: '' } as NeedsState, { shape: 'needs-1' })
+const voiceSetup = atom(
+  { plugin: 'workers-pane', key: 'voiceSetup' } as const,
+  { state: 'idle', line: '', summary: '', at: 0 } as VoiceSetup,
+  { shape: 'voice-setup-1' },
+)
 
 type Snapshot = {
   workers: RegistryWorker[]
@@ -485,7 +577,7 @@ async function readRegistry($: Host, p: Paths): Promise<{ workers: RegistryWorke
   try {
     raw = await $.fs.read(p.registry)
   } catch {
-    return { workers: [], error: 'No workers.json yet' }
+    return { workers: [], error: NO_REGISTRY }
   }
   try {
     const parsed = JSON.parse(String(raw)) as { workers?: unknown }
@@ -894,9 +986,13 @@ export function badge(items: readonly OutboxItem[], decided: Readonly<Record<str
   return n === 0 ? '' : n === 1 ? '1 draft' : `${n} drafts`
 }
 
-/** The outbox chip: "Outbox · 2" (what waits for a yes), or "Hide outbox" while open. */
+/**
+ * The card's outbox chip: "Needs you · 2" while items wait for a yes, "Outbox" (the
+ * history) with none, or "Hide outbox" while open.
+ */
 export function outboxLabel(waiting: number, isOpen: boolean): string {
-  return isOpen ? 'Hide outbox' : `Outbox · ${waiting}`
+  if (isOpen) return 'Hide outbox'
+  return waiting > 0 ? `Needs you · ${waiting}` : 'Outbox'
 }
 
 /** The spoken heads-up for one new outbox item: "Inbox drafted a reply to Jordan". */
@@ -1168,6 +1264,11 @@ export const register: Register = on => {
   // The running turn's report, so its end can say when it started and what it was asked.
   let turnState: WorkerState | undefined
   const madeDirs = new Set<string>()
+  // The first poll may open the pane on Welcome (a first run not finished); later ones never.
+  let isFirstLook = true
+
+  // When the doctor last ran here, and whether it runs now (./needs; checkHealth below).
+  const doctor: DoctorClock = { at: -Infinity, isChecking: false }
 
   // Inside a worker's own chat: each main-loop turn's start and end, reported.
   on('turn.start', async ($, e, next) => {
@@ -1252,6 +1353,15 @@ export const register: Register = on => {
         // no flag yet
       }
       const snap = await snapshot($ as unknown as Host, p, cache, now)
+      // A first run not finished (onboarding.json says it began) opens on Welcome.
+      if (isFirstLook && (!snap.error || snap.error === NO_REGISTRY)) {
+        isFirstLook = false
+        const ob = await readOnboarding($ as unknown as Host, p)
+        const seen = { worker: snap.workers.length > 0, memory: await memoryHasPage($ as unknown as Host, p) }
+        if (ob.exists && showsChecklist(ob, progress(ob, seen).isFinished)) {
+          await update($, view, old => (old === 'welcome' ? old : 'welcome'))
+        }
+      }
       // A pick whose write never settled (the module reloaded mid-write) gives way to
       // the registry after EDIT_TTL_MS.
       await update($, edits, old => {
@@ -1274,6 +1384,16 @@ export const register: Register = on => {
       const sig = signature(snap, watched)
       await update($, roster, old => (old === sig ? old : sig))
       await syncShown($)
+      // The health strip's doctor, then Needs you: the footer badge's count, and what
+      // redraws the pane when a permission request or a failed wake comes or goes.
+      const isShown = await read($, paneShown).catch(() => false)
+      if (now - doctor.at >= (isShown ? HEALTH_EVERY_MS : HEALTH_IDLE_MS)) void checkHealth($ as unknown as Eng, p, doctor, false)
+      if (!snap.error || snap.error === NO_REGISTRY) {
+        const report = (await read($, health).catch(() => ({}) as Partial<HealthState>)).report
+        const items = await gatherNeeds($ as unknown as Host, p, snap.workers, snap, report, now)
+        const counted = { n: items.length, sig: needsSig(items) }
+        await update($, needs, old => (old.n === counted.n && old.sig === counted.sig ? old : counted))
+      }
       // One poll at a time: a slow process.run must not let an older snapshot run last.
       if (isPolling) return
       isPolling = true
@@ -1369,7 +1489,7 @@ export const register: Register = on => {
         }
         await update($, sent, old => ({
           ...old,
-          [w.key]: { text: w.charter ? 'Scheduled run of its charter' : 'Scheduled check-in', atMs: now, isDelivered, reason },
+          [w.key]: { text: w.charter ? 'Scheduled run of its instructions' : 'Scheduled check-in', atMs: now, isDelivered, reason },
         }))
         $.ui.toast(isDelivered ? `${w.name} woke for its scheduled run` : `${w.name} didn't wake, retrying in 10 min: ${reason ?? 'not delivered'}`)
       }
@@ -1483,6 +1603,9 @@ export const register: Register = on => {
     const picks = await read($, edits)
     const shownView = await read($, view)
     const asking = await read($, changing)
+    const healthNow = await read($, health)
+    const setup = await read($, voiceSetup)
+    await read($, needs) // subscribe: a permission request or a failed wake redraws the pane
 
     const refresh = () => update($, rev, n => n + 1)
 
@@ -1492,6 +1615,19 @@ export const register: Register = on => {
     // The selected worker: the one last picked, else the first.
     const current = live.find(w => w.key === picked) ?? live[0]
     const tabOf = (w: RegistryWorker): Panel => (w.key === current?.key ? (open[w.key] ?? 'overview') : 'overview')
+
+    // First run: the checklist stays at the top until its three steps are done (recorded,
+    // or seen: a worker, a Memory page) or it is dismissed; with no workers yet the pane
+    // opens on Welcome.
+    const ob = await readOnboarding($ as unknown as Host, p)
+    const prog = progress(ob, { worker: live.length > 0, memory: await memoryHasPage($ as unknown as Host, p) })
+    const hasChecklist = showsChecklist(ob, prog.isFinished)
+    const canWelcome = !snap.error || snap.error === NO_REGISTRY
+    const isWelcome = shownView === 'welcome' || (shownView === 'workers' && live.length === 0 && canWelcome && hasChecklist)
+    const isNeeds = shownView === 'needs'
+    // Needs you: everything waiting on the owner, with its action on each row.
+    const needItems = await gatherNeeds($ as unknown as Host, p, live, snap, healthNow.report, now)
+    const focusKey = ((await readText($ as unknown as Host, p.focus)) ?? '').trim()
 
     const icon = (name: IconName, color = SUB, size = 13, key?: string) =>
       Svg && isGraphical ? <Svg key={key} source={iconSvg(name, color, size)} alt={name} width={size} height={size} /> : null
@@ -1644,8 +1780,8 @@ export const register: Register = on => {
         return
       }
       const result = await $.session.send({ to: w.session, text: wakeText(w, 'Run now, from the Workers pane') })
-      const entry = await record(w, w.charter ? 'Run its charter now' : 'Check in now', result)
-      const doing = w.charter ? 'is running its charter' : 'is checking in'
+      const entry = await record(w, w.charter ? 'Run its instructions now' : 'Check in now', result)
+      const doing = w.charter ? 'is running its instructions' : 'is checking in'
       $.ui.toast(entry.isDelivered ? `${w.name} ${doing}` : `${w.name} didn't get it: ${entry.reason ?? 'not delivered'}`)
     }
 
@@ -1882,7 +2018,8 @@ export const register: Register = on => {
       update($, formState, old => {
         const nextState = { ...old, ...patchForm }
         return nextState.isOpen === old.isOpen && nextState.isValid === old.isValid &&
-          nextState.isTried === old.isTried && nextState.god === old.god && nextState.tools === old.tools
+          nextState.isTried === old.isTried && nextState.god === old.god && nextState.tools === old.tools &&
+          nextState.isBlank === old.isBlank
           ? old
           : nextState
       })
@@ -1894,8 +2031,11 @@ export const register: Register = on => {
 
     const closeForm = async () => {
       form.text = ''
-      await setForm({ isOpen: false, isValid: false, isTried: false })
+      await setForm({ isOpen: false, isValid: false, isTried: false, isBlank: false })
     }
+
+    // + New worker opens the template picker; Blank worker opens the one-line form.
+    const openPicker = () => setForm({ isOpen: true, isBlank: false })
 
     // Create: the pane writes the worker's entry at once (its card shows, "No chat yet"),
     // then puts the request to start its chat in the prompt box. The app starts a new
@@ -1915,6 +2055,20 @@ export const register: Register = on => {
         $.ui.toast(`There is already a worker named ${clash.name}. Pick another name.`)
         return
       }
+      await addAndStart({ name, role, god, tools })
+    }
+
+    // Writes the worker's entry (its card shows, selected, "No chat yet"), then puts the
+    // request to start its chat in the prompt box: the person's own Enter starts it.
+    // `extra` is what a template adds: its voice, hours and instructions.
+    const addAndStart = async (f: {
+      name: string
+      role: string
+      god: GodKind
+      tools: ToolsPreset
+      extra?: (key: string) => Record<string, unknown>
+    }): Promise<boolean> => {
+      const { name, role, god, tools } = f
       const at = await $.clock.now()
       let key = ''
       let known: string[] = []
@@ -1924,13 +2078,14 @@ export const register: Register = on => {
           key = keyFor(name, keys)
           return {
             key, name, ...(role ? { role } : {}), god, avatar: GOD_AVATAR[god], voice: DEFAULT_VOICE[god], tools,
+            ...(f.extra ? f.extra(key) : {}),
             created: new Date(at).toISOString(),
           }
         }),
       )
       if (err || !key) {
         $.ui.toast(`Couldn't add ${name}: ${err ?? 'no key'}`)
-        return
+        return false
       }
       await update($, pending, old => ({ ...old, [name]: { god, voice: DEFAULT_VOICE[god], tools, atMs: at, known, key } }))
       await update($, selected, () => key)
@@ -1939,6 +2094,147 @@ export const register: Register = on => {
       await closeForm()
       const filled = await $.prompt.fill({ text: createText({ name, role, god, tools, key }), mode: 'replace' }).catch(() => ({ isFilled: false }))
       $.ui.toast(filled.isFilled ? `Press Enter to start ${name}'s chat` : `${name} is added. Press Start chat on its card to start its chat.`)
+      await markStep('worker', true)
+      return true
+    }
+
+    // A template: one click makes the worker (its own name, or "<name> 2" when that one is
+    // taken), with its hours in this Mac's zone and its instructions; then the same Enter.
+    const createFromTemplate = async (t: WorkerTemplate) => {
+      const name = freeName(t.name, live.map(w => w.name))
+      const tools = snap.defaultTools
+      const tz = defaultTz(snap.workers)
+      await addAndStart({
+        name,
+        role: t.role,
+        god: t.god,
+        tools,
+        extra: key => {
+          const { name: _n, role: _r, god: _g, tools: _t, ...rest } = templateEntry(t, { key, name, tz, tools })
+          return rest
+        },
+      })
+    }
+
+    // First-run steps: recorded in onboarding.json (every other key kept). A file that
+    // is not JSON is never overwritten; `isQuiet` keeps that from toasting over a create.
+    const markStep = async (step: OnboardingStep, isQuiet = false) => {
+      if (ob.done.includes(step) && !ob.error) return
+      const err = await saveOnboarding($ as unknown as Host, p, { done: step })
+      if (err && !isQuiet) $.ui.toast(`Couldn't save your progress: ${err}`)
+      await refresh()
+    }
+    const dismissOnboarding = async () => {
+      const err = await saveOnboarding($ as unknown as Host, p, { dismissed: true })
+      if (err) {
+        $.ui.toast(`Couldn't hide it: ${err}`)
+        return
+      }
+      await update($, view, old => (old === 'welcome' ? 'workers' : old))
+      await refresh()
+    }
+    const showView = (v: PaneView) => update($, view, old => (old === v ? old : v))
+    const toggleView = (v: PaneView) => update($, view, old => (old === v ? 'workers' : v))
+
+    // Write your first Memory rule: the Spaces pane opens Memory on a new page.
+    const writeMemoryRule = async () => {
+      const at = await $.clock.now()
+      try {
+        await ensureDir($ as unknown as Host, madeDirs, p.openSpaces.slice(0, p.openSpaces.lastIndexOf('/')))
+        await $.fs.write(p.openSpaces, JSON.stringify({ at, space: 'memory', action: 'new-page' }))
+      } catch (err) {
+        $.ui.toast(`Couldn't open Memory: ${String(err)}`)
+        return
+      }
+      await markStep('memory')
+      $.ui.toast('Memory opens in the Spaces pane. Write one rule every worker should follow.')
+    }
+
+    // Try a voice call: /gods in the prompt box, for the person's own Enter.
+    const startCall = async () => {
+      const filled = await $.prompt.fill({ text: '/gods', mode: 'replace' }).catch(() => ({ isFilled: false }))
+      if (!filled.isFilled) {
+        $.ui.toast('Type /gods in the prompt box to start a call')
+        return
+      }
+      await markStep('voice')
+      $.ui.toast('Press Enter to start the call')
+    }
+
+    // Talk to <name>: during a live call, put the worker on it (`call focus`); with no
+    // call, /gods goes in the prompt box first.
+    const talkTo = async (w: RegistryWorker) => {
+      const isOn = ((await readText($ as unknown as Host, p.focus)) ?? '').trim() === w.key
+      const isLive = await $.fs.stat(p.callSession).then(
+        () => true,
+        () => false,
+      )
+      if (!isLive) {
+        const filled = await $.prompt.fill({ text: '/gods', mode: 'replace' }).catch(() => ({ isFilled: false }))
+        $.ui.toast(
+          filled.isFilled
+            ? `Press Enter to start a call, then Talk to ${w.name} again`
+            : `Start a call with /gods, then press Talk to ${w.name}`,
+        )
+        return
+      }
+      let r: { exitCode: number; stdout: string; stderr: string }
+      try {
+        r = await $.process.run([p.call, 'focus', isOn ? 'clear' : w.key])
+      } catch (err) {
+        r = { exitCode: 1, stdout: '', stderr: String(err) }
+      }
+      if (r.exitCode !== 0) {
+        $.ui.toast(`Couldn't put ${w.name} on the call: ${tailLine(r.stderr) || `exit ${r.exitCode}`}`)
+        return
+      }
+      $.ui.toast(isOn ? 'The call is back with Claude' : `${w.name} is on the call. Say "back to you" to return.`)
+      await refresh()
+    }
+
+    // A permission request: only a click on the call card answers it. Open goes to the
+    // chat that asked when it is a worker's, else brings the call card forward.
+    const openPermit = async (it: Extract<NeedsItem, { kind: 'permit' }>) => {
+      const w = live.find(x => x.session && it.sessionId && transcriptName(x.transcript) === `${it.sessionId}.jsonl`)
+      if (w) {
+        await openChat(w)
+        return
+      }
+      const hasPill = await $.fs.stat(p.pill).then(
+        () => true,
+        () => false,
+      )
+      if (hasPill) await $.process.run(['open', p.pill]).catch(() => undefined)
+      $.ui.toast('Answer it on the call card: Allow or Deny there.')
+    }
+
+    // A wake that did not go through: sent again now. Once delivered, its claim holds a
+    // result (so no pane sends it again) and its retry file goes.
+    const retryWake = async (it: Extract<NeedsItem, { kind: 'wake' }>) => {
+      const w = live.find(x => x.key === it.key)
+      if (!w) return
+      if (!w.session) {
+        $.ui.toast(`${w.name} has no chat yet`)
+        return
+      }
+      let result: { isDelivered?: boolean; reason?: string }
+      try {
+        result = await $.session.send({ to: w.session, text: wakeText(w, 'Retry of a missed run, from the Workers pane') })
+      } catch (err) {
+        result = { isDelivered: false, reason: String(err) }
+      }
+      const entry = await record(w, w.charter ? 'Run its instructions now' : 'Check in now', result)
+      if (!entry.isDelivered) {
+        $.ui.toast(`${w.name} didn't get it: ${entry.reason ?? 'not delivered'}`)
+        return
+      }
+      const claim = `${p.wakes}/${it.id}`
+      const at = await $.clock.now()
+      await $.process.run(['/bin/mkdir', '-p', claim]).catch(() => undefined)
+      await $.fs.write(`${claim}/result.json`, JSON.stringify({ at, isDelivered: true, via: 'retry' })).catch(() => undefined)
+      await $.process.run(['/bin/rm', '-f', `${p.wakes}/${it.id}.retry`]).catch(() => undefined)
+      $.ui.toast(`${w.name} ${w.charter ? 'is running its instructions' : 'is checking in'}`)
+      await refresh()
     }
 
     // "Make it the default": config.json's workers.default_tools, every other key kept.
@@ -1955,7 +2251,7 @@ export const register: Register = on => {
         return
       }
       await refresh()
-      $.ui.toast(`New workers now start with ${TOOLS_SHORT[tools]}`)
+      $.ui.toast(`New workers now start with "${TOOL_PRESETS.find(t => t.value === tools)?.label ?? tools}"`)
     }
 
     // An Input takes no flex props of its own: a growing column inside a full-width
@@ -2017,13 +2313,12 @@ export const register: Register = on => {
     const formTools: ToolsPreset = isPreset(fs.tools) ? fs.tools : snap.defaultTools
     const formAccent = GOD_ACCENT[formGod]
     const showHint = fs.isTried && !fs.isValid
-    const waitingAll = live.reduce((n, w) => n + awaiting(snap.outbox[w.key] ?? [], snap.decided[w.key] ?? {}).length, 0)
     const isToday = shownView === 'today'
 
     // The header's dot carries the selected worker's colour.
     const headAccent = current ? GOD_ACCENT[godOf(current)] : ACCENT
     const header = (
-      <Box key="header" flexDirection="row" justifyContent="space-between" alignItems="center" width="100%">
+      <Box key="header" flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" rowGap="xs" width="100%">
         <Box flexDirection="row" gap="xs" alignItems="center">
           <Text key="header-dot" color={headAccent}>●</Text>
           <Text bold>Workers</Text>
@@ -2033,23 +2328,167 @@ export const register: Register = on => {
         </Box>
         <Box flexDirection="row" gap="xs" alignItems="center">
           <Button
+            key="needs"
+            label={isNeeds ? 'All workers' : needItems.length > 0 ? `Needs you · ${needItems.length}` : 'Needs you'}
+            variant={needItems.length > 0 && !isNeeds ? 'primary' : 'secondary'}
+            onPress={() => void toggleView('needs')}
+          />
+          <Button
             key="today"
-            label={isToday ? 'All workers' : waitingAll > 0 ? `Today · ${waitingAll}` : 'Today'}
+            label={isToday ? 'All workers' : 'Today'}
             variant="secondary"
-            onPress={() => void update($, view, old => (old === 'today' ? 'workers' : 'today'))}
+            onPress={() => void toggleView('today')}
           />
           <Button
             key="new-worker"
             label="+ New worker"
             variant={fs.isOpen ? 'secondary' : 'primary'}
             dimColor={fs.isOpen}
-            onPress={() => void setForm({ isOpen: true })}
+            onPress={() => void openPicker()}
           />
         </Box>
       </Box>
     )
 
-    const newForm = fs.isOpen ? (
+    // The health strip: one dot per part (Voice, Listening, Workers), and each red or
+    // amber check with its fix. Hidden without the doctor (an older install).
+    const DOT: Record<GroupState, { glyph: string; color?: string }> = {
+      ok: { glyph: '●', color: GREEN },
+      warn: { glyph: '●', color: AMBER },
+      error: { glyph: '●', color: RED },
+      off: { glyph: '○' },
+      none: { glyph: '○' },
+    }
+    const report = healthNow.isMissing ? undefined : healthNow.report
+    const bad = problems(report)
+    const healthStrip = report ? (
+      <Box key="health" flexDirection="column" gap="xs" width="100%">
+        <Box key="health-strip" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap="sm" width="100%">
+          {HEALTH_GROUPS.filter(g => g.id !== 'setup' || groupState(report, 'setup') !== 'none').map(g => {
+            const st = groupState(report, g.id)
+            return (
+              <Box key={`health-group-${g.id}`} flexDirection="row" alignItems="center" gap="xs">
+                <Text size="caption" dimColor>{st === 'off' ? `${g.label} off` : g.label}</Text>
+                <Text key={`health-${g.id}`} size="caption" color={DOT[st].color} dimColor={DOT[st].color === undefined}>
+                  {DOT[st].glyph}
+                </Text>
+              </Box>
+            )
+          })}
+          <Box flexGrow={1} />
+          <Button
+            key="health-check"
+            label={healthNow.isChecking ? 'Checking…' : 'Check'}
+            plain
+            dimColor
+            onPress={() => void checkHealth($ as unknown as Eng, p, doctor, true)}
+          />
+        </Box>
+        {bad.map(c => (
+          <Box key={`health-row-${c.id}`} flexDirection="row" alignItems="center" gap="xs" width="100%">
+            <Text size="caption" color={c.severity === 'error' ? RED : AMBER}>▲</Text>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text size="caption" wrap="truncate-end">{c.detail ? `${c.label}: ${c.detail}` : c.label}</Text>
+            </Box>
+            {c.fix ? (
+              healthNow.fixing === c.id ? (
+                <Text dimColor size="caption">Fixing…</Text>
+              ) : (
+                <Button
+                  key={`health-fix-${c.id}`}
+                  label={c.fix_label ?? 'Fix'}
+                  variant="secondary"
+                  onPress={() => void fixCheck($ as unknown as Eng, p, doctor, c)}
+                />
+              )
+            ) : null}
+          </Box>
+        ))}
+      </Box>
+    ) : null
+
+    // Getting started: "1 of 3 done", until every step is done or it is dismissed.
+    const checklist = hasChecklist ? (
+      <Box
+        key="onboarding"
+        flexDirection="row"
+        flexWrap="wrap"
+        alignItems="center"
+        columnGap="sm"
+        borderStyle="round"
+        borderColor={tint(ACCENT, 0.5)}
+        backgroundColor={isGraphical ? tint(ACCENT, 0.05) : undefined}
+        paddingX="sm"
+        width="100%"
+      >
+        <Text bold size="footnote">Getting started</Text>
+        <Text key="onboarding-count" dimColor size="caption">{progressLabel(prog.count, prog.total)}</Text>
+        {STEPS.map(step => {
+          const isDone = prog.done.includes(step)
+          return (
+            <Text key={`onboarding-step-${step}`} size="caption" color={isDone ? GREEN : undefined} dimColor={!isDone}>
+              {`${isDone ? '✓' : '○'} ${STEP_LABEL[step]}`}
+            </Text>
+          )
+        })}
+        <Box flexGrow={1} />
+        {!isWelcome ? <Button key="onboarding-show" label="Show" plain onPress={() => void showView('welcome')} /> : null}
+        <Button key="onboarding-dismiss" label="Dismiss" plain dimColor onPress={() => void dismissOnboarding()} />
+      </Box>
+    ) : null
+
+    // + New worker: the six ready-made workers first, Blank worker last.
+    const picker = (
+      <Box
+        key="new-picker"
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={ACCENT}
+        backgroundColor={isGraphical ? tint(ACCENT, 0.04) : undefined}
+        width="100%"
+        paddingX="sm"
+        paddingY="sm"
+        gap="xs"
+      >
+        <Box flexDirection="row" alignItems="center" justifyContent="space-between" width="100%">
+          <Text bold>New worker</Text>
+          <Button key="nw-cancel" label="Cancel" plain dimColor onPress={() => void closeForm()} />
+        </Box>
+        <Text dimColor size="caption">Pick one and press Enter on the request it puts in your prompt box. It starts with sensible hours.</Text>
+        {TEMPLATES.map(t => (
+          <Box
+            key={`tpl-row-${t.id}`}
+            flexDirection="row"
+            alignItems="center"
+            gap="xs"
+            borderStyle="round"
+            borderDimColor
+            hover={isGraphical ? { borderColor: tint(GOD_ACCENT[t.god], 0.6), borderDimColor: false } : undefined}
+            paddingX="xs"
+            width="100%"
+          >
+            {godAvatar(t.god, 28, false, t.name, `tpl-av-${t.id}`)}
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              <Text bold size="footnote">{t.name}</Text>
+              <Text dimColor size="caption">{t.blurb}</Text>
+            </Box>
+            <Button key={`tpl-${t.id}`} label="Add" variant="secondary" onPress={() => void createFromTemplate(t)} />
+          </Box>
+        ))}
+        <Box key="tpl-row-blank" flexDirection="row" alignItems="center" gap="xs" paddingX="xs" width="100%">
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <Text bold size="footnote">Blank worker</Text>
+            <Text dimColor size="caption">Name it, pick its character and what it can do.</Text>
+          </Box>
+          <Button key="nw-blank" label="Blank" variant="secondary" onPress={() => void setForm({ isBlank: true })} />
+        </Box>
+        <Text dimColor size="caption">
+          {`New workers ${TOOLS_SHORT[snap.defaultTools]}; anything outward waits for your yes. Change it all later in Settings.`}
+        </Text>
+      </Box>
+    )
+
+    const newForm = fs.isOpen && !fs.isBlank ? picker : fs.isOpen ? (
       <Box
         key="new-form"
         flexDirection="column"
@@ -2064,9 +2503,12 @@ export const register: Register = on => {
         <Box flexDirection="row" alignItems="center" justifyContent="space-between" width="100%">
           <Box flexDirection="row" gap="xs" alignItems="center">
             {godAvatar(formGod, 28, false, 'New worker')}
-            <Text bold>New worker</Text>
+            <Text bold>Blank worker</Text>
           </Box>
-          <Button key="nw-cancel" label="Cancel" plain dimColor onPress={() => void closeForm()} />
+          <Box flexDirection="row" gap="xs" alignItems="center">
+            <Button key="nw-templates" label="Templates" plain dimColor onPress={() => void openPicker()} />
+            <Button key="nw-cancel" label="Cancel" plain dimColor onPress={() => void closeForm()} />
+          </Box>
         </Box>
         {Input
           ? fill(
@@ -2170,8 +2612,8 @@ export const register: Register = on => {
 
     /** When it wakes, in words: the schedule with its days (and zone where there is room). */
     const hoursAbout = (w: RegistryWorker, withZone: boolean): string => {
-      if (w.paused === true) return 'Paused: no scheduled wakes. Run now still works.'
-      if (!w.schedule) return 'No schedule: it works when you ask.'
+      if (w.paused === true) return 'Paused: no scheduled runs. Run now still works.'
+      if (!w.schedule) return 'Works when you ask. Set times under When it works in Settings.'
       const sentence = scheduleSentence(w.schedule)
       return withZone && w.schedule.tz ? `${sentence} (${w.schedule.tz})` : sentence
     }
@@ -2321,7 +2763,9 @@ export const register: Register = on => {
       return (
         <Box key={`outbox-${w.key}`} flexDirection="column" gap="xs" width="100%">
           {shown.length === 0 ? (
-            <Text dimColor size="footnote">{`Nothing here yet. What ${w.name} drafts or notes lands here for your yes.`}</Text>
+            <Text dimColor size="footnote">
+              {`Nothing here yet. When ${w.name} drafts something to send or post, it waits here for your yes. Ask it a task to start.`}
+            </Text>
           ) : null}
           {shown.map(item => itemBox(w, item, decided, accent))}
           <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
@@ -2341,7 +2785,11 @@ export const register: Register = on => {
       let steps: ActivityStep[] = []
       let note = ''
       if (!path) {
-        note = w.transcript ? 'Its transcript is not on this Mac yet' : 'No steps yet: the chat has not run'
+        note = w.transcript
+          ? 'Its transcript is not on this Mac yet'
+          : w.session
+            ? 'No steps yet. Ask it a task and its steps show here.'
+            : 'No steps yet: its chat has not started. Press Start chat on Overview.'
       } else {
         const hit = cache.steps.get(path)
         if (hit && hit.mtimeMs === mtimeMs) {
@@ -2359,7 +2807,7 @@ export const register: Register = on => {
             note = `Couldn't read the transcript: ${String(err)}`
           }
         }
-        if (!note && steps.length === 0) note = 'No tool steps yet'
+        if (!note && steps.length === 0) note = 'No tool steps yet. Ask it a task and its steps show here.'
       }
       return (
         <Box key={`activity-panel-${w.key}`} flexDirection="column" gap="xs" width="100%">
@@ -2490,12 +2938,12 @@ export const register: Register = on => {
             />
           ) : null}
           <Box key={`sec-hours-${w.key}`} flexDirection="column" gap="xs" width="100%">
-            {heading(`h-hours-${w.key}`, 'Hours')}
+            {heading(`h-hours-${w.key}`, 'When it works')}
             <Box flexDirection="row" flexWrap="wrap" gap="xs" alignItems="center" width="100%">
               {Select ? (
                 <Select
                   key={`mode-${w.key}`}
-                  label="Wakes"
+                  label="Runs"
                   value={mode}
                   options={modeOptions}
                   onSelect={(value: string) => void pickSchedule({ mode: value })}
@@ -2544,12 +2992,12 @@ export const register: Register = on => {
               </Box>
             ) : null}
             {sched ? <Text dimColor size="caption">{scheduleSentence(sched)}</Text> : null}
-            {sched && !w.charter ? <Text dimColor size="caption">With no charter, each wake asks it to check in on its role.</Text> : null}
+            {sched && !w.charter ? <Text dimColor size="caption">With no instructions, each wake asks it to check in on its role.</Text> : null}
             <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
               {icon('pause', w.paused === true ? AMBER : SUB, 13)}
               <Box flexGrow={1} flexShrink={1}>
                 <Text size="footnote" color={w.paused === true ? AMBER : undefined} dimColor={w.paused !== true}>
-                  {w.paused === true ? 'Paused: no scheduled wakes' : 'Wakes on its hours'}
+                  {w.paused === true ? 'Paused: no scheduled runs' : 'Works on its own times'}
                 </Text>
               </Box>
               <Button
@@ -2561,7 +3009,7 @@ export const register: Register = on => {
             </Box>
           </Box>
           <Box key={`sec-tools-${w.key}`} flexDirection="column" gap="xs" width="100%">
-            {heading(`h-tools-${w.key}`, 'Tools')}
+            {heading(`h-tools-${w.key}`, 'What it can do')}
             {radio(`tools-${w.key}`, toolsValue, toolChoices, accent, value => void pickTools(value))}
             <Text dimColor size="caption">{about}</Text>
           </Box>
@@ -2581,7 +3029,7 @@ export const register: Register = on => {
               />
             </Box>
             {spaces.length === 0 ? (
-              <Text dimColor size="caption">No spaces yet</Text>
+              <Text dimColor size="caption">No spaces yet. Make one in the Spaces pane.</Text>
             ) : (
               <Box flexDirection="row" flexWrap="wrap" gap="xs" width="100%">
                 {spaces.map(s => {
@@ -2629,12 +3077,22 @@ export const register: Register = on => {
       const start = !w.session ? (
         <Button key={`start-${w.key}`} label="Start chat" variant="primary" onPress={() => void startChat(w)} />
       ) : null
+      // Put it on the voice call (focus), or hand the call back to Claude.
+      const talk = w.session ? (
+        <Button
+          key={`talk-${w.key}`}
+          label={focusKey === w.key ? 'Back to Claude' : `Talk to ${w.name}`}
+          variant="secondary"
+          onPress={() => void talkTo(w)}
+        />
+      ) : null
       if (!isDetail) {
         return (
           <Box key={`overview-${w.key}`} flexDirection="column" gap="xs" width="100%">
             <Text dimColor size="caption">{hoursAbout(w, false)}</Text>
             {gap ? <Text dimColor size="caption">{gap}</Text> : null}
             {start}
+            {talk}
           </Box>
         )
       }
@@ -2647,10 +3105,11 @@ export const register: Register = on => {
               <Text dimColor size="caption">{hoursAbout(w, true)}</Text>
             </Box>
           </Box>
-          <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+          <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs" width="100%">
             {start}
             {canRun(w) ? <Button key={`run-${w.key}`} label={runLabelOf(w)} variant="primary" onPress={() => void runNow(w)} /> : null}
             <Button key={`open-${w.key}`} label="Open chat" variant="secondary" onPress={() => void openChat(w)} />
+            {talk}
             <Box flexGrow={1} />
           </Box>
           {gap ? <Text dimColor size="caption">{gap}</Text> : null}
@@ -2815,11 +3274,221 @@ export const register: Register = on => {
       live.length === 0 ? (
         <Box key="empty" flexDirection="column" gap="xs" width="100%">
           {snap.error ? <Text dimColor>{snap.error}</Text> : null}
-          <Text dimColor size="footnote">No workers yet. + New worker makes one: a name, what it does, and a character.</Text>
+          <Text dimColor size="footnote">No workers yet. + New worker picks a ready-made one, or starts a blank one.</Text>
         </Box>
       ) : snap.error ? (
         <Text dimColor>{snap.error}</Text>
       ) : null
+
+    // Needs you, one row per thing waiting on the owner, each with its action: an outbox
+    // item (Approve, Change, Decline), a permission request (Open: only the call card
+    // answers it), a wake that did not go through (Retry), a health problem (its fix).
+    const NEEDS_EMPTY = 'Nothing needs you. Drafts waiting for your yes, permission requests, missed runs and setup problems show up here.'
+    const clockOf = (ms: number): string => {
+      try {
+        return shortTime(new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))
+      } catch {
+        return ''
+      }
+    }
+    const needsRow = (it: NeedsItem) => {
+      if (it.kind === 'approval') {
+        const w = live.find(x => x.key === it.key)
+        const item = w ? (snap.outbox[w.key] ?? []).find(i => i.id === it.id) : undefined
+        if (!w || !item) return null
+        const god = godOf(w)
+        return itemBox(w, item, snap.decided[w.key] ?? {}, GOD_ACCENT[god], godAvatar(god, 16, false, w.name, `who-${w.key}-${item.id}`))
+      }
+      const row = (key: string, tone: string, glyph: IconName, title: string, detail: string, action: RenderChildren) => (
+        <Box
+          key={key}
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={tint(tone, 0.6)}
+          width="100%"
+          paddingX="sm"
+          paddingY="xs"
+          gap="xs"
+        >
+          <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
+            {icon(glyph, tone, 14)}
+            <Box flexGrow={1} flexShrink={1}>
+              <Text bold size="footnote" wrap="truncate-end">{title}</Text>
+            </Box>
+          </Box>
+          <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
+            <Box flexGrow={1} flexShrink={1}>
+              <Text dimColor size="caption">{detail}</Text>
+            </Box>
+            {action}
+          </Box>
+        </Box>
+      )
+      if (it.kind === 'permit') {
+        const w = live.find(x => it.sessionId && transcriptName(x.transcript) === `${it.sessionId}.jsonl`)
+        const who = w?.name ?? (it.title || 'A chat')
+        return row(
+          `permit-${it.id}`,
+          AMBER,
+          'terminal',
+          `${who} wants to run ${it.short || it.tool}`,
+          'Permission request. Only a click on the call card answers it.',
+          <Button key={`permit-open-${it.id}`} label="Open" variant="primary" onPress={() => void openPermit(it)} />,
+        )
+      }
+      if (it.kind === 'wake') {
+        const w = live.find(x => x.key === it.key)
+        if (!w) return null
+        const at = slotTime(it.slot) || (w.schedule?.time ? shortTime(w.schedule.time) : '')
+        const retryAt = clockOf(it.retryAtMs)
+        return row(
+          `wake-${it.id}`,
+          AMBER,
+          'clock',
+          `${w.name} didn't wake for its ${at ? `${at} ` : ''}run`,
+          it.isRetrying
+            ? `Its chat wasn't running. It tries again by itself${retryAt ? ` at ${retryAt}` : ''}.`
+            : 'Its chat wasn\'t running, and that run has passed. Retry runs it now.',
+          <Button key={`wake-retry-${it.id}`} label="Retry" variant="primary" onPress={() => void retryWake(it)} />,
+        )
+      }
+      return row(
+        `needs-health-${it.id}`,
+        it.severity === 'error' ? RED : AMBER,
+        'activity',
+        it.label,
+        it.detail || (it.fix ? 'Its fix runs on this Mac.' : 'No automatic fix: check the install.'),
+        it.fix ? (
+          healthNow.fixing === it.id ? (
+            <Text dimColor size="caption">Fixing…</Text>
+          ) : (
+            <Button
+              key={`needs-fix-${it.id}`}
+              label={it.fixLabel ?? 'Fix'}
+              variant="primary"
+              onPress={() => void fixCheck($ as unknown as Eng, p, doctor, it)}
+            />
+          )
+        ) : null,
+      )
+    }
+
+    const needsPanel = () => (
+      <Box key="needs-panel" flexDirection="column" gap="sm" width="100%">
+        <Text bold>{needItems.length > 0 ? `Needs you · ${needItems.length}` : 'Needs you'}</Text>
+        {needItems.length === 0 ? <Text key="needs-none" dimColor size="footnote">{NEEDS_EMPTY}</Text> : needItems.map(needsRow)}
+      </Box>
+    )
+
+    // Welcome: what CludeGods is in a sentence, and three steps, each one click.
+    const welcomePanel = async () => {
+      const voiceOn = report
+        ? report.voice_installed
+        : await $.fs.stat(p.call).then(
+            () => true,
+            () => false,
+          )
+      const step = (
+        id: OnboardingStep,
+        n: number,
+        title: string,
+        about: string,
+        action: RenderChildren,
+        extra?: RenderChildren,
+      ) => {
+        const isDone = prog.done.includes(id)
+        return (
+          <Box
+            key={`welcome-card-${id}`}
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={isDone ? tint(GREEN, 0.5) : tint(ACCENT, 0.6)}
+            backgroundColor={isGraphical && !isDone ? tint(ACCENT, 0.04) : undefined}
+            width="100%"
+            paddingX="sm"
+            paddingY="sm"
+            gap="xs"
+          >
+            <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+              <Text bold color={isDone ? GREEN : ACCENT}>{isDone ? '✓' : String(n)}</Text>
+              <Box flexGrow={1} flexShrink={1}>
+                <Text bold>{title}</Text>
+              </Box>
+              {action}
+            </Box>
+            <Text dimColor size="footnote">{about}</Text>
+            {extra ?? null}
+          </Box>
+        )
+      }
+      const isRunning = setup.state === 'running'
+      const voiceCard = voiceOn
+        ? step(
+            'voice',
+            3,
+            'Try a voice call',
+            'Talk to Claude out loud and cut in any time. Puts /gods in your prompt box; press Enter.',
+            <Button key="welcome-voice" label="Start a call" variant="primary" onPress={() => void startCall()} />,
+            setup.state === 'done' ? <Text size="caption" color={GREEN}>{setup.summary}</Text> : undefined,
+          )
+        : step(
+            'voice',
+            3,
+            'Try a voice call',
+            report
+              ? 'Voice is not set up yet. Enable voice downloads the local speech and voice models and starts their services on this Mac, so it takes a few minutes.'
+              : 'Voice needs the CludeGods installer: run ./install.sh from your CludeGods folder, then restart the app.',
+            report ? (
+              isRunning ? (
+                <Text dimColor size="caption">Setting up…</Text>
+              ) : (
+                <Button
+                  key="welcome-enable-voice"
+                  label={setup.state === 'failed' ? 'Try again' : 'Enable voice'}
+                  variant="primary"
+                  onPress={() => void enableVoice($ as unknown as Eng, p, doctor)}
+                />
+              )
+            ) : null,
+            isRunning ? (
+              <Text key="welcome-voice-line" mono dimColor size="caption" wrap="truncate-end">{setup.line || 'Starting'}</Text>
+            ) : setup.state === 'failed' ? (
+              <Text key="welcome-voice-summary" size="caption" color={RED}>{setup.summary}</Text>
+            ) : undefined,
+          )
+      return (
+        <Box key="welcome" flexDirection="column" gap="sm" width="100%">
+          <Box flexDirection="row" alignItems="center" gap="sm" width="100%">
+            {godAvatar('colleague', 40, false, 'CludeGods', 'welcome-god')}
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              <Text bold size="heading">Welcome to CludeGods</Text>
+              <Text dimColor size="footnote">{WELCOME_LINE}</Text>
+            </Box>
+          </Box>
+          {step(
+            'worker',
+            1,
+            'Create your first worker',
+            'Pick a ready-made one (inbox, daily brief, repo watcher and more). It gets its own chat, hours and instructions.',
+            <Button key="welcome-worker" label="Pick one" variant="primary" onPress={() => void openPicker()} />,
+          )}
+          {step(
+            'memory',
+            2,
+            'Write your first Memory rule',
+            'One rule every worker reads before it starts, like "write in my voice" or "never email before I approve".',
+            <Button key="welcome-memory" label="Write a rule" variant="primary" onPress={() => void writeMemoryRule()} />,
+          )}
+          {voiceCard}
+          <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+            <Box flexGrow={1} />
+            {live.length > 0 ? (
+              <Button key="welcome-workers" label="Go to workers" variant="secondary" onPress={() => void showView('workers')} />
+            ) : null}
+          </Box>
+        </Box>
+      )
+    }
 
     // Today: what waits for a yes across every worker, Ask all, and what each did since
     // midnight (finished turns from runs/<key>.jsonl, notes and decided drafts).
@@ -2851,9 +3520,6 @@ export const register: Register = on => {
       const entries: TodayEntry[] = todayEntries({
         keys: live.map(w => w.key), runs, outbox: snap.outbox, decided: snap.decided, since: startOfDay(now),
       }).slice(0, TODAY_ITEMS)
-      const waiting = live
-        .flatMap(w => awaiting(snap.outbox[w.key] ?? [], snap.decided[w.key] ?? {}).map(item => ({ w, item })))
-        .sort((a, b) => atMs(b.item) - atMs(a.item))
       const withChat = live.filter(w => w.session).length
       const onHours = live.filter(w => w.schedule && w.paused !== true && w.session).length
       const paused = live.filter(w => w.paused === true).length
@@ -2889,14 +3555,8 @@ export const register: Register = on => {
               )
             : null}
           {rhythm ? <Text dimColor size="caption">{rhythm}</Text> : null}
-          {heading('h-waiting', waiting.length > 0 ? `Needs your yes · ${waiting.length}` : 'Needs your yes')}
-          {waiting.length === 0 ? (
-            <Text key="none-waiting" dimColor size="footnote">Nothing waits for you.</Text>
-          ) : (
-            waiting.map(({ w, item }) =>
-              itemBox(w, item, snap.decided[w.key] ?? {}, GOD_ACCENT[godOf(w)], godAvatar(godOf(w), 16, false, w.name, `who-${w.key}-${item.id}`)),
-            )
-          )}
+          {heading('h-waiting', needItems.length > 0 ? `Needs you · ${needItems.length}` : 'Needs you')}
+          {needItems.length === 0 ? <Text key="none-waiting" dimColor size="footnote">{NEEDS_EMPTY}</Text> : needItems.map(needsRow)}
           {heading('h-done', 'Done today')}
           {entries.length === 0 ? (
             <Text key="none-done" dimColor size="footnote">
@@ -2930,11 +3590,32 @@ export const register: Register = on => {
       )
     }
 
+    // Above every view: the header, the health strip, the checklist, the New worker picker.
+    const top = [header, healthStrip, checklist, newForm]
+
+    if (isWelcome) {
+      return (
+        <Box flexDirection="column" alignItems="stretch" width="100%" gap="sm">
+          {top}
+          {await welcomePanel()}
+        </Box>
+      )
+    }
+
+    if (isNeeds) {
+      return (
+        <Box flexDirection="column" alignItems="stretch" width="100%" gap="sm">
+          {top}
+          {snap.error && snap.error !== NO_REGISTRY ? <Text dimColor>{snap.error}</Text> : null}
+          {needsPanel()}
+        </Box>
+      )
+    }
+
     if (isToday) {
       return (
         <Box flexDirection="column" alignItems="stretch" width="100%" gap="sm">
-          {header}
-          {newForm}
+          {top}
           {snap.error && live.length > 0 ? <Text dimColor>{snap.error}</Text> : null}
           {await todayPanel()}
         </Box>
@@ -2944,8 +3625,7 @@ export const register: Register = on => {
     if (isWide && live.length > 0 && current) {
       return (
         <Box flexDirection="column" alignItems="stretch" width="100%" gap="sm">
-          {header}
-          {newForm}
+          {top}
           {empty}
           <Box key="split" flexDirection="row" alignItems="flex-start" gap="sm" width="100%">
             <Box key="list" flexDirection="column" gap="xs" width="34%" flexShrink={0}>
@@ -2964,8 +3644,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" alignItems="stretch" width="100%" gap="sm">
-        {header}
-        {newForm}
+        {top}
         {empty}
         {cards}
       </Box>
@@ -3001,6 +3680,12 @@ export const register: Register = on => {
     const lead = live.find(w => w.key === picked) ?? live[0]
     const god = lead ? godOf(lead) : 'colleague'
     const label = live.length > 0 ? `Workers · ${live.length}` : 'Workers'
+    const waiting = (await read($, needs)).n
+    const openNeeds = async () => {
+      await update($, view, old => (old === 'needs' ? old : 'needs'))
+      await $.ui.open({ id: PANE, title: 'Workers', columns: COLUMNS, focus: true })
+      await syncShown($)
+    }
 
     return (
       <Box flexDirection="row" alignItems="center" gap="sm">
@@ -3022,6 +3707,12 @@ export const register: Register = on => {
             }
           />
         </Box>
+        {waiting > 0 ? (
+          <Box flexDirection="row" alignItems="center" gap="xs">
+            <Text color={AMBER}>●</Text>
+            <Button key="needs-band" label={needsBadge(waiting)} plain onPress={() => void openNeeds()} />
+          </Box>
+        ) : null}
         {theirs}
       </Box>
     )
@@ -3043,6 +3734,281 @@ function defaultTz(workers: readonly RegistryWorker[]): string {
   } catch {
     return 'UTC'
   }
+}
+
+/** The last non-empty line of a command's output, short. */
+function tailLine(text: string): string {
+  const lines = text.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean)
+  return oneLine(lines[lines.length - 1] ?? '', 160)
+}
+
+async function readOnboarding($: Host, p: Paths): Promise<Onboarding> {
+  return parseOnboarding(await readText($, p.onboarding))
+}
+
+/** Records a step done, or the checklist dismissed, in onboarding.json; every other key kept. */
+async function saveOnboarding(
+  $: Host,
+  p: Paths,
+  change: { done?: OnboardingStep; dismissed?: boolean },
+): Promise<string | undefined> {
+  const result = withOnboarding(await readText($, p.onboarding), change)
+  if (result.error || result.text === undefined) return result.error ?? 'nothing to write'
+  try {
+    await $.fs.write(p.onboarding, result.text)
+  } catch {
+    try {
+      await $.process.run(['/bin/mkdir', '-p', p.onboarding.slice(0, p.onboarding.lastIndexOf('/'))])
+      await $.fs.write(p.onboarding, result.text)
+    } catch (err) {
+      return String(err)
+    }
+  }
+  return undefined
+}
+
+/**
+ * Whether the Memory space holds a rule: the Memory step, done without the button. The
+ * page Memory is seeded with (`welcome.md`, "About Memory") is no rule.
+ */
+async function memoryHasPage($: Host, p: Paths): Promise<boolean> {
+  try {
+    return (await $.fs.list(p.memory)).some(
+      e => e.kind === 'file' && e.name.endsWith('.md') && e.name !== 'welcome.md' && !e.name.startsWith('.'),
+    )
+  } catch {
+    return false
+  }
+}
+
+/** The permission requests the call card shows now: `permit/<id>.json` with no answer yet, fresh. */
+async function readPermits($: Host, p: Paths, now: number): Promise<PermitRecord[]> {
+  let entries: readonly { name: string; kind: string }[]
+  try {
+    entries = await $.fs.list(p.permit)
+  } catch {
+    return []
+  }
+  const names = new Set(entries.map(e => e.name))
+  const out: PermitRecord[] = []
+  for (const e of entries) {
+    if (e.kind !== 'file' || !e.name.endsWith('.json')) continue
+    const id = e.name.slice(0, -'.json'.length)
+    if (names.has(`${id}.answer`)) continue
+    const raw = await readText($, `${p.permit}/${e.name}`)
+    const rec = raw === undefined ? undefined : parsePermit(raw, id)
+    if (rec && now - rec.atMs < PERMIT_FRESH_MS) out.push(rec)
+  }
+  return out
+}
+
+/** A UTC date, "2026-11-02", for comparing with a wake id's date. */
+function isoDay(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10)
+}
+
+/**
+ * Scheduled wakes that did not go through: `wakes/<id>.retry` whose claim holds no
+ * `result.json`, for a worker still in the registry, from the last day or so (old retry
+ * files stay on disk; their ids' dates rule them out before anything is read).
+ */
+async function readFailedWakes(
+  $: Host,
+  p: Paths,
+  workers: readonly RegistryWorker[],
+  now: number,
+): Promise<{ id: string; key: string; slot: string; retryAtMs: number; isRetrying: boolean; atMs: number }[]> {
+  let entries: readonly { name: string; kind: string }[]
+  try {
+    entries = await $.fs.list(p.wakes)
+  } catch {
+    return []
+  }
+  const keys = workers.map(w => w.key)
+  const oldest = isoDay(now - 2 * WAKE_FRESH_MS)
+  const out: { id: string; key: string; slot: string; retryAtMs: number; isRetrying: boolean; atMs: number }[] = []
+  for (const e of entries) {
+    if (e.kind !== 'file' || !e.name.endsWith('.retry')) continue
+    const id = e.name.slice(0, -'.retry'.length)
+    const hit = wakeOf(id, keys)
+    if (!hit || hit.slot.slice(0, 10) < oldest) continue
+    const notBefore = Number((await readText($, `${p.wakes}/${e.name}`))?.trim())
+    if (!Number.isFinite(notBefore) || notBefore < now - WAKE_FRESH_MS) continue
+    const isDone = await $.fs.stat(`${p.wakes}/${id}/result.json`).then(
+      () => true,
+      () => false,
+    )
+    if (isDone) continue
+    const w = workers.find(x => x.key === hit.key)
+    const isRetrying = Boolean(w?.schedule && w.session && w.paused !== true && dueSlot(w.schedule, now)?.id === hit.slot)
+    out.push({ id, key: hit.key, slot: hit.slot, retryAtMs: notBefore, isRetrying, atMs: notBefore - WAKE_RETRY_MS })
+  }
+  return out
+}
+
+/** Everything waiting on the owner (./needs): outbox items, permission requests, failed wakes, health. */
+async function gatherNeeds(
+  $: Host,
+  p: Paths,
+  workers: readonly RegistryWorker[],
+  snap: Pick<Snapshot, 'outbox' | 'decided'>,
+  report: HealthState['report'],
+  now: number,
+): Promise<NeedsItem[]> {
+  const approvals = workers.flatMap(w =>
+    awaiting(snap.outbox[w.key] ?? [], snap.decided[w.key] ?? {}).map(i => ({ key: w.key, id: i.id, atMs: atMs(i) })),
+  )
+  return needsItems({
+    approvals,
+    permits: await readPermits($, p, now),
+    wakes: await readFailedWakes($, p, workers, now),
+    health: report,
+  })
+}
+
+/** When the doctor last ran in this registration, and whether it runs now. */
+type DoctorClock = { at: number; isChecking: boolean }
+
+// The health strip: `cludegods doctor --json`, at most once a HEALTH_EVERY_MS while the
+// pane shows (HEALTH_IDLE_MS while it does not), and at once on demand. A missing CLI
+// (an older install) hides the strip; so does output that is not the doctor's JSON.
+async function checkHealth($: Eng, p: Paths, doctor: DoctorClock, isAsked: boolean): Promise<void> {
+  if (doctor.isChecking) return
+  doctor.isChecking = true
+  try {
+    doctor.at = await $.clock.now()
+    const isThere = await $.fs.stat(p.cli).then(
+      st => st.kind === 'file',
+      () => false,
+    )
+    if (!isThere) {
+      await update($, health, old => (old.isMissing && !old.report && !old.isChecking ? old : { isMissing: true, isChecking: false, fixing: '' }))
+      return
+    }
+    if (isAsked) await update($, health, old => (old.isChecking ? old : { ...old, isChecking: true }))
+    let report: HealthState['report']
+    let error: string | undefined
+    try {
+      const r = await $.process.run([p.cli, 'doctor', '--json'], { timeoutMs: DOCTOR_TIMEOUT_MS })
+      report = parseDoctor(r.stdout)
+      if (!report) error = tailLine(r.stderr) || `doctor exited ${r.exitCode}`
+    } catch (err) {
+      error = String(err)
+    }
+    await update($, health, old => {
+      const fresh: HealthState = {
+        ...(report ? { report } : {}),
+        isMissing: false,
+        isChecking: false,
+        fixing: old.fixing,
+        ...(error ? { error } : {}),
+      }
+      return JSON.stringify(fresh) === JSON.stringify(old) ? old : fresh
+    })
+  } finally {
+    doctor.isChecking = false
+  }
+}
+
+// A red or amber check's fix: `cludegods doctor --fix <id>`, then a fresh check.
+async function fixCheck($: Eng, p: Paths, doctor: DoctorClock, c: { id: string; label: string }): Promise<void> {
+  if ((await read($, health)).fixing) return
+  await update($, health, old => ({ ...old, fixing: c.id }))
+  let r: { exitCode: number; stdout: string; stderr: string }
+  try {
+    r = await $.process.run([p.cli, 'doctor', '--fix', c.id], { timeoutMs: FIX_TIMEOUT_MS })
+  } catch (err) {
+    r = { exitCode: 1, stdout: '', stderr: String(err) }
+  }
+  await update($, health, old => ({ ...old, fixing: '' }))
+  $.ui.toast(
+    r.exitCode === 0
+      ? `Fixed: ${c.label}`
+      : `Couldn't fix ${c.label}: ${tailLine(r.stderr) || tailLine(r.stdout) || `exit ${r.exitCode}`}`,
+  )
+  await checkHealth($, p, doctor, true)
+}
+
+// Enable voice: `cludegods setup voice --yes`, its output streamed into the Welcome
+// view line by line where the host can spawn, else read whole when it ends; then a
+// short summary and a fresh health check.
+async function enableVoice($: Eng, p: Paths, doctor: DoctorClock): Promise<void> {
+  if ((await read($, voiceSetup)).state === 'running') return
+  const at = await $.clock.now()
+  const isThere = await $.fs.stat(p.cli).then(
+    st => st.kind === 'file',
+    () => false,
+  )
+  if (!isThere) {
+    await update($, voiceSetup, () => ({
+      state: 'failed' as const,
+      line: '',
+      summary: 'The cludegods command is not installed. Run ./install.sh from your CludeGods folder, then try again.',
+      at,
+    }))
+    return
+  }
+  await update($, voiceSetup, () => ({ state: 'running' as const, line: 'Starting', summary: '', at }))
+  const argv = [p.cli, 'setup', 'voice', '--yes']
+  const KEEP = 6
+  let tail: string[] = []
+  let code: number | null = null
+  // Streamed where the host spawns; an engine without spawn (or one that refuses it
+  // before any output) falls back to one run, read whole when it ends.
+  let isStreaming = false
+  try {
+    const stream = $.process.spawn({ argv })
+    let buf = ''
+    let shownAt = -Infinity
+    for (;;) {
+      const step = await stream.next()
+      isStreaming = true
+      if (step.done) {
+        code = typeof step.value?.code === 'number' ? step.value.code : null
+        break
+      }
+      buf += step.value?.text ?? ''
+      const parts = buf.split(/[\r\n]+/)
+      buf = parts.pop() ?? ''
+      tail = [...tail, ...parts.map(l => l.trim()).filter(Boolean)].slice(-KEEP)
+      const last = tail[tail.length - 1]
+      const t = await $.clock.now()
+      if (last && t - shownAt >= 400) {
+        shownAt = t
+        const line = oneLine(last, 100)
+        await update($, voiceSetup, old => (old.line === line ? old : { ...old, line }))
+      }
+    }
+    if (buf.trim()) tail = [...tail, buf.trim()].slice(-KEEP)
+  } catch (err) {
+    if (isStreaming) {
+      code = -1
+      tail = [...tail, String(err)].slice(-KEEP)
+    } else {
+      try {
+        const r = await $.process.run(argv, { timeoutMs: SETUP_TIMEOUT_MS })
+        code = r.exitCode
+        tail = `${r.stdout}\n${r.stderr}`.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean).slice(-KEEP)
+      } catch (err2) {
+        code = -1
+        tail = [String(err2)]
+      }
+    }
+  }
+  const last = oneLine(tail[tail.length - 1] ?? '', 100)
+  const isOk = code === 0
+  await update($, voiceSetup, () =>
+    isOk
+      ? { state: 'done' as const, line: last, summary: 'Voice is ready. Start a call to try it.', at }
+      : {
+          state: 'failed' as const,
+          line: last,
+          summary: `Voice setup stopped${code !== null && code > 0 ? ` (exit ${code})` : ''}: ${last || 'no output'}`,
+          at,
+        },
+  )
+  $.ui.toast(isOk ? 'Voice is ready' : "Voice setup didn't finish. The Welcome view says why.")
+  await checkHealth($, p, doctor, true)
 }
 
 /** The spaces a worker may be given: every `spaces/<slug>/space.json` there is. */
