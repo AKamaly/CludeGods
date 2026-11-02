@@ -66,6 +66,8 @@ export type World = {
   links: Set<string>
   writes: { path: string; text: string }[]
   runs: string[][]
+  /** What each run was given on stdin, by the run's index. */
+  stdins: (string | undefined)[]
   sends: { to: unknown; text: string }[]
   opens: unknown[]
   toasts: string[]
@@ -93,6 +95,7 @@ export function world(on: On, files: Files = standardFiles()): World {
     links: new Set(),
     writes: [],
     runs: [],
+    stdins: [],
     sends: [],
     opens: [],
     toasts: [],
@@ -152,6 +155,7 @@ export function world(on: On, files: Files = standardFiles()): World {
   on('process.run', (_, e) => {
     const argv = [...e.argv]
     w.runs.push(argv)
+    w.stdins.push((e as { init?: { stdin?: string } }).init?.stdin)
     const r = w.answer(argv)
     return { value: { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
