@@ -114,16 +114,39 @@ States: `idle | talk | listen | work | happy`.
   "voice": "af_heart",             // NEW, Kokoro voice id. Missing: per-god default
                                    // colleague af_heart, research af_nicole, scribe bf_emma,
                                    // scout am_adam, sales am_michael, herald bm_george
-  "tools": "drafts",               // NEW, "read" | "drafts" | "full" | string[] of tool names
+  "tools": "drafts",               // NEW, "read" | "drafts" | "full" | string[] of tool names;
+                                   // missing: "full" (presets are opt-in restrictions)
   "paused": false,                 // NEW, true: no scheduled wakes
   "spaces": ["notes"],             // NEW, Spaces this worker may write to
   "model": "...", "effort": "...", "session": "local_…", "transcript": "….jsonl",
   "avatar": "blue", "charter": "...", "schedule": { … }
 } ] }
 ```
-Tool presets: `read` = Read, Grep, Glob, WebSearch, WebFetch, LS. `drafts` = read + Write/Edit
-only under `~/.voicemode/call/` (outbox, spaces drafts) + Bash read-only allow-list. `full` = no
-guard. A string array is an explicit allow-list.
+Tool presets: `full` (the default) = the session's own tools, guarded only by the pages rules
+below. `read` = Read, Grep, Glob, WebSearch, WebFetch, LS. `drafts` = read + Write/Edit only
+under `~/.voicemode/call/` (outbox, spaces drafts) + Bash read-only allow-list. A string array
+is an explicit allow-list. `read` and `drafts` are restrictions the owner opts into per worker;
+the `guard` hook enforces whichever a worker has.
+
+### config.json (optional; install.sh copies `config/config.example.json` once if absent)
+```jsonc
+{ "approvals": {
+    "outward": "spoken",             // "spoken": exact action in the chat, a one-sentence
+                                     // read-back, then a clear spoken yes. "typed": a typed yes only
+    "permission_prompts": "app",     // "app": permit stays out of the way, the app's dialog
+                                     // answers. "pill": CallPill, only while a call is live,
+                                     // answered only by a click
+    "worker_publish": "direct"       // "direct": workers may pages new/publish/mkspace in their
+                                     // spaces. "approve": pages land only on the owner's Approve
+  },
+  "user_label": "USER",              // owned by the voice track
+  "workers": { "default_tools": "full" } }   // owned by the workers track
+```
+Every key is optional; a missing file, key or invalid value means the default, and no hook
+ever fails or blocks a tool because of this file. Unknown keys must be preserved. Under any
+setting: voice never answers a permission prompt, voice never starts a session, names are
+never fuzzy-matched, Memory pages change only through a draft the owner approves, and
+changing this file or loosening a worker's `tools` needs a typed yes.
 
 ### outbox/<key>.jsonl v2 (worker appends, pane reads)
 ```jsonc
@@ -138,7 +161,9 @@ An item with a decision leaves the "needs your yes" list.
 - Approve on a `draft`/`note`: `$.session.send` to the worker: "Approved in the Workers pane:
   <title> (<id>). Go ahead with exactly what the draft says, then report back."
 - Approve on a `page`: run `~/.claude/skills/colleague/bin/pages publish <draft_path> --space <space>`,
-  then tell the worker it was saved.
+  then tell the worker it was saved. With `worker_publish: "direct"` a worker may publish its
+  own draft (never a Memory one); `publish` then appends `{id, decision: "approved", at,
+  via: "pages publish"}` to its decisions file, so the item leaves the list.
 - Decline: tell the worker "Declined: <title> (<id>). Don't do it." No other effect.
 
 ### spaces/ (Spaces and Pages)
@@ -147,7 +172,8 @@ An item with a decision leaves the "needs your yes" list.
 (worker key or "you"), `parent` (page slug, optional)). Drafts awaiting review live in
 `spaces/.drafts/<id>.md` with the same front matter plus `space`.
 CLI `~/.claude/skills/colleague/bin/pages`: `list [--space S] [--q text]`, `show S/page`,
-`new S "Title" [--from file|-]`, `draft S "Title" --worker K [--from file|-]` (writes the draft
+`new S "Title" [--from file|-] [--worker K]` (refused for a worker in Memory, or when
+`worker_publish` is `"approve"`), `draft S "Title" --worker K [--from file|-]` (writes the draft
 AND the outbox `page` item), `publish <draft_path> --space S`, `spaces`, `mkspace "Name"`.
 
 ### Calls with a worker
