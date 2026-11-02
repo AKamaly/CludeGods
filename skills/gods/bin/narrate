@@ -66,7 +66,7 @@ def lower_first(s):
 def line_for(tool, inp):
     if tool == "Bash":
         cmd, desc = inp.get("command", ""), (inp.get("description") or "").strip().rstrip(".")
-        if "colleague/bin/call" in cmd or not desc:
+        if "/bin/call " in cmd or cmd.rstrip().endswith("/bin/call") or not desc:
             return None
         return f"{random.choice(OPENERS)} {lower_first(desc)}."
     if tool == "Agent":
@@ -174,7 +174,7 @@ def selftest():
     check("the same line again within a minute -> skip", should_say("Reading call.", now, False, d),
           False)
     check("lines for tools", [line_for("Read", {"file_path": "/x/listen.py"}),
-                              line_for("Bash", {"command": "~/.claude/skills/colleague/bin/call say hi",
+                              line_for("Bash", {"command": "~/.claude/skills/gods/bin/call say hi",
                                                 "description": "Speak"}),
                               line_for("mcp__x__y", {})],
           ["Reading listen.py.", None, "Working on it."])

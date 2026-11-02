@@ -139,10 +139,10 @@ Worker keys are the `key`s in `~/.voicemode/call/workers.json`.
 ## 4. Run it
 
 ```sh
-~/.claude/skills/colleague/bin/bridge start     # first start makes its own venv (below)
-~/.claude/skills/colleague/bin/bridge status
-~/.claude/skills/colleague/bin/bridge log
-~/.claude/skills/colleague/bin/bridge stop
+~/.claude/skills/gods/bin/bridge start     # first start makes its own venv (below)
+~/.claude/skills/gods/bin/bridge status
+~/.claude/skills/gods/bin/bridge log
+~/.claude/skills/gods/bin/bridge stop
 ```
 
 The first `start` installs `slack_sdk==3.45.0` (pinned) into
@@ -160,12 +160,12 @@ The worker's chat receives:
 ```
 Slack message from Teammate in #ops (id in_3f2a9c01b7de): can you draft the release note?
 
-Reply in that thread with `~/.claude/skills/colleague/bin/reply in_3f2a9c01b7de "..."`. ...
+Reply in that thread with `~/.claude/skills/gods/bin/reply in_3f2a9c01b7de "..."`. ...
 ```
 
 ```sh
-~/.claude/skills/colleague/bin/reply in_3f2a9c01b7de "Draft is in the outbox for review."
-~/.claude/skills/colleague/bin/reply in_3f2a9c01b7de < reply.md      # or from stdin
+~/.claude/skills/gods/bin/reply in_3f2a9c01b7de "Draft is in the outbox for review."
+~/.claude/skills/gods/bin/reply in_3f2a9c01b7de < reply.md      # or from stdin
 ```
 
 `reply` refuses an id that is in no inbox file. The bridge posts the reply in that thread,
@@ -216,7 +216,7 @@ this bridge keeps. `bin/bridge status teams` says so.
 | file | what |
 |---|---|
 | `slack_bridge.py` | the daemon (`run`), `check` and `status`; standard library at import |
-| `tests/` | `python3 -B -m unittest discover -s ~/.claude/skills/colleague/bridges/slack/tests` |
+| `tests/` | `python3 -B -m unittest discover -s ~/.claude/skills/gods/bridges/slack/tests` |
 | `../../bin/bridge` | start, stop, status, log |
 | `../../bin/reply` | a worker's reply into its thread |
 

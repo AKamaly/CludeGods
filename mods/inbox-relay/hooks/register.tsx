@@ -2,7 +2,7 @@ import type { Register, Timer } from 'claude-code'
 
 import type { InboxLine, RelayWorker } from '../types'
 
-// A chat bridge (Slack first: ~/.claude/skills/colleague/bridges/slack) appends one
+// A chat bridge (Slack first: ~/.claude/skills/gods/bridges/slack) appends one
 // line per allowed message to ~/.voicemode/call/inbox/<worker>.jsonl. This relay
 // hands each line to that worker's standing chat with $.session.send, once, and
 // records its id in inbox/<worker>.delivered. Only a mod can put a message into an
@@ -16,7 +16,7 @@ const RETRY_MS = 60_000
 const MAX_TEXT = 12_000
 const KEY_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
-const REPLY = '~/.claude/skills/colleague/bin/reply'
+const REPLY = '~/.claude/skills/gods/bin/reply'
 
 /** One field shown inline: one line, short. */
 function oneLine(s: string, max: number): string {

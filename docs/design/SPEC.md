@@ -95,8 +95,8 @@ States: `idle | talk | listen | work | happy`.
   `animated: true` uses SMIL only (bob, blink, halo glint, talk mouth), shown with
   `<Svg isInteractive>`; still frames otherwise. Transparent background. Other mods copy this file
   (a mod cannot import another mod's files): `spaces-pane/hooks/gods.ts` is a verbatim copy.
-- **Sprites** (call pill, native): `skills/colleague/bin/gods/<kind>-<state>.png`, each a
-  horizontal strip of `frames` square frames, plus `skills/colleague/bin/gods/index.json`
+- **Sprites** (call pill, native): `skills/gods/bin/gods/<kind>-<state>.png`, each a
+  horizontal strip of `frames` square frames, plus `skills/gods/bin/gods/index.json`
   `{ "frame": 256, "frames": 24, "fps": 12, "box": 1.6 }`. Rendered from gods.js by
   `scripts/render-gods.mjs` (puppeteer-core + chrome-headless-shell, like `$FILM/render.js`).
   `box`: the frame is 1.6x the sphere diameter, sphere centred, halo inside the frame.
@@ -160,7 +160,7 @@ Decisions: `outbox/<key>.decisions.jsonl` lines `{ "id", "decision": "approved"|
 An item with a decision leaves the "needs your yes" list.
 - Approve on a `draft`/`note`: `$.session.send` to the worker: "Approved in the Workers pane:
   <title> (<id>). Go ahead with exactly what the draft says, then report back."
-- Approve on a `page`: run `~/.claude/skills/colleague/bin/pages publish <draft_path> --space <space>`,
+- Approve on a `page`: run `~/.claude/skills/gods/bin/pages publish <draft_path> --space <space>`,
   then tell the worker it was saved. With `worker_publish: "direct"` a worker may publish its
   own draft (never a Memory one); `publish` then appends `{id, decision: "approved", at,
   via: "pages publish"}` to its decisions file, so the item leaves the list.
@@ -171,7 +171,7 @@ An item with a decision leaves the "needs your yes" list.
 `spaces/<space-slug>/<page-slug>.md` with front matter (`title`, `created`, `updated`, `by`
 (worker key or "you"), `parent` (page slug, optional)). Drafts awaiting review live in
 `spaces/.drafts/<id>.md` with the same front matter plus `space`.
-CLI `~/.claude/skills/colleague/bin/pages`: `list [--space S] [--q text]`, `show S/page`,
+CLI `~/.claude/skills/gods/bin/pages`: `list [--space S] [--q text]`, `show S/page`,
 `new S "Title" [--from file|-] [--worker K]` (refused for a worker in Memory, or when
 `worker_publish` is `"approve"`), `draft S "Title" --worker K [--from file|-]` (writes the draft
 AND the outbox `page` item), `publish <draft_path> --space S`, `spaces`, `mkspace "Name"`.
@@ -185,7 +185,7 @@ speaks with `call say --voice <its voice>` (lines also tagged in `said`).
 - Inbound: `inbox/<key>.jsonl` lines `{ "id", "at", "source": "slack", "from", "channel",
   "thread", "text", "delivered": false }`. The inbox-relay mod delivers each undelivered line to
   the worker with `$.session.send`, then records it in `inbox/<key>.delivered`.
-- Replies: the worker runs `~/.claude/skills/colleague/bin/reply <inbox-id> "<text>"`, which writes
+- Replies: the worker runs `~/.claude/skills/gods/bin/reply <inbox-id> "<text>"`, which writes
   `replies/<inbox-id>.json`; the bridge daemon posts it in that thread and deletes the file.
 - Only allow-listed Slack users and channels reach a worker. Everything else is dropped and
   logged. Tokens come from the environment or the macOS keychain, never from a file in the repo.
@@ -194,12 +194,12 @@ speaks with `call say --voice <its voice>` (lines also tagged in `said`).
 
 | track | owns (live path) |
 |---|---|
-| A gods art | `dev-mods/<s>/workers-pane/hooks/gods.ts`, `~/.claude/skills/colleague/bin/gods/`, repo `art/`, repo `scripts/render-gods.mjs` |
+| A gods art | `dev-mods/<s>/workers-pane/hooks/gods.ts`, `~/.claude/skills/gods/bin/gods/`, repo `art/`, repo `scripts/render-gods.mjs` |
 | B Workers pane | `dev-mods/<s>/workers-pane/` except `hooks/gods.ts` |
-| C call pill | `~/.claude/skills/colleague/bin/pill.swift`, `CallPill.app`, repo `scripts/build-pill.sh` |
+| C call pill | `~/.claude/skills/gods/bin/pill.swift`, `CallPill.app`, repo `scripts/build-pill.sh` |
 | D Spaces | `dev-mods/<s>/spaces-pane/`, `bin/pages`, `~/.claude/skills/spaces/` |
-| E bridges | `dev-mods/<s>/inbox-relay/`, `~/.claude/skills/colleague/bridges/`, `bin/reply`, `bin/bridge` |
-| F voice + guard | `bin/call`, `bin/listen.py`, `bin/narrate`, `bin/outbox-say`, new `bin/guard`, `~/.claude/skills/colleague/SKILL.md`, `~/.claude/settings.json` hooks |
+| E bridges | `dev-mods/<s>/inbox-relay/`, `~/.claude/skills/gods/bridges/`, `bin/reply`, `bin/bridge` |
+| F voice + guard | `bin/call`, `bin/listen.py`, `bin/narrate`, `bin/outbox-say`, new `bin/guard`, `~/.claude/skills/gods/SKILL.md`, `~/.claude/settings.json` hooks |
 
 `<s>` = the session's dev-mods folder. Integration, the public repo, README, commits and pushes:
 the lead session only. Tracks write files; they never run `git add`, `commit` or `push`.

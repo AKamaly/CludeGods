@@ -20,31 +20,31 @@ jobs:
           python-version: "3.12"
 
       - name: Echo gate and barge-in (listen.py)
-        run: python3 -I skills/colleague/bin/listen.py --selftest
+        run: python3 -I skills/gods/bin/listen.py --selftest
 
       - name: Worker tool permissions (guard)
-        run: python3 -I skills/colleague/bin/guard --selftest
+        run: python3 -I skills/gods/bin/guard --selftest
 
       - name: Permission prompts (permit)
-        run: python3 -I skills/colleague/bin/permit --selftest
+        run: python3 -I skills/gods/bin/permit --selftest
 
       - name: Spaces and Pages (pages CLI)
         run: python3 -B -I -m unittest discover -s skills/spaces/tests -v
 
       - name: Slack bridge
-        run: python3 -B -I -m unittest discover -s skills/colleague/bridges/slack/tests -v
+        run: python3 -B -I -m unittest discover -s skills/gods/bridges/slack/tests -v
 
       - name: Shell scripts parse
         run: |
-          for f in install.sh scripts/build-pill.sh skills/colleague/bin/call \
-                   skills/colleague/bin/outbox-say skills/colleague/bin/bridge; do
+          for f in install.sh scripts/build-pill.sh skills/gods/bin/call \
+                   skills/gods/bin/outbox-say skills/gods/bin/bridge; do
             bash -n "$f" && echo "ok  $f"
           done
 
       - name: Manifests are valid JSON
         run: |
           for f in .claude-plugin/marketplace.json mods/*/.claude-plugin/plugin.json \
-                   mods/*/hooks/hooks.json config/*.json skills/colleague/bin/gods/index.json; do
+                   mods/*/hooks/hooks.json config/*.json skills/gods/bin/gods/index.json; do
             python3 -m json.tool "$f" > /dev/null && echo "ok  $f"
           done
 
@@ -53,7 +53,7 @@ jobs:
 
       - name: Snapshot every CallPill state
         continue-on-error: true
-        run: skills/colleague/bin/pill --snapshot callpill-states.png
+        run: skills/gods/bin/pill --snapshot callpill-states.png
 
       - name: Upload the snapshot
         if: always()

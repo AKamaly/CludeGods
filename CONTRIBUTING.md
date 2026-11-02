@@ -19,12 +19,12 @@ Thanks for helping. CludeGods is alpha, so small, focused changes are easiest to
 What CI runs, and you can run locally from the repo root:
 
 ```bash
-python3 -I skills/colleague/bin/listen.py --selftest
-python3 -I skills/colleague/bin/guard --selftest
-python3 -I skills/colleague/bin/permit --selftest
+python3 -I skills/gods/bin/listen.py --selftest
+python3 -I skills/gods/bin/guard --selftest
+python3 -I skills/gods/bin/permit --selftest
 python3 -B -I -m unittest discover -s skills/spaces/tests
-python3 -B -I -m unittest discover -s skills/colleague/bridges/slack/tests
-scripts/build-pill.sh && skills/colleague/bin/pill --snapshot /tmp/callpill.png
+python3 -B -I -m unittest discover -s skills/gods/bridges/slack/tests
+scripts/build-pill.sh && skills/gods/bin/pill --snapshot /tmp/callpill.png
 ```
 
 What CI cannot run, so run it yourself before opening the pull request:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# call: voice-call plumbing for the colleague skill, on VoiceMode's ears and mouth.
+# call: voice-call plumbing for the gods skill, on VoiceMode's ears and mouth.
 #
 #   call start [--greet TEXT]   start the ears (always-on mic) and the mouth (speaker);
 #                      --greet speaks TEXT as soon as the voice is up (no extra model turn)

@@ -24,7 +24,7 @@ and never publishes a Memory draft (every worker follows Memory, so the owner re
 A missing or invalid config.json means the defaults; config never makes the hook fail.
 
 Every worker may also use the harness tools that change nothing (ToolSearch, TodoWrite,
-Skill, ...) and may speak on the call (`~/.claude/skills/colleague/bin/call say`).
+Skill, ...) and may speak on the call (`~/.claude/skills/gods/bin/call say`).
 
 Allowed: prints nothing, exit 0, so the normal permission flow carries on (this hook never
 grants anything). Denied: the hook's JSON decision with a reason the worker can act on.
@@ -324,7 +324,7 @@ def segments(cmd):
 
 
 def colleague_script(word):
-    """'call' / 'pages' / ... when word is one of the colleague skill's own scripts."""
+    """'call' / 'pages' / ... when word is one of the gods skill's own scripts."""
     path = expand(word)
     if path and os.path.dirname(path) == BIN:
         return os.path.basename(path)
@@ -339,7 +339,7 @@ def speaking(words):
 
 PAGES_READ = ("list", "show", "spaces")
 PAGES_WRITE = ("publish", "new", "mkspace")
-PAGES_WRITE_RE = re.compile(r"""colleague/bin/pages['"]?\s+['"]?(publish|new|mkspace)\b""")
+PAGES_WRITE_RE = re.compile(r"""(?:colleague|gods)/bin/pages['"]?\s+['"]?(publish|new|mkspace)\b""")
 DRAFT_ID_RE = re.compile(r"ob_[0-9a-f]{12}")
 
 
@@ -361,7 +361,7 @@ def pages_words(words):
         w = w[1:]
         while w and w[0].startswith("-"):
             w = w[1:]
-    if w and (colleague_script(w[0]) == "pages" or w[0].endswith("/colleague/bin/pages")):
+    if w and (colleague_script(w[0]) == "pages" or w[0].endswith(("/gods/bin/pages", "/colleague/bin/pages"))):
         return w
     return None
 
@@ -596,7 +596,7 @@ def decide(worker, tool, inp, cwd=None):
         if draft_area(key, path):
             return None
         return (f"{name} has the drafts preset: write to its outbox instead ({outbox}), "
-                f"or draft a page with ~/.claude/skills/colleague/bin/pages draft.")
+                f"or draft a page with ~/.claude/skills/gods/bin/pages draft.")
     if tool == "Bash":
         why = bash_problem(key, inp.get("command", ""))
         if why is None:

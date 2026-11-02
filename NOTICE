@@ -11,7 +11,7 @@ mlx-audio (MIT), Silero VAD (MIT), and ONNX Runtime (MIT). Check each project fo
 
 Spaces and Pages, review before saving, per-worker permissions and the Slack bridge follow the
 design of OpenDots (https://github.com/CopilotKit/OpenDots), MIT licensed, copyright Atai
-Barkai. mods/spaces-pane/hooks/register.tsx and skills/colleague/bin/pages adapt its
+Barkai. mods/spaces-pane/hooks/register.tsx and skills/gods/bin/pages adapt its
 pageExcerpt helper; the rest is written for Claude Code.
 
 Interface icons are drawn after Lucide (https://lucide.dev), ISC licensed, copyright Lucide

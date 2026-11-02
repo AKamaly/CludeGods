@@ -3,7 +3,7 @@
 
 Register (in ~/.claude/settings.json, see config/settings.example.json):
   "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command",
-      "command": "$HOME/.claude/skills/colleague/bin/permit", "timeout": 60}]}]
+      "command": "$HOME/.claude/skills/gods/bin/permit", "timeout": 60}]}]
 
 Where prompts show is `approvals.permission_prompts` in ~/.voicemode/call/config.json:
   - "app" (the default, also for a missing or invalid config): exit 0 at once, no output,
@@ -32,7 +32,7 @@ import time
 HOME = os.path.expanduser("~")
 CALL = os.environ.get("PERMIT_CALL_DIR") or os.path.join(HOME, ".voicemode", "call")
 PERMIT_DIR = os.environ.get("PERMIT_DIR") or os.path.join(CALL, "permit")
-CALL_BIN = os.path.join(HOME, ".claude", "skills", "colleague", "bin", "call")
+CALL_BIN = os.path.join(HOME, ".claude", "skills", "gods", "bin", "call")
 
 
 def prompt_mode():

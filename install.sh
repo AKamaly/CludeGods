@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CludeGods installer. Installs everything that lives in this repository: the colleague and
+# CludeGods installer. Installs everything that lives in this repository: the gods and
 # spaces skills, CallPill, the hooks, Silero VAD for VoiceMode's ears, and the state folder.
 # Safe to run again: it backs up what it replaces and adds only what is missing.
 #
@@ -80,7 +80,30 @@ fi
 
 step "3. Skills"
 mkdir -p "$SKILLS"
-for s in colleague spaces; do
+# 0.5 renamed the skill from `colleague` (/colleague) to `gods` (/gods). Move the old one out of
+# ~/.claude/skills (a copy left there would load as a second skill) and point every path that
+# named it at the new folder: the hooks in settings.json and the workers' registry.
+if [ -d "$SKILLS/colleague" ]; then
+  mkdir -p "$BACKUPS" && mv "$SKILLS/colleague" "$BACKUPS/colleague"
+  note "moved the old colleague skill to ~/.claude/cludegods-backups/$STAMP/colleague (it is /gods now)"
+  [ -d "$SKILLS/gods" ] || cp -R "$BACKUPS/colleague" "$SKILLS/gods"
+  for f in "$HOME/.claude/settings.json" "$CALL/workers.json"; do
+    if [ -f "$f" ] && grep -q "skills/colleague/" "$f"; then
+      cp -p "$f" "$BACKUPS/$(basename "$f")"
+      python3 - "$f" <<'PY'
+import os, sys, tempfile
+p = sys.argv[1]
+s = open(p).read().replace("skills/colleague/", "skills/gods/")
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p))
+with os.fdopen(fd, "w") as fh:
+    fh.write(s)
+os.replace(tmp, p)
+PY
+      ok "updated skill paths in $(basename "$f")"
+    fi
+  done
+fi
+for s in gods spaces; do
   dst="$SKILLS/$s"
   if [ -d "$dst" ] && ! diff -rq -x CallPill.app -x pill -x __pycache__ "$REPO/skills/$s" "$dst" >/dev/null 2>&1; then
     # Back up outside ~/.claude/skills: a copy left there would load as a second skill.
@@ -89,13 +112,13 @@ for s in colleague spaces; do
   rsync -a --exclude __pycache__ "$REPO/skills/$s/" "$dst/"
   ok "$s skill in ~/.claude/skills/$s"
 done
-chmod +x "$SKILLS/colleague/bin/"{call,listen.py,narrate,permit,guard,outbox-say,pages,reply,bridge} 2>/dev/null || true
+chmod +x "$SKILLS/gods/bin/"{call,listen.py,narrate,permit,guard,outbox-say,pages,reply,bridge} 2>/dev/null || true
 
 step "4. CallPill"
 if [ "$PILL" = 0 ]; then
   note "skipped (--skip-pill)"
 elif command -v swiftc >/dev/null; then
-  "$REPO/scripts/build-pill.sh" "$SKILLS/colleague/bin" >/dev/null 2>&1 && ok "built and signed CallPill.app" || note "CallPill build failed: run scripts/build-pill.sh to see why"
+  "$REPO/scripts/build-pill.sh" "$SKILLS/gods/bin" >/dev/null 2>&1 && ok "built and signed CallPill.app" || note "CallPill build failed: run scripts/build-pill.sh to see why"
 else
   note "swiftc not found: run xcode-select --install, then ./install.sh again"
   LATER+=("install the Xcode command line tools and run ./install.sh again (CallPill)")
@@ -164,7 +187,7 @@ cat <<'EOF'
      Or in the desktop app: + next to the prompt box, Plugins, Add marketplace
      AKamaly/CludeGods, then add each plugin. Restart the app once afterwards.
 
-  b) Start a call: type /colleague in any chat.
+  b) Start a call: type /gods in any chat.
 EOF
 if [ ${#LATER[@]} -gt 0 ]; then
   step "Still to do:"

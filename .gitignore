@@ -1,6 +1,6 @@
 # build outputs
-skills/colleague/bin/pill
-skills/colleague/bin/CallPill.app/
+skills/gods/bin/pill
+skills/gods/bin/CallPill.app/
 *.app/
 *.o
 __pycache__/

@@ -33,7 +33,7 @@ _The app scene, a call with a barge-in, a permission approved with a click, and 
 ## Overview
 
 CludeGods is a small set of parts that sit on top of Claude Code and
-[VoiceMode](https://github.com/mbailey/voicemode). You type `/colleague`, a small call
+[VoiceMode](https://github.com/mbailey/voicemode). You type `/gods`, a small call
 card with the colleague god appears in the corner, and you talk to your Claude Code session the way you would to
 someone sitting next to you. Over on the right, a Workers pane shows your standing worker
 chats, each with a task box.
@@ -51,7 +51,7 @@ always-on worker, and a worker on the call._
 
 The parts:
 
-- **`colleague` skill**: a live voice call with your Claude Code session. An
+- **`gods` skill**: a live voice call with your Claude Code session. An
   always-on mic streams your words in, Claude answers out loud without blocking its own
   work, and you can cut in at any time.
 - **CallPill**: a floating macOS call card. The god on the call (the colleague, or the
@@ -73,7 +73,7 @@ The parts:
 
 ### What it feels like
 
-You type `/colleague`. Claude says "I'm here. What's first?" You ask "Can you check why the
+You type `/gods`. Claude says "I'm here. What's first?" You ask "Can you check why the
 build broke this morning?" Claude says "Hmm, let me look," and while it reads logs you hear
 "Reading the CI log." and "Searching the code." between your own questions. Halfway through
 its answer you say "wait, not that one," and it stops talking and listens.
@@ -89,7 +89,7 @@ a task into Scribe's box and press Enter.
 
 ### Hop on a call with Claude
 
-`/colleague` starts the ears (always-on capture with Silero VAD and Whisper), the mouth (a
+`/gods` starts the ears (always-on capture with Silero VAD and Whisper), the mouth (a
 non-blocking speech queue), and CallPill. The god on the call card moves through Listening, You, Thinking,
 and talking, with the line being spoken as its caption. Talk over Claude and it stops: each partial transcript is checked while a line
 plays, and if it is you, the speech is cut and your words go straight to the session.
@@ -217,12 +217,12 @@ returns the call to Claude. Names must match a worker exactly; Claude asks if it
 
 ### Bring workers into Slack
 
-`skills/colleague/bridges/slack/` is a local Socket Mode Slack app, so it needs no public
+`skills/gods/bridges/slack/` is a local Socket Mode Slack app, so it needs no public
 URL. Mention the app or DM it, optionally with a worker's name first ("@CludeGods scribe
 draft the release note"), and the message lands in that worker's chat; the reply goes back
 into the same thread. Only allow-listed users and channels get through, replies can only go
 to threads that came in that way, and tokens live in your keychain. Setup, the app manifest,
-and what leaves your Mac: [bridges/slack/README.md](skills/colleague/bridges/slack/README.md).
+and what leaves your Mac: [bridges/slack/README.md](skills/gods/bridges/slack/README.md).
 Microsoft Teams is not supported yet.
 
 ### Each worker gets only the tools you give it
@@ -288,9 +288,9 @@ I'm on a Mac with Apple Silicon and the Claude desktop app.
 5. The panes: run `claude plugin marketplace add AKamaly/CludeGods`, then
    `claude plugin install workers-pane@cludegods`, `claude plugin install spaces-pane@cludegods`
    and `claude plugin install inbox-relay@cludegods`.
-6. Check it: run `~/.claude/skills/colleague/bin/call status` and `claude plugin list`, then
+6. Check it: run `~/.claude/skills/gods/bin/call status` and `claude plugin list`, then
    tell me in a few lines what is installed and anything that failed.
-7. Finish by telling me to restart the Claude app once, then type /colleague in any chat to
+7. Finish by telling me to restart the Claude app once, then type /gods in any chat to
    start a voice call. The Workers and Spaces buttons appear in the chat footer.
 ```
 
@@ -345,7 +345,7 @@ needed for Slack. In the desktop app, where `/plugin` does not run: click **+** 
 prompt box, then **Plugins**, **Add marketplace** with `AKamaly/CludeGods`, and add each
 plugin. Restart the app once.
 
-That's it. Type `/colleague` in any chat to start a call. The first call takes up to a
+That's it. Type `/gods` in any chat to start a call. The first call takes up to a
 minute while the voice model loads.
 
 <details>
@@ -373,8 +373,8 @@ minute while the voice model loads.
 
    ```bash
    mkdir -p ~/.claude/skills
-   cp -R skills/colleague skills/spaces ~/.claude/skills/
-   scripts/build-pill.sh ~/.claude/skills/colleague/bin
+   cp -R skills/gods skills/spaces ~/.claude/skills/
+   scripts/build-pill.sh ~/.claude/skills/gods/bin
    ```
 
 4. The hooks: merge `config/settings.example.json` into `~/.claude/settings.json`, keeping
@@ -396,14 +396,14 @@ minute while the voice model loads.
 
 ### The call
 
-- **Start:** type `/colleague`, or say "let's talk" in a chat. Claude starts the mic, the
+- **Start:** type `/gods`, or say "let's talk" in a chat. Claude starts the mic, the
   voice and CallPill, and says "I'm here. What's first?" Then just talk. The conversation
   runs best on Haiku at low effort; heavier work goes to Sonnet or Opus helpers by itself.
 - **Cut in** any time: talk over Claude and it stops and listens.
-- **Mute key:** `~/.claude/skills/colleague/bin/call mic` toggles the mic, the same as the
+- **Mute key:** `~/.claude/skills/gods/bin/call mic` toggles the mic, the same as the
   pill's Mic button. Bind it to a keyboard shortcut with the Shortcuts app (a "Run Shell
   Script" action).
-- **Something off?** `~/.claude/skills/colleague/bin/call status` shows the voice and Whisper
+- **Something off?** `~/.claude/skills/gods/bin/call status` shows the voice and Whisper
   services, what the ears last heard, and whether a listener is armed.
 - **CallPill** shows who you are talking to and what they are saying. **Mic** mutes you
   (capture really stops); **Stop** cuts the speech and stops the current work and its
@@ -469,7 +469,7 @@ Open them with the **Spaces** button in the footer, or `/spaces-pane`.
 
 Mention your workers in your own Slack workspace and they answer in the thread. It needs a
 Slack app you create in a few minutes; setup and what leaves your Mac are in
-[skills/colleague/bridges/slack/README.md](skills/colleague/bridges/slack/README.md).
+[skills/gods/bridges/slack/README.md](skills/gods/bridges/slack/README.md).
 
 ### Waiting sessions (optional)
 
@@ -497,7 +497,7 @@ flowchart LR
 
   ears -- "heard_*.jsonl" --> listen["listen.py<br/>echo gate + barge-in"]
   listen -- "USER: ... lines" --> monitor["Monitor tool"]
-  monitor --> session["the call session<br/>(Claude Code, colleague skill)"]
+  monitor --> session["the call session<br/>(Claude Code, gods skill)"]
   session -- "call say" --> mouth
   mouth --> spk([Speakers / headphones])
   listen -. "call hush on barge-in" .-> mouth
@@ -539,7 +539,7 @@ Everything runs on your Mac. The only state is plain files under `~/.voicemode/c
 
 ### Components
 
-#### `skills/colleague/bin/call`
+#### `skills/gods/bin/call`
 
 The plumbing, one shell script. `call start` launches the ears (always-on capture with
 Silero VAD and Whisper), the mouth (a non-blocking speech queue), and the pill.
@@ -553,7 +553,7 @@ Mac's sound output when it changes mid-call. Settings by environment: `CALL_VOIC
 `CALL_MIC_DEVICE`, `VOICEMODE_PY`. `~/.voicemode/call/config.json` may set `user_label`, the
 label your lines carry (default `USER`).
 
-#### `skills/colleague/bin/listen.py`
+#### `skills/gods/bin/listen.py`
 
 Runs under Claude Code's `Monitor` tool and turns the ears' log into one line per event:
 `USER: …`, `USER (over you): …`, `EARS: down`, `EARS: muted`, `PANE: …`. Two jobs:
@@ -572,14 +572,14 @@ Runs under Claude Code's `Monitor` tool and turns the ears' log into one line pe
 `listen.py --selftest` runs the gate against synthetic logs; `--replay FILE` runs a real
 log through it and prints every decision.
 
-#### `skills/colleague/bin/narrate`
+#### `skills/gods/bin/narrate`
 
 A `PreToolUse` hook. During a live call, and only in the call's own session, it turns the
 tool call into a short spoken line ("Now I'm going to run the tests.", "Reading
 config.py.") at most once every 6 seconds. Standard library only, always exits 0, never
 blocks a tool.
 
-#### `skills/colleague/bin/permit` and CallPill
+#### `skills/gods/bin/permit` and CallPill
 
 `permit` is a `PermissionRequest` hook. By default (`approvals.permission_prompts` is
 `"app"`) it exits at once with no output and the app's own dialog handles the prompt. With
@@ -590,7 +590,7 @@ only thing that writes the answer. On a timeout the hook prints nothing and the 
 in-app dialog takes over. `permit --selftest` runs both modes.
 
 CallPill (`pill.swift`) is a native AppKit app with no dependencies. The god is a sprite
-strip from `skills/colleague/bin/gods/` stepped on a CALayer (about 1.5% CPU), mapped to
+strip from `skills/gods/bin/gods/` stepped on a CALayer (about 1.5% CPU), mapped to
 the call: Listening is idle, You is listen, Thinking is work, Claude talking is talk, and a
 finished reply plays one happy loop. `~/.voicemode/call/focus` names the worker on the
 call, and the card switches to that worker's god and name. Light and dark follow the
@@ -644,7 +644,7 @@ transcript. `hooks/gods.ts` draws the six gods as SVG (animated with SMIL while 
 generates when it loads the mod. It is there so your editor and `tsc` type-check the mod;
 the generated types are not committed.
 
-#### `mods/spaces-pane` and `skills/colleague/bin/pages`
+#### `mods/spaces-pane` and `skills/gods/bin/pages`
 
 `pages` is a standard-library Python CLI over `~/.voicemode/call/spaces/<space>/<page>.md`
 (front matter: `title`, `created`, `updated`, `by`, `parent`): `spaces`, `mkspace`,
@@ -656,7 +656,7 @@ approved. `new --worker K` is refused (exit 4) for Memory, and for every worker 
 library, the page view, Ask a worker, and a footer launcher. `skills/spaces/SKILL.md` tells
 workers how to use it.
 
-#### `skills/colleague/bin/guard`
+#### `skills/gods/bin/guard`
 
 A `PreToolUse` hook. It maps the hook's session to a worker through the registry's
 `transcript`, and holds that worker to its `tools` preset. Sessions that are not workers,
@@ -666,7 +666,7 @@ Memory draft, and requires a worker's own `--worker` key on `pages new|draft`. A
 invalid `config.json` means the defaults. It fails open on its own errors and logs to
 `~/.voicemode/call/guard.log`. `guard --selftest` runs its cases.
 
-#### `skills/colleague/bridges/slack`, `mods/inbox-relay`, `bin/reply`, `bin/bridge`
+#### `skills/gods/bridges/slack`, `mods/inbox-relay`, `bin/reply`, `bin/bridge`
 
 The bridge daemon (Python, `slack_sdk` in its own uv venv) writes allowed messages to
 `~/.voicemode/call/inbox/<worker>.jsonl`. The inbox-relay mod hands each one to the
@@ -677,7 +677,7 @@ the thread it came from. `bin/bridge start|stop|status|log` runs the daemon.
 
 `art/gods.js` is the source of the six gods (colleague, research, scribe, scout, sales,
 herald) and their states (idle, talk, listen, work, happy). `render-gods.mjs` renders the
-sprite strips CallPill animates (`skills/colleague/bin/gods/`).
+sprite strips CallPill animates (`skills/gods/bin/gods/`).
 
 #### `patches/voicemode-mouth-bluetooth.patch`
 
@@ -686,7 +686,7 @@ native sample rate (48 kHz on AirPods) with continuous upsampling, and open the 
 high latency. Without it, Bluetooth outputs crackle. `VOICEMODE_MOUTH_LATENCY` overrides
 the latency.
 
-#### `skills/colleague/design/`
+#### `skills/gods/design/`
 
 `orb.html` is the WebGL orb the first CallPill used; `workers.html` is the pane mockup. Open
 either in a browser.
@@ -746,7 +746,7 @@ worker your note on what to revise, and it appends a revised item; the old one l
 list once the chat has the note.
 
 **The spoken heads-up.** Each new outbox line is toasted in the app. During a live call,
-`skills/colleague/bin/outbox-say` also speaks one line for it ("Inbox drafted a reply to
+`skills/gods/bin/outbox-say` also speaks one line for it ("Inbox drafted a reply to
 the venue about Friday"), once per line, however many panes saw it.
 
 **Approvals.** Approve on the card, or open the worker's chat, edit the draft there and
@@ -836,7 +836,7 @@ Ideas, not built:
 ```
 install.sh               one-command install of everything in this repo
 .claude-plugin/          marketplace.json: the three mods, for /plugin install
-skills/colleague/        the skill: SKILL.md, bin/ (call, listen.py, narrate, permit, guard, outbox-say,
+skills/gods/        the skill: SKILL.md, bin/ (call, listen.py, narrate, permit, guard, outbox-say,
                          pages, reply, bridge, pill.swift, gods/), bridges/slack/, design/
 skills/spaces/           the skill workers read for Spaces and Pages
 mods/workers-pane/       the Workers pane mod (hooks/, tests/)

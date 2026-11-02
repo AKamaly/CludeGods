@@ -11,8 +11,8 @@
 // god whole through its loop: the colleague's halo glow rises a full diameter above the centre
 // when happy, the herald's notes reach 0.96 to the right. At 1.6 the colleague's halo and the
 // paper plane are cut off. The script reports any frame where the art touches the edge.
-// Default --out is skills/colleague/bin/gods in this repo; the live copy the pill reads is
-// ~/.claude/skills/colleague/bin/gods.
+// Default --out is skills/gods/bin/gods in this repo; the live copy the pill reads is
+// ~/.claude/skills/gods/bin/gods.
 //
 // Needs puppeteer-core and a Chrome. Chrome: $CHROME_PATH or $PUPPETEER_EXECUTABLE_PATH, else the
 // newest chrome-headless-shell under ~/.cache/puppeteer (`npx @puppeteer/browsers install
@@ -38,7 +38,7 @@ const DITHER = 0.5 // see quantise()
 
 function args() {
   const a = process.argv.slice(2)
-  const o = { out: path.join(ROOT, 'skills', 'colleague', 'bin', 'gods'), kinds: KINDS, states: STATES, frame: 256, frames: 24, fps: 12, box: 2.048 }
+  const o = { out: path.join(ROOT, 'skills', 'gods', 'bin', 'gods'), kinds: KINDS, states: STATES, frame: 256, frames: 24, fps: 12, box: 2.048 }
   for (let i = 0; i < a.length; i++) {
     const k = a[i]
     const v = a[i + 1]

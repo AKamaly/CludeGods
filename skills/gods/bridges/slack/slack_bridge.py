@@ -876,7 +876,7 @@ def _alive(pid_file: Path) -> Optional[int]:
         return None
 
 
-SETUP = "~/.claude/skills/colleague/bridges/slack/README.md"
+SETUP = "~/.claude/skills/gods/bridges/slack/README.md"
 
 
 def check(paths: Paths, env=None, run: Callable = subprocess.run) -> Tuple[bool, List[str]]:
@@ -908,11 +908,11 @@ def status(paths: Paths, env=None, run: Callable = subprocess.run) -> List[str]:
         if last.get("state") == "error" and last.get("detail"):
             return [
                 f"slack: not running, last error: {last['detail']}",
-                "  log: ~/.voicemode/call/slack-bridge.log; start again with ~/.claude/skills/colleague/bin/bridge start",
+                "  log: ~/.voicemode/call/slack-bridge.log; start again with ~/.claude/skills/gods/bin/bridge start",
             ]
         return [
             f"slack: stopped ({lines[0][len('ready: '):]})",
-            "  start it with ~/.claude/skills/colleague/bin/bridge start",
+            "  start it with ~/.claude/skills/gods/bin/bridge start",
         ]
     st = read_state(paths)
     state = st.get("state") or "starting"

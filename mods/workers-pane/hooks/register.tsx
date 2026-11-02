@@ -157,7 +157,7 @@ async function paths($: Host): Promise<Paths> {
   }
   home = home.replace(/\/+$/, '')
   const call = `${home}/.voicemode/call`
-  const bin = `${home}/.claude/skills/colleague/bin`
+  const bin = `${home}/.claude/skills/gods/bin`
   return {
     home,
     registry: `${call}/workers.json`,
@@ -398,7 +398,7 @@ function splitEntry(text: string): { name: string; role: string } {
  * The request + New worker puts in the prompt box. Its first line is the one-line form a
  * call session parses (`;` and newlines would break its fields; the v1 fields come
  * first, so a call session that only knows them still works). With a `key`, the pane
- * has already written the entry, and the lines after it tell any chat, colleague skill
+ * has already written the entry, and the lines after it tell any chat, gods skill
  * loaded or not, how to start the worker's chat and where its id goes.
  */
 export function createText(f: { name: string; role: string; god: GodKind; tools?: ToolsPreset; key?: string }): string {
@@ -1738,7 +1738,7 @@ export const register: Register = on => {
           try {
             await $.fs.stat(p.pages)
           } catch {
-            $.ui.toast(`Couldn't save "${item.title}": ~/.claude/skills/colleague/bin/pages is not installed yet`)
+            $.ui.toast(`Couldn't save "${item.title}": ~/.claude/skills/gods/bin/pages is not installed yet`)
             return
           }
           let r: { exitCode: number; stdout: string; stderr: string }

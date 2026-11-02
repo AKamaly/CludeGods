@@ -88,7 +88,7 @@ export function pathsFor(home: string): Paths {
     drafts: `${call}/spaces/.drafts`,
     outbox: `${call}/outbox`,
     registry: `${call}/workers.json`,
-    pages: `${home}/.claude/skills/colleague/bin/pages`,
+    pages: `${home}/.claude/skills/gods/bin/pages`,
     openFlag: `${call}/open-spaces`,
     workersFlag: `${call}/open-workers`,
   }

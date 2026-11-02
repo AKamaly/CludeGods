@@ -1,6 +1,6 @@
 """Slack bridge tests against a fake Slack client and socket; nothing reaches Slack.
 
-  python3 -B -m unittest discover -s ~/.claude/skills/colleague/bridges/slack/tests -v
+  python3 -B -m unittest discover -s ~/.claude/skills/gods/bridges/slack/tests -v
 """
 import json
 import logging

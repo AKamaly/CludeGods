@@ -59,7 +59,7 @@ whole loop. Strips are 256-colour PNGs with light ordered dithering, about 150 t
 ```sh
 npm i --no-save puppeteer-core                     # once, in the repo
 npx @puppeteer/browsers install chrome-headless-shell@stable --path ~/.cache/puppeteer   # once, if you have no Chrome
-node scripts/render-gods.mjs --out ~/.claude/skills/colleague/bin/gods
+node scripts/render-gods.mjs --out ~/.claude/skills/gods/bin/gods
 ```
 
 Options: `--kinds colleague,scout`, `--states talk,idle`, `--frame`, `--frames`, `--fps`,

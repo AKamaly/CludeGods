@@ -1,6 +1,6 @@
 """bin/reply and bin/bridge, run as a worker would, against a throwaway HOME.
 
-  python3 -B -m unittest discover -s ~/.claude/skills/colleague/bridges/slack/tests -v
+  python3 -B -m unittest discover -s ~/.claude/skills/gods/bridges/slack/tests -v
 """
 import json
 import os
