@@ -249,8 +249,43 @@ _MIT licensed. The voice stack runs locally; the session itself still talks to C
 
 ### Install (macOS on Apple Silicon)
 
-You need the Claude desktop app with Claude Code, [Homebrew](https://brew.sh), `uv`
-(`brew install uv`), and the Xcode command line tools (`xcode-select --install`). Three steps.
+You need the Claude desktop app with Claude Code, [Homebrew](https://brew.sh), and the Xcode
+command line tools (`xcode-select --install`).
+
+#### Fastest: let Claude install it
+
+Copy this, paste it into a Claude Code chat, and press Enter. Claude installs everything,
+asks you two quick questions on the way, and tells you when it is ready.
+
+```text
+Install CludeGods for me from https://github.com/AKamaly/CludeGods and get it running.
+I'm on a Mac with Apple Silicon and the Claude desktop app.
+
+1. Prerequisites: check for Homebrew, git, uv and the Xcode command line tools. Install uv
+   with `brew install uv` if it is missing. If Homebrew or the Xcode tools are missing,
+   tell me how to install them and stop.
+2. Find the Claude Code CLI: use `claude` if it is on my PATH and supports
+   `claude plugin marketplace`; otherwise use the newest
+   ~/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude
+   (quote the path, it has spaces). Use that CLI for every `claude` command below.
+3. VoiceMode, the local voice: run `claude plugin marketplace add mbailey/voicemode` and
+   `claude plugin install voicemode@voicemode`. Then run `uvx voice-mode-install --dry-run`,
+   show me what it will install, and after my yes run `uvx voice-mode-install --yes`.
+   Then run `voicemode service install mlx-audio`, `voicemode whisper model large-v3-turbo`,
+   `voicemode service enable whisper` and `voicemode service enable mlx-audio`.
+4. CludeGods: clone the repo to ~/CludeGods (or `git pull` there if it already exists).
+   Ask me if I use AirPods or other Bluetooth headphones. Then run `./install.sh` from that
+   folder, adding `--bluetooth-patch` if I said yes.
+5. The panes: run `claude plugin marketplace add AKamaly/CludeGods`, then
+   `claude plugin install workers-pane@cludegods`, `claude plugin install spaces-pane@cludegods`
+   and `claude plugin install inbox-relay@cludegods`.
+6. Check it: run `~/.claude/skills/colleague/bin/call status` and `claude plugin list`, then
+   tell me in a few lines what is installed and anything that failed.
+7. Finish by telling me to restart the Claude app once, then type /colleague in any chat to
+   start a voice call. The Workers and Spaces buttons appear in the chat footer.
+```
+
+#### Or step by step
 
 **1. VoiceMode** (the local ears and voice). In Claude Code:
 
