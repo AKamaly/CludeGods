@@ -12,8 +12,9 @@
 # the strips appear.
 #
 # The signature is ad-hoc but carries a fixed designated requirement, so macOS (TCC) keeps the
-# app's grants across rebuilds. Override the identifier with CALLPILL_BUNDLE_ID; keep it the
-# same from one build to the next.
+# app's grants across rebuilds (scripts/sign-pill.sh). Override the identifier with
+# CALLPILL_BUNDLE_ID; keep it the same from one build to the next. CALLPILL_TARGET sets the
+# compile target, e.g. arm64-apple-macos13 for a release build that runs on older macOS.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,7 +28,7 @@ command -v swiftc > /dev/null || { echo "swiftc not found: install the Xcode com
 
 echo "compiling $SRC"
 # AppKit, QuartzCore and ImageIO only: the god is a sprite strip stepped on a CALayer, no Metal.
-swiftc -O "$SRC" -o "$BIN/pill"
+swiftc -O ${CALLPILL_TARGET:+-target "$CALLPILL_TARGET"} "$SRC" -o "$BIN/pill"
 
 APP="$BIN/CallPill.app"
 mkdir -p "$APP/Contents/MacOS"
@@ -51,7 +52,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign -f -s - -i "$ID" -r="designated => identifier \"$ID\"" "$APP"
+CALLPILL_BUNDLE_ID="$ID" "$ROOT/scripts/sign-pill.sh" "$APP"
 echo "built $APP ($ID)"
 [ -f "$BIN/gods/index.json" ] || echo "note: $BIN/gods/ has no sprites yet (scripts/render-gods.mjs renders them)"
 echo "preview every state without a window: $BIN/pill --snapshot /tmp/callpill.png"

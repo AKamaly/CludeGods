@@ -1,30 +1,34 @@
 #!/usr/bin/env bash
-# CludeGods installer. Installs everything that lives in this repository: the gods and
-# spaces skills, CallPill, the hooks, Silero VAD for VoiceMode's ears, and the state folder.
+# CludeGods installer. Installs what lives in this repository: the gods and spaces skills,
+# the cludegods CLI, CallPill, the hooks and the state folder. Workers and Spaces need nothing
+# else; voice is an upgrade on top (--voice, or `cludegods setup voice` later).
 # Safe to run again: it backs up what it replaces and adds only what is missing.
 #
-#   ./install.sh                     install or update
+#   ./install.sh                     install or update (no VoiceMode, Xcode tools or uv needed)
+#   ./install.sh --voice             also set up voice: VoiceMode, its services, Silero VAD
 #   ./install.sh --bluetooth-patch   also patch VoiceMode's mouth for Bluetooth output
-#   ./install.sh --skip-pill         do not build CallPill
+#   ./install.sh --skip-pill         do not install CallPill
+#   ./install.sh --yes               answer yes to the voice setup's questions
 #
-# VoiceMode itself and the three desktop mods install from inside Claude Code; the script
-# prints those steps at the end.
+# bootstrap.sh (the one-line install) runs this, then installs the three desktop mods.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 SKILLS="$HOME/.claude/skills"
 CALL="$HOME/.voicemode/call"
 VM_PY="${VOICEMODE_PY:-$HOME/.local/share/uv/tools/voice-mode/bin/python}"
-SILERO="$HOME/.voicemode/models/silero_vad.onnx"
-SILERO_URL="https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUPS="$HOME/.claude/cludegods-backups/$STAMP"
-PATCH=0 PILL=1
+CLI="$SKILLS/gods/bin/cludegods"
+CLI_REF="~/.claude/skills/gods/bin/cludegods"
+PATCH=0 PILL=1 VOICE=0 YES=0
 for arg in "$@"; do
   case "$arg" in
+    --voice) VOICE=1 ;;
     --bluetooth-patch) PATCH=1 ;;
     --skip-pill) PILL=0 ;;
-    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --yes|-y) YES=1 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -36,49 +40,12 @@ LATER=()
 
 step "1. Checking this Mac"
 [ "$(uname -s)" = Darwin ] || { echo "CludeGods runs on macOS only." >&2; exit 1; }
-[ "$(uname -m)" = arm64 ] || note "not Apple Silicon: mlx-audio will not run, the Kokoro fallback will"
-command -v python3 >/dev/null || { echo "python3 is required (install the Xcode command line tools)." >&2; exit 1; }
+[ "$(uname -m)" = arm64 ] || note "not Apple Silicon: voice will use Kokoro, since mlx-audio needs Apple Silicon"
+python3 -c 'import sys' > /dev/null 2>&1 \
+  || { echo "python3 is required: install the Xcode command line tools (xcode-select --install) or Homebrew's python." >&2; exit 1; }
 ok "macOS $(sw_vers -productVersion 2>/dev/null || echo)"
 
-step "2. VoiceMode"
-if [ -x "$VM_PY" ]; then
-  ok "found VoiceMode's Python"
-  if "$VM_PY" -c "import onnxruntime" 2>/dev/null; then
-    ok "onnxruntime already installed"
-  elif command -v uv >/dev/null; then
-    if uv pip install --quiet --python "$VM_PY" onnxruntime 2>/dev/null; then
-      ok "installed onnxruntime for Silero VAD"
-    else
-      note "could not install onnxruntime into VoiceMode's Python ($("$VM_PY" -V 2>&1))"
-      LATER+=("install onnxruntime into VoiceMode's Python: uv pip install --python $VM_PY onnxruntime")
-    fi
-  else
-    note "uv not found: install it (brew install uv), then run this script again"
-    LATER+=("install uv and run ./install.sh again (Silero VAD needs onnxruntime)")
-  fi
-  if [ -s "$SILERO" ]; then
-    ok "Silero VAD model present"
-  else
-    mkdir -p "$(dirname "$SILERO")"
-    curl -fsSL -o "$SILERO" "$SILERO_URL" && ok "downloaded the Silero VAD model"
-  fi
-  if [ "$PATCH" = 1 ]; then
-    SITE="$("$VM_PY" -c 'import voice_mode, os; print(os.path.dirname(voice_mode.__path__[0]))')"
-    P="$REPO/patches/voicemode-mouth-bluetooth.patch"
-    if patch -d "$SITE" -p1 -R --dry-run -s -f < "$P" >/dev/null 2>&1; then
-      ok "Bluetooth patch already applied"
-    elif patch -d "$SITE" -p1 --dry-run -s -f < "$P" >/dev/null 2>&1; then
-      patch -d "$SITE" -p1 -b -s < "$P" && ok "applied the Bluetooth patch (original kept as .orig)"
-    else
-      note "the Bluetooth patch does not fit this VoiceMode version; skipped"
-    fi
-  fi
-else
-  note "VoiceMode is not installed yet. The voice call needs it; everything else works without it."
-  LATER+=("install VoiceMode (README, Get started, step 1), then run ./install.sh again")
-fi
-
-step "3. Skills"
+step "2. Skills"
 mkdir -p "$SKILLS"
 # 0.5 renamed the skill from `colleague` (/colleague) to `gods` (/gods). Move the old one out of
 # ~/.claude/skills (a copy left there would load as a second skill) and point every path that
@@ -112,19 +79,22 @@ for s in gods spaces; do
   rsync -a --exclude __pycache__ "$REPO/skills/$s/" "$dst/"
   ok "$s skill in ~/.claude/skills/$s"
 done
-chmod +x "$SKILLS/gods/bin/"{call,listen.py,narrate,permit,guard,outbox-say,pages,reply,bridge} 2>/dev/null || true
+chmod +x "$SKILLS/gods/bin/"{call,listen.py,narrate,permit,guard,outbox-say,pages,reply,bridge,cludegods} 2>/dev/null || true
 
-step "4. CallPill"
+step "3. CallPill"
+# built from source when the Swift compiler is there, else the prebuilt one from the latest
+# release, signed on this Mac; never a reason to stop the install
 if [ "$PILL" = 0 ]; then
   note "skipped (--skip-pill)"
-elif command -v swiftc >/dev/null; then
-  "$REPO/scripts/build-pill.sh" "$SKILLS/gods/bin" >/dev/null 2>&1 && ok "built and signed CallPill.app" || note "CallPill build failed: run scripts/build-pill.sh to see why"
+elif msg=$("$REPO/scripts/install-pill.sh" "$SKILLS/gods/bin" 2>&1); then
+  ok "$msg"
 else
-  note "swiftc not found: run xcode-select --install, then ./install.sh again"
-  LATER+=("install the Xcode command line tools and run ./install.sh again (CallPill)")
+  note "${msg:-CallPill not installed}"
+  note "everything else works without it; calls just have no floating card"
+  LATER+=("CallPill: run $CLI_REF doctor --fix rebuild-pill (after xcode-select --install, or once a release has the prebuilt app)")
 fi
 
-step "5. Hooks in ~/.claude/settings.json"
+step "4. Hooks in ~/.claude/settings.json"
 python3 - "$REPO/config/settings.example.json" "$HOME/.claude/settings.json" "$STAMP" <<'PY'
 import json, os, shutil, sys
 example, target, stamp = sys.argv[1:4]
@@ -160,7 +130,7 @@ else:
     print("  \033[32m✓\033[0m hooks already in place")
 PY
 
-step "6. State folder"
+step "5. State folder"
 mkdir -p "$CALL/outbox" "$CALL/spaces"
 if [ -f "$CALL/workers.json" ]; then
   ok "kept your workers registry"
@@ -173,8 +143,40 @@ else
   cp "$REPO/config/config.example.json" "$CALL/config.json" \
     && ok "created config.json (spoken yes after a read-back, the app's permission dialog, workers save pages)"
 fi
+# where this install came from and with which options, for `cludegods update`
+python3 "$CLI" record-install "$REPO" "$@" || note "could not write ~/.voicemode/call/install.json"
 ok "~/.voicemode/call is ready"
 
+step "6. Voice"
+if [ "$VOICE" = 1 ]; then
+  args=(setup voice)
+  if [ "$YES" = 1 ]; then args+=(--yes); fi
+  if [ "$PATCH" = 1 ]; then args+=(--bluetooth-patch); fi
+  if python3 "$CLI" "${args[@]}"; then
+    ok "voice is ready"
+  else
+    LATER+=("finish the voice setup: $CLI_REF setup voice (it picks up where it stopped)")
+  fi
+elif [ -x "$VM_PY" ]; then
+  # VoiceMode is already here: keep its ears current (Silero VAD), as every install did before
+  ok "found VoiceMode (./install.sh --voice checks the whole voice setup)"
+  python3 "$CLI" setup vad || LATER+=("Silero VAD: $CLI_REF setup vad")
+  if [ "$PATCH" = 1 ]; then
+    python3 "$CLI" setup bluetooth || LATER+=("Bluetooth patch: $CLI_REF setup bluetooth")
+  fi
+else
+  ok "skipped: Workers and Spaces work without voice"
+  note "to talk to Claude, add voice any time: ./install.sh --voice (or $CLI_REF setup voice)"
+fi
+
+if [ -n "${CLUDEGODS_NO_NEXT_STEPS:-}" ]; then
+  # bootstrap.sh and `cludegods update` install the mods and print what comes next themselves
+  if [ ${#LATER[@]} -gt 0 ]; then
+    step "Still to do:"
+    for l in "${LATER[@]}"; do note "$l"; done
+  fi
+  exit 0
+fi
 step "Done. Two steps left, inside Claude Code:"
 cat <<'EOF'
 
@@ -187,7 +189,9 @@ cat <<'EOF'
      Or in the desktop app: + next to the prompt box, Plugins, Add marketplace
      AKamaly/CludeGods, then add each plugin. Restart the app once afterwards.
 
-  b) Start a call: type /gods in any chat.
+  b) Type /gods in any chat.
+
+  Check everything any time: ~/.claude/skills/gods/bin/cludegods doctor
 EOF
 if [ ${#LATER[@]} -gt 0 ]; then
   step "Still to do:"

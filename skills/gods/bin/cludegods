@@ -1,0 +1,1558 @@
+#!/usr/bin/env python3
+"""cludegods: set up, check, update and remove CludeGods.
+
+  cludegods setup voice [--yes] [--bluetooth-patch]
+                              guided voice setup: Homebrew and uv, VoiceMode, its services,
+                              Silero VAD, the optional Bluetooth patch, then a self-test.
+                              Every step skips when it is already done; run it again any time.
+  cludegods setup vad         only the Silero VAD step (onnxruntime and the model)
+  cludegods setup bluetooth   only the Bluetooth patch for VoiceMode's mouth
+  cludegods doctor [--json] [--fix ID]
+                              health checks, one line each; --fix runs one repair
+  cludegods update            pull the source, reinstall with the same options, update the panes
+  cludegods uninstall [--keep-data] [--yes]
+                              remove CludeGods (backed up first to ~/.claude/cludegods-backups)
+  cludegods version
+
+`doctor --json` prints one object:
+  {"version": str, "voice_installed": bool,
+   "checks": [{"id", "label", "ok", "severity", "detail", "fix", "fix_label"}]}
+severity is how serious the check is when it fails ("error", "warn" or "info"); fix is the ID
+for `doctor --fix` (null when the check passes or has no automatic repair). Checks that need
+voice are left out while voice is not installed. `doctor --json` exits 0 whenever it printed
+the object; `doctor` without --json exits 1 when an error-level check fails.
+
+Exit codes: 0 done, 1 failed, 2 usage (an unknown fix ID, for one).
+Python 3.9+ standard library only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+SKILLS = HOME / ".claude" / "skills"
+SKILL = SKILLS / "gods"
+BIN = SKILL / "bin"
+CALL = BIN / "call"
+PILL = BIN / "CallPill.app" / "Contents" / "MacOS" / "CallPill"
+SETTINGS = HOME / ".claude" / "settings.json"
+PROJECTS = HOME / ".claude" / "projects"
+BACKUPS = HOME / ".claude" / "cludegods-backups"
+CALL_DIR = HOME / ".voicemode" / "call"
+INSTALL_JSON = CALL_DIR / "install.json"
+HEARD_DIR = HOME / ".voicemode" / "logs" / "conversations"
+VM_PY = Path(os.environ.get("VOICEMODE_PY") or HOME / ".local/share/uv/tools/voice-mode/bin/python")
+SILERO = HOME / ".voicemode" / "models" / "silero_vad.onnx"
+SILERO_URL = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+WHISPER_MODEL = HOME / ".voicemode/services/whisper/models/ggml-large-v3-turbo.bin"
+LAUNCH_AGENTS = HOME / "Library" / "LaunchAgents"
+APP_CLI_GLOB = "Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude"
+
+MARKETPLACE = "cludegods"
+MARKETPLACE_SOURCE = os.environ.get("CLUDEGODS_MARKETPLACE") or "AKamaly/CludeGods"
+PANES = ("workers-pane", "spaces-pane", "inbox-relay")
+REQUIRED_PANES = ("workers-pane", "spaces-pane")   # inbox-relay is only for Slack
+
+URLS = {
+    "mlx-audio": os.environ.get("CLUDEGODS_MLX_URL") or "http://127.0.0.1:8890/v1/models",
+    "kokoro": os.environ.get("CLUDEGODS_KOKORO_URL") or "http://127.0.0.1:8880/v1/models",
+    "whisper": os.environ.get("CLUDEGODS_WHISPER_URL") or "http://127.0.0.1:2022/",
+}
+
+CLI_REF = "~/.claude/skills/gods/bin/cludegods"
+CALL_REF = "~/.claude/skills/gods/bin/call"
+ONE_LINE = "curl -fsSL https://raw.githubusercontent.com/AKamaly/CludeGods/main/bootstrap.sh | bash"
+TEST_LINE = "Voice check. If you can hear me, the voice works. Say a few words to test the mic."
+
+# The hooks install.sh merges into ~/.claude/settings.json (config/settings.example.json; a
+# test keeps the two equal). The doctor checks them and `--fix reinstall-hooks` adds them.
+HOOKS = {
+    "PreToolUse": [
+        {"hooks": [{"type": "command", "command": "$HOME/.claude/skills/gods/bin/narrate",
+                    "timeout": 3, "async": True}]},
+        {"matcher": "*", "hooks": [{"type": "command",
+                                    "command": "$HOME/.claude/skills/gods/bin/guard",
+                                    "timeout": 5}]},
+    ],
+    "PermissionRequest": [
+        {"matcher": "*", "hooks": [{"type": "command",
+                                    "command": "$HOME/.claude/skills/gods/bin/permit",
+                                    "timeout": 60}]},
+    ],
+}
+HOOK_EVENTS = {"narrate": "PreToolUse", "guard": "PreToolUse", "permit": "PermissionRequest"}
+# Ours: any command ending in skills/gods/bin/<hook> (or the pre-0.5 skills/colleague/bin/<hook>)
+HOOK_RE = re.compile(r"(?:^|/)skills/(gods|colleague)/bin/(narrate|guard|permit)[\"']?\s*$")
+
+CONFIG_DEFAULTS = {
+    "approvals": {"outward": "spoken", "permission_prompts": "app", "worker_publish": "direct"},
+    "user_label": "USER",
+    "workers": {"default_tools": "full"},
+}
+CONFIG_CHOICES = {
+    ("approvals", "outward"): ("spoken", "typed"),
+    ("approvals", "permission_prompts"): ("app", "pill"),
+    ("approvals", "worker_publish"): ("direct", "approve"),
+    ("workers", "default_tools"): ("full", "drafts", "read"),
+}
+
+
+# ---------------------------------------------------------------------------------------------
+# small helpers
+
+def tilde(p) -> str:
+    """A path for messages: under the home folder it starts with ~."""
+    s = str(p)
+    h = str(HOME)
+    return "~" + s[len(h):] if s == h or s.startswith(h + "/") else s
+
+
+def stamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def is_exec(p) -> bool:
+    return bool(p) and Path(p).is_file() and os.access(str(p), os.X_OK)
+
+
+def which(name: str) -> str | None:
+    """`name` on PATH, else in the usual install folders (Homebrew, ~/.local/bin), which a
+    shell started before an install, or the desktop app's environment, may not have."""
+    found = shutil.which(name)
+    if found:
+        return found
+    extra = os.environ.get("CLUDEGODS_FALLBACK_PATH")
+    if extra is None:
+        extra = os.pathsep.join(["/opt/homebrew/bin", "/usr/local/bin", str(HOME / ".local/bin")])
+    return shutil.which(name, path=extra) if extra else None
+
+
+def run(cmd, timeout: float | None = 120, env=None, cwd=None, stream=None) -> tuple[int, str]:
+    """Run cmd and return (exit code, output). stdin is never inherited: the one-line installer
+    hands bash the script on stdin. With `stream`, each output line goes to it as it arrives."""
+    cmd = [str(c) for c in cmd]
+    if stream is None:
+        try:
+            p = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, errors="replace",
+                               timeout=timeout, env=env, cwd=cwd)
+        except subprocess.TimeoutExpired:
+            return 124, f"{os.path.basename(cmd[0])} took longer than {timeout:.0f} s"
+        except OSError as e:
+            return 127, str(e)
+        return p.returncode, p.stdout or ""
+    try:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, errors="replace", env=env,
+                             cwd=cwd)
+    except OSError as e:
+        return 127, str(e)
+    lines = []
+    assert p.stdout is not None
+    for line in p.stdout:
+        line = line.rstrip("\n")
+        lines.append(line)
+        stream(line)
+    return p.wait(), "\n".join(lines)
+
+
+def last_line(text: str) -> str:
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
+def url_up(url: str, timeout: float = 0.7) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def load_json(path: Path):
+    """(data, None), (None, "missing") or (None, "line L, column C: why")."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError as e:
+        return None, str(e)
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError as e:
+        return None, f"line {e.lineno}, column {e.colno}: {e.msg}"
+
+
+def write_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def ask(question: str) -> bool | None:
+    """A yes/no question on the terminal. None when there is no terminal to ask on (the
+    Workers pane, a pipe): the caller then says how to run it with --yes."""
+    answer = ask_text(f"{question} [y/N] ")
+    return None if answer is None else answer.strip().lower() in ("y", "yes")
+
+
+def ask_text(prompt: str) -> str | None:
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            return input(prompt)
+        with open("/dev/tty", "r+") as tty:
+            tty.write(prompt)
+            tty.flush()
+            line = tty.readline()
+            return line if line else None
+    except (OSError, EOFError):
+        return None
+
+
+def ago(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 120:
+        return f"{s} s ago"
+    if s < 7200:
+        return f"{s // 60} min ago"
+    if s < 172800:
+        return f"{s // 3600} h ago"
+    return f"{s // 86400} days ago"
+
+
+# ---------------------------------------------------------------------------------------------
+# where things are
+
+def read_record() -> dict:
+    data, _ = load_json(INSTALL_JSON)
+    return data if isinstance(data, dict) else {}
+
+
+def find_repo() -> Path | None:
+    """The CludeGods source this install came from: install.sh records it in install.json.
+    Run from a checkout, it is the checkout."""
+    rec = read_record().get("repo")
+    candidates = [Path(rec)] if isinstance(rec, str) and rec else []
+    candidates.append(Path(__file__).resolve().parents[3])
+    for c in candidates:
+        if (c / "install.sh").is_file() and (c / "skills" / "gods").is_dir():
+            return c
+    return None
+
+
+def repo_version(repo: Path | None) -> str | None:
+    if repo is None:
+        return None
+    if (repo / ".git").exists() and which("git"):
+        rc, out = run(["git", "-C", repo, "describe", "--tags", "--always", "--dirty"], timeout=10)
+        if rc == 0 and out.strip():
+            v = out.strip().splitlines()[-1]
+            return v[1:] if re.match(r"v\d", v) else v
+    try:
+        for line in (repo / "CHANGELOG.md").read_text().splitlines():
+            m = re.match(r"## \[(\d+\.\d+\.\d+[^\]]*)\]", line)
+            if m:
+                return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def version() -> str:
+    v = read_record().get("version")
+    if isinstance(v, str) and v and v != "unknown":
+        return v
+    return repo_version(find_repo()) or "unknown"
+
+
+def record_install(repo: str, flags: list) -> None:
+    """install.sh calls this (`cludegods record-install REPO [FLAGS...]`) so `update` knows
+    where the source is and which options to install with again."""
+    rec = read_record()
+    flags = [f for f in flags if f not in ("-h", "--help")]
+    # voice, once set up (by --voice, or `setup voice` from the pane), stays set up on updates
+    flags += [f for f in rec.get("flags") or [] if f in STICKY_FLAGS and f not in flags]
+    rec.update({"repo": str(Path(repo).resolve()), "flags": flags,
+                "version": repo_version(Path(repo)) or "unknown",
+                "installed_at": datetime.now().astimezone().isoformat(timespec="seconds")})
+    write_json(INSTALL_JSON, rec)
+
+
+STICKY_FLAGS = ("--voice", "--bluetooth-patch")
+
+
+def remember_flags(*flags: str) -> None:
+    """Add options to the recorded ones (setup voice adds --voice, so `update` keeps voice)."""
+    if not INSTALL_JSON.parent.is_dir():
+        return
+    rec = read_record()
+    have = list(rec.get("flags") or [])
+    for f in flags:
+        if f not in have:
+            have.append(f)
+    rec["flags"] = have
+    write_json(INSTALL_JSON, rec)
+
+
+_CLAUDE: list = []
+
+
+def claude_cli() -> str | None:
+    """The Claude Code CLI: `claude` on PATH if it knows `plugin`, else the newest one the
+    desktop app ships (~/Library/Application Support/Claude/claude-code/<v>/<id>/claude.app)."""
+    if _CLAUDE:
+        return _CLAUDE[0]
+    found = None
+    c = which("claude")
+    if c and run([c, "plugin", "--help"], timeout=30)[0] == 0:
+        found = c
+    if not found:
+        def key(p: Path):
+            ver = p.parents[4].name if len(p.parents) > 4 else ""
+            nums = tuple(int(x) for x in re.findall(r"\d+", ver)[:4])
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return (nums, mtime)
+        apps = sorted((p for p in HOME.glob(APP_CLI_GLOB) if is_exec(p)), key=key)
+        found = str(apps[-1]) if apps else None
+    _CLAUDE.append(found)
+    return found
+
+
+def plugin_list(cli: str) -> dict | None:
+    """Installed plugins as {id: enabled}, or None when the CLI cannot list them."""
+    rc, out = run([cli, "plugin", "list", "--json"], timeout=60)
+    if rc != 0:
+        return None
+    try:
+        data = json.loads(out[out.index("["):]) if "[" in out else json.loads(out)
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        data = data.get("plugins") or data.get("installed") or []
+    res = {}
+    for p in data if isinstance(data, list) else []:
+        if isinstance(p, dict) and p.get("id"):
+            res[str(p["id"])] = p.get("enabled", True) is not False
+    return res
+
+
+def marketplaces(cli: str) -> set | None:
+    rc, out = run([cli, "plugin", "marketplace", "list", "--json"], timeout=60)
+    if rc != 0:
+        return None
+    try:
+        data = json.loads(out[out.index("["):]) if "[" in out else json.loads(out)
+    except ValueError:
+        return None
+    return {str(m.get("name")) for m in data if isinstance(m, dict)} if isinstance(data, list) else None
+
+
+def pane_id(name: str) -> str:
+    return f"{name}@{MARKETPLACE}"
+
+
+def voicemode_cli() -> str | None:
+    for c in (which("voicemode"), VM_PY.parent / "voicemode"):
+        if c and is_exec(c):
+            return str(c)
+    return None
+
+
+def voice_installed() -> bool:
+    return is_exec(VM_PY) and voicemode_cli() is not None
+
+
+def service_installed(svc: str) -> bool:
+    if url_up(URLS.get(svc, "")):
+        return True
+    if svc == "mlx-audio" and (HOME / ".local/share/uv/tools/mlx-audio").is_dir():
+        return True
+    d = HOME / ".voicemode" / "services" / svc
+    return d.is_dir() and any(d.iterdir())
+
+
+def service_enabled(svc: str) -> bool:
+    return (LAUNCH_AGENTS / f"com.voicemode.{svc}.plist").is_file()
+
+
+def tts_service() -> str:
+    """mlx-audio on Apple Silicon; Kokoro elsewhere (`call` falls back to it on 8880)."""
+    return "mlx-audio" if platform.machine() == "arm64" else "kokoro"
+
+
+def voice_up() -> str | None:
+    if url_up(URLS["mlx-audio"]):
+        return "mlx-audio"
+    if url_up(URLS["kokoro"]):
+        return "kokoro"
+    return None
+
+
+def ears_alive() -> bool:
+    try:
+        os.kill(int((CALL_DIR / "ears.pid").read_text().strip()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def have_swift() -> bool:
+    """swiftc that works: /usr/bin/swiftc is only a stub until the Xcode tools are installed."""
+    return which("swiftc") is not None and run(["xcode-select", "-p"], timeout=10)[0] == 0
+
+
+def mic_app() -> str:
+    """The app macOS asks about for the mic: the one this command runs in."""
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "Claude"
+    term = os.environ.get("TERM_PROGRAM", "")
+    names = {"Apple_Terminal": "Terminal", "iTerm.app": "iTerm", "vscode": "your editor",
+             "WarpTerminal": "Warp", "ghostty": "Ghostty", "WezTerm": "WezTerm"}
+    return names.get(term, "the app you ran this in")
+
+
+# ---------------------------------------------------------------------------------------------
+# doctor
+
+def check(cid, label, ok, severity, detail, fix=None, fix_label=None) -> dict:
+    return {"id": cid, "label": label, "ok": bool(ok), "severity": severity, "detail": detail,
+            "fix": None if ok or not fix else fix,
+            "fix_label": None if ok or not fix else (fix_label or fix)}
+
+
+def check_skills() -> dict:
+    missing = [s for s in ("gods", "spaces") if not (SKILLS / s / "SKILL.md").is_file()]
+    if "gods" not in missing and not CALL.is_file():
+        missing.append("gods/bin/call")
+    old = (SKILLS / "colleague").exists()
+    if missing:
+        detail = "Missing from ~/.claude/skills: " + ", ".join(missing)
+        if old:
+            detail += " (the old colleague skill is still there; Reinstall moves it to gods)"
+    elif old:
+        detail = "The old colleague skill is still in ~/.claude/skills and loads as a second skill"
+    else:
+        detail = "gods and spaces in ~/.claude/skills"
+    return check("skills", "Skills installed", not missing and not old,
+                 "warn" if old and not missing else "error", detail, "reinstall-skills", "Reinstall")
+
+
+def our_hooks(settings) -> dict:
+    """{hook name: [(event, skill folder)]} for the CludeGods hooks in a settings object."""
+    found: dict = {}
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    for event, entries in (hooks.items() if isinstance(hooks, dict) else []):
+        for e in entries if isinstance(entries, list) else []:
+            for h in (e.get("hooks") or []) if isinstance(e, dict) else []:
+                m = HOOK_RE.search(str(h.get("command", ""))) if isinstance(h, dict) else None
+                if m:
+                    found.setdefault(m.group(2), []).append((event, m.group(1)))
+    return found
+
+
+def check_hooks() -> dict:
+    label = "Hooks in settings.json"
+    data, err = load_json(SETTINGS)
+    if err == "missing":
+        return check("hooks", label, False, "error", "~/.claude/settings.json does not exist yet",
+                     "reinstall-hooks", "Add hooks")
+    if err or not isinstance(data, dict):
+        why = err or "it is not a JSON object"
+        return check("hooks", label, False, "error",
+                     f"~/.claude/settings.json is not valid JSON ({why}). Fix it by hand, then "
+                     "run the doctor again", None)
+    found = our_hooks(data)
+    missing = [n for n, ev in HOOK_EVENTS.items()
+               if not any(e == ev and s == "gods" for e, s in found.get(n, []))]
+    stale = [n for n in HOOK_EVENTS if any(s == "colleague" for _, s in found.get(n, []))]
+    bits = []
+    if stale:
+        bits.append("Still pointing at the old colleague skill: " + ", ".join(stale))
+    gone = [n for n in missing if n not in stale]
+    if gone:
+        bits.append("Missing: " + ", ".join(gone))
+    detail = "; ".join(bits) or "narrate, guard and permit are registered"
+    return check("hooks", label, not missing and not stale, "error", detail, "reinstall-hooks",
+                 "Add hooks")
+
+
+def check_config() -> dict:
+    label = "Settings (config.json)"
+    path = CALL_DIR / "config.json"
+    data, err = load_json(path)
+    if err == "missing":
+        return check("config", label, False, "warn",
+                     "~/.voicemode/call/config.json is missing, so every setting is its default",
+                     "restore-config", "Create it")
+    if err or not isinstance(data, dict):
+        why = err or "it is not a JSON object"
+        return check("config", label, False, "error",
+                     f"config.json is not valid JSON ({why}). Fix it by hand, or back it up and "
+                     "reset it to the defaults", "reset-config", "Back up and reset")
+    odd = []
+    for (group, key), choices in CONFIG_CHOICES.items():
+        sect = data.get(group)
+        if isinstance(sect, dict) and key in sect and sect[key] not in choices:
+            odd.append(f"{group}.{key} is {sect[key]!r} (one of {', '.join(choices)}; "
+                       f"the default {CONFIG_DEFAULTS[group][key]} applies)")
+    if "user_label" in data and not (isinstance(data["user_label"], str) and data["user_label"].strip()):
+        odd.append("user_label is empty (USER applies)")
+    return check("config", label, not odd, "warn", "; ".join(odd) or "valid", None)
+
+
+def load_workers():
+    """(workers list or None, error or None) from workers.json."""
+    data, err = load_json(CALL_DIR / "workers.json")
+    if err:
+        return None, err
+    if not isinstance(data, dict) or not isinstance(data.get("workers"), list):
+        return None, 'it needs {"workers": [...]}'
+    return data["workers"], None
+
+
+def check_workers() -> dict:
+    label = "Workers registry (workers.json)"
+    workers, err = load_workers()
+    if err == "missing":
+        return check("workers", label, False, "warn", "~/.voicemode/call/workers.json is missing",
+                     "create-workers", "Create it")
+    if err:
+        return check("workers", label, False, "error",
+                     f"workers.json is not valid ({err}). Fix it by hand; the Workers pane cannot "
+                     "read it until then", None)
+    problems, seen = [], set()
+    for i, w in enumerate(workers):
+        key = w.get("key") if isinstance(w, dict) else None
+        if not isinstance(key, str) or not key.strip():
+            problems.append(f"entry {i + 1} has no key")
+        elif key in seen:
+            problems.append(f"the key {key!r} is used twice")
+        else:
+            seen.add(key)
+    n = len(workers)
+    detail = "; ".join(problems) or ("No workers yet" if not n else f"{n} worker" + ("" if n == 1 else "s"))
+    return check("workers", label, not problems, "error", detail, None)
+
+
+def check_panes() -> dict:
+    label = "Workers and Spaces panes"
+    cli = claude_cli()
+    if not cli:
+        return check("panes", label, False, "warn",
+                     "The Claude Code CLI was not found, so the panes cannot be checked here. In the "
+                     f"app: + next to the prompt box, Plugins, Add marketplace {MARKETPLACE_SOURCE}",
+                     None)
+    plugins = plugin_list(cli)
+    if plugins is None:
+        return check("panes", label, False, "warn",
+                     "The Claude Code CLI could not list your plugins", "install-panes",
+                     "Install panes")
+    missing = [p for p in REQUIRED_PANES if pane_id(p) not in plugins]
+    off = [p for p in PANES if plugins.get(pane_id(p)) is False]
+    bad = missing + [p for p in off if p in REQUIRED_PANES]
+    bits = []
+    if missing:
+        bits.append("not installed: " + ", ".join(missing))
+    if off:
+        bits.append("installed but turned off: " + ", ".join(off))
+    if not bad:
+        bits.insert(0, "workers-pane and spaces-pane installed")
+    if pane_id("inbox-relay") not in plugins:
+        bits.append("inbox-relay not installed (only needed for Slack)")
+    detail = "; ".join(bits)
+    return check("panes", label, not bad, "error", detail[:1].upper() + detail[1:],
+                 "install-panes", "Install panes")
+
+
+def check_voice(installed: bool) -> dict:
+    if installed:
+        return check("voice", "Voice (VoiceMode)", True, "info",
+                     f"VoiceMode is installed ({tilde(VM_PY.parent.parent)})")
+    return check("voice", "Voice (VoiceMode)", False, "info",
+                 "Not installed. Workers and Spaces work without it", "setup-voice", "Enable voice")
+
+
+def check_vad() -> dict:
+    label = "Silero VAD (the ears)"
+    model = SILERO.is_file() and SILERO.stat().st_size > 0
+    onnx = run([VM_PY, "-c", "import onnxruntime"], timeout=30)[0] == 0
+    missing = ([] if onnx else ["onnxruntime in VoiceMode's Python"]) + \
+              ([] if model else ["the model at ~/.voicemode/models/silero_vad.onnx"])
+    detail = "Missing: " + " and ".join(missing) if missing else "onnxruntime and the model are in place"
+    return check("vad", label, not missing, "error", detail, "setup-vad", "Install Silero VAD")
+
+
+def check_voice_service() -> dict:
+    label = "Voice service (8890 or 8880)"
+    up = voice_up()
+    if up == "mlx-audio":
+        return check("voice-service", label, True, "error", "mlx-audio answers on 8890")
+    if up == "kokoro":
+        return check("voice-service", label, True, "error", "Kokoro answers on 8880 (mlx-audio is down)")
+    return check("voice-service", label, False, "error",
+                 "Nothing answers on 8890 (mlx-audio) or 8880 (Kokoro), so calls have no voice",
+                 "restart-voice", "Restart voice")
+
+
+def check_whisper() -> dict:
+    up = url_up(URLS["whisper"])
+    return check("whisper", "Whisper (2022)", up, "error",
+                 "Whisper answers on 2022" if up else
+                 "Nothing answers on 2022, so the ears cannot turn speech into text",
+                 "restart-whisper", "Restart Whisper")
+
+
+def check_pill(installed_voice: bool) -> dict:
+    ok = is_exec(PILL)
+    return check("pill", "CallPill", ok, "warn" if installed_voice else "info",
+                 "~/.claude/skills/gods/bin/CallPill.app" if ok else
+                 "CallPill.app is not installed: calls work, without the floating card",
+                 "rebuild-pill", "Install CallPill")
+
+
+def heard_records(since: float | None = None, tail: int = 400_000) -> list:
+    """Records from the newest heard logs (today's and yesterday's around midnight)."""
+    logs = sorted(HEARD_DIR.glob("heard_*.jsonl"))[-2:]
+    recs = []
+    for path in logs:
+        try:
+            with open(path, "rb") as fh:
+                size = path.stat().st_size
+                fh.seek(max(0, size - tail))
+                raw = fh.read().splitlines()
+        except OSError:
+            continue
+        for line in raw:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(r, dict):
+                continue
+            t = rec_time(r)
+            if t is None or (since is not None and t < since):
+                continue
+            recs.append((t, r))
+    recs.sort(key=lambda x: x[0])
+    return recs
+
+
+def rec_time(r: dict) -> float | None:
+    try:
+        return datetime.fromisoformat(str(r["ts"])).timestamp()
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def num(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def check_mic() -> dict:
+    label = "Mic last heard"
+    start = stop = turn = beat = None
+    for t, r in heard_records():
+        if r.get("source") != "mic":
+            continue
+        kind, ev = r.get("kind"), r.get("event")
+        if kind == "event" and ev == "listen-started":
+            start, beat = (t, r), None
+        elif kind == "event" and ev == "listen-stopped":
+            stop = (t, r)
+        elif kind == "event" and ev == "heartbeat":
+            beat = (t, r)
+        elif kind == "turn":
+            turn = (t, r)
+    now = time.time()
+    if start is None and turn is None:
+        return check("mic", label, True, "warn", "No call yet, so the mic has not been used")
+    device = (start or turn)[1].get("device") or "the default input"
+    if beat is not None and num(beat[1].get("peak")) == 0:
+        return check("mic", label, False, "warn",
+                     f"{device} is sending silence (level 0): macOS is blocking the mic. System "
+                     "Settings, Privacy & Security, Microphone: turn on Claude")
+    if stop is not None and start is not None and stop[0] >= start[0] and stop[1].get("error"):
+        return check("mic", label, False, "warn",
+                     f"The ears stopped with an error {ago(now - stop[0])}: {stop[1].get('error')}",
+                     "restart-whisper" if "whisper" in str(stop[1].get("error")).lower() else None,
+                     "Restart Whisper")
+    if turn is not None:
+        return check("mic", label, True, "warn",
+                     f"Heard you {ago(now - turn[0])} on {turn[1].get('device') or device}")
+    return check("mic", label, True, "warn", f"The ears ran on {device} but have not heard a turn yet")
+
+
+def resolve_transcript(t: str) -> Path | None:
+    """A registry `transcript` as the Workers pane reads it: absolute, ~/-relative, relative to
+    ~/.claude/projects, or a bare file name under one of its project folders."""
+    t = str(t).strip()
+    if t.startswith("/"):
+        p = Path(t)
+    elif t.startswith("~/"):
+        p = HOME / t[2:]
+    elif "/" in t:
+        p = PROJECTS / t
+    else:
+        try:
+            dirs = sorted(d for d in PROJECTS.iterdir() if d.is_dir())
+        except OSError:
+            return None
+        for d in dirs:
+            if (d / t).is_file():
+                return d / t
+        return None
+    return p if p.is_file() else None
+
+
+def check_worker_chats() -> dict:
+    label = "Workers' chats"
+    workers, err = load_workers()
+    if err or not workers:
+        return check("worker-chats", label, True, "warn", "No workers yet" if not err else
+                     "Skipped until workers.json is readable")
+    bad = []
+    for w in workers:
+        if not isinstance(w, dict):
+            continue
+        name = w.get("name") or w.get("key") or "?"
+        if not w.get("session"):
+            bad.append(f"{name}: no chat")
+        elif not w.get("transcript"):
+            bad.append(f"{name}: no transcript yet")
+        elif resolve_transcript(w["transcript"]) is None:
+            bad.append(f"{name}: transcript not found")
+    if not bad:
+        n = len(workers)
+        return check("worker-chats", label, True, "warn",
+                     f"{'Its' if n == 1 else 'All ' + str(n)} chat{'' if n == 1 else 's'} found")
+    return check("worker-chats", label, False, "warn",
+                 "; ".join(bad) + ". Open the Workers pane to start or re-link them", None)
+
+
+def doctor_report() -> dict:
+    installed = voice_installed()
+    checks = [check_skills(), check_hooks(), check_config(), check_workers(), check_panes(),
+              check_voice(installed)]
+    if installed:
+        checks += [check_vad(), check_voice_service(), check_whisper()]
+    checks.append(check_pill(installed))
+    if installed:
+        checks.append(check_mic())
+    checks.append(check_worker_chats())
+    return {"version": version(), "voice_installed": installed, "checks": checks}
+
+
+def print_report(rep: dict) -> None:
+    color = sys.stdout.isatty()
+
+    def paint(code: str, mark: str) -> str:
+        return f"\033[{code}m{mark}\033[0m" if color else mark
+
+    print(f"CludeGods {rep['version']}")
+    for c in rep["checks"]:
+        mark = paint("32", "✓") if c["ok"] else (paint("31", "✗") if c["severity"] == "error"
+                                                 else paint("33", "!"))
+        print(f"{mark} {c['label']}: {c['detail']}")
+        if c["fix"]:
+            print(f"    fix: {CLI_REF} doctor --fix {c['fix']}")
+
+
+# ---------------------------------------------------------------------------------------------
+# repairs (doctor --fix ID)
+
+def say(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def fail(what: str, next_step: str | None = None) -> int:
+    say(f"  ✗ {what}")
+    if next_step:
+        say(f"    Next: {next_step}")
+    return 1
+
+
+def run_install(flags: list, quiet_next: bool = True, extra_env: dict | None = None) -> int:
+    """install.sh again, from the recorded source. The voice self-test (a spoken line) is left
+    out: a repair or an update should not talk."""
+    repo = find_repo()
+    if repo is None:
+        return fail("The CludeGods source was not found, so it cannot be reinstalled.",
+                    f"run the one-line installer again: {ONE_LINE}")
+    env = dict(os.environ, CLUDEGODS_NO_SELFTEST="1")
+    if quiet_next:
+        env["CLUDEGODS_NO_NEXT_STEPS"] = "1"
+    env.update(extra_env or {})
+    say(f"Running {tilde(repo / 'install.sh')} {' '.join(flags)}".rstrip())
+    rc, _ = run(["bash", repo / "install.sh", *flags], timeout=None, env=env,
+                stream=lambda l: say("  " + l))
+    if rc != 0:
+        return fail("install.sh stopped with an error (above).", f"bash {tilde(repo / 'install.sh')}")
+    return 0
+
+
+def fix_reinstall() -> int:
+    return run_install(list(read_record().get("flags") or []))
+
+
+def fix_hooks() -> int:
+    data, err = load_json(SETTINGS)
+    if err == "missing":
+        data = {}
+    elif err or not isinstance(data, dict):
+        return fail(f"~/.claude/settings.json is not valid JSON ({err or 'not an object'}).",
+                    "fix it by hand, then run the doctor again")
+    text = json.dumps(data)
+    renamed = text.replace("skills/colleague/bin/", "skills/gods/bin/")
+    if renamed != text:
+        data = json.loads(renamed)
+    hooks = data.setdefault("hooks", {})
+    have = {str(h.get("command")) for entries in hooks.values() if isinstance(entries, list)
+            for e in entries if isinstance(e, dict) for h in e.get("hooks", []) if isinstance(h, dict)}
+    added = []
+    for event, entries in HOOKS.items():
+        for e in entries:
+            new = [h for h in e["hooks"] if h["command"] not in have]
+            if new:
+                hooks.setdefault(event, []).append({**e, "hooks": new})
+                added += [os.path.basename(h["command"]) for h in new]
+    if not added and renamed == text:
+        say("  ✓ the hooks are already in place")
+        return 0
+    if SETTINGS.exists():
+        backup = SETTINGS.with_name(f"settings.json.bak-{stamp()}")
+        shutil.copy2(SETTINGS, backup)
+        say(f"  ! backed up settings.json to {tilde(backup)}")
+    write_json(SETTINGS, data)
+    if renamed != text:
+        say("  ✓ pointed the old colleague hooks at the gods skill")
+    for a in added:
+        say(f"  ✓ added {a}")
+    return 0
+
+
+def config_example() -> dict:
+    repo = find_repo()
+    if repo is not None:
+        data, err = load_json(repo / "config" / "config.example.json")
+        if not err and isinstance(data, dict):
+            return data
+    return CONFIG_DEFAULTS
+
+
+def fix_restore_config() -> int:
+    path = CALL_DIR / "config.json"
+    if path.exists():
+        say("  ✓ config.json is already there (kept as it is)")
+        return 0
+    write_json(path, config_example())
+    say("  ✓ created ~/.voicemode/call/config.json with the defaults")
+    return 0
+
+
+def fix_reset_config() -> int:
+    path = CALL_DIR / "config.json"
+    if path.exists():
+        dest = BACKUPS / stamp()
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dest / "config.json")
+        say(f"  ! backed up config.json to {tilde(dest / 'config.json')}")
+        path.unlink()
+    return fix_restore_config()
+
+
+def fix_create_workers() -> int:
+    path = CALL_DIR / "workers.json"
+    if path.exists():
+        _, err = load_workers()
+        if err:
+            return fail(f"workers.json exists but is not valid ({err}).", "fix it by hand")
+        say("  ✓ workers.json is already there (kept as it is)")
+        return 0
+    write_json(path, {"workers": []})
+    say("  ✓ created an empty workers registry")
+    return 0
+
+
+def fix_install_panes() -> int:
+    cli = claude_cli()
+    if not cli:
+        return fail("The Claude Code CLI was not found.",
+                    f"in the Claude app: + next to the prompt box, Plugins, Add marketplace "
+                    f"{MARKETPLACE_SOURCE}, then add workers-pane, spaces-pane and inbox-relay")
+    known = marketplaces(cli)
+    if known is None or MARKETPLACE not in known:
+        rc, out = run([cli, "plugin", "marketplace", "add", MARKETPLACE_SOURCE], timeout=300)
+        if rc == 0:
+            say(f"  ✓ added the {MARKETPLACE_SOURCE} marketplace")
+        elif known is not None:
+            say("    " + last_line(out))
+            return fail(f"Could not add the {MARKETPLACE_SOURCE} marketplace.",
+                        f"\"{cli}\" plugin marketplace add {MARKETPLACE_SOURCE}")
+        # the list failed too: it may be there already; the installs below will tell
+    plugins = plugin_list(cli) or {}
+    failed = []
+    for name in PANES:
+        pid = pane_id(name)
+        if pid not in plugins:
+            rc, out = run([cli, "plugin", "install", pid], timeout=300)
+            verb = "installed"
+        elif plugins[pid] is False:
+            rc, out = run([cli, "plugin", "enable", pid], timeout=120)
+            verb = "turned on"
+        else:
+            say(f"  ✓ {name} already installed")
+            continue
+        if rc == 0:
+            say(f"  ✓ {verb} {name}")
+        else:
+            say(f"  ✗ {name}: {last_line(out) or 'failed'}")
+            failed.append(name)
+    if failed:
+        return fail("Some panes did not install.",
+                    f"\"{cli}\" plugin install {pane_id(failed[0])}")
+    return 0
+
+
+def wait_until(test, seconds: float) -> bool:
+    end = time.time() + seconds
+    while True:
+        if test():
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.5)
+
+
+def wait_seconds(default: float) -> float:
+    try:
+        return float(os.environ.get("CLUDEGODS_WAIT_S", default))
+    except ValueError:
+        return default
+
+
+def restart_service(svc: str, check) -> int:
+    vm = voicemode_cli()
+    if not vm:
+        return fail("VoiceMode is not installed.", f"{CLI_REF} setup voice")
+    rc, out = run([vm, "service", "restart", svc], timeout=180)
+    if rc != 0:
+        rc, out = run([vm, "service", "start", svc], timeout=180)
+    if rc != 0:
+        say("    " + last_line(out))
+        return fail(f"Could not start {svc}.", f"voicemode service logs {svc}")
+    if not wait_until(check, wait_seconds(45)):
+        return fail(f"{svc} restarted but is not answering yet (it can take a minute to load).",
+                    f"run the doctor again in a minute; if it stays down: voicemode service logs {svc}")
+    say(f"  ✓ {svc} is up")
+    return 0
+
+
+def fix_restart_voice() -> int:
+    svc = tts_service()
+    other = "kokoro" if svc == "mlx-audio" else "mlx-audio"
+    if not service_installed(svc) and service_installed(other):
+        svc = other
+    return restart_service(svc, lambda: voice_up() is not None)
+
+
+def fix_restart_whisper() -> int:
+    return restart_service("whisper", lambda: url_up(URLS["whisper"]))
+
+
+def fix_pill() -> int:
+    repo = find_repo()
+    if repo is None:
+        return fail("The CludeGods source was not found, so CallPill cannot be installed.",
+                    f"run the one-line installer again: {ONE_LINE}")
+    rc, out = run(["bash", repo / "scripts" / "install-pill.sh", BIN], timeout=900)
+    if rc != 0:
+        return fail(last_line(out) or "CallPill could not be installed.",
+                    "xcode-select --install, then run the doctor's fix again")
+    say(f"  ✓ {last_line(out)}")
+    return 0
+
+
+def fix_setup_vad() -> int:
+    return setup(["vad"], yes=True)
+
+
+def fix_setup_voice() -> int:
+    return setup(["voice"], yes=True)
+
+
+FIXES = {
+    "reinstall-skills": fix_reinstall,
+    "reinstall-hooks": fix_hooks,
+    "restore-config": fix_restore_config,
+    "reset-config": fix_reset_config,
+    "create-workers": fix_create_workers,
+    "install-panes": fix_install_panes,
+    "setup-voice": fix_setup_voice,
+    "setup-vad": fix_setup_vad,
+    "restart-voice": fix_restart_voice,
+    "restart-whisper": fix_restart_whisper,
+    "rebuild-pill": fix_pill,
+}
+
+
+def cmd_doctor(as_json: bool, fix: str | None) -> int:
+    if fix is not None:
+        if fix not in FIXES:
+            print(f"cludegods doctor: no fix called {fix!r}. Fixes: {', '.join(sorted(FIXES))}",
+                  file=sys.stderr)
+            return 2
+        if as_json:  # the repair's lines go to stderr; stdout stays one JSON object
+            saved, sys.stdout = sys.stdout, sys.stderr
+            try:
+                rc = FIXES[fix]()
+            finally:
+                sys.stdout = saved
+            print(json.dumps(doctor_report()))
+            return rc
+        return FIXES[fix]()
+    rep = doctor_report()
+    if as_json:
+        print(json.dumps(rep))
+        return 0
+    print_report(rep)
+    return 1 if any(not c["ok"] and c["severity"] == "error" for c in rep["checks"]) else 0
+
+
+# ---------------------------------------------------------------------------------------------
+# setup voice
+
+class SetupFailed(Exception):
+    def __init__(self, what: str, next_step: str):
+        super().__init__(what)
+        self.what, self.next_step = what, next_step
+
+
+class Progress:
+    """Numbered progress lines: "1/6 Checking Homebrew and uv… ok". A step that prints
+    detail (an installer's output) closes with its number again: "2/6 VoiceMode… done"."""
+
+    def __init__(self, total: int):
+        self.total, self.n, self.label, self.open = total, 0, "", False
+
+    def start(self, label: str) -> None:
+        self.n += 1
+        self.label = label
+        print(f"{self.n}/{self.total} {label}… ", end="", flush=True)
+        self.open = True
+
+    def detail(self, line: str) -> None:
+        self.newline()
+        print(f"      {line}", flush=True)
+
+    def newline(self) -> None:
+        if self.open:
+            print(flush=True)
+            self.open = False
+
+    def end(self, word: str) -> None:
+        if self.open:
+            print(word, flush=True)
+        else:
+            print(f"{self.n}/{self.total} {self.label}… {word}", flush=True)
+        self.open = False
+
+
+def consent(p: Progress, question: str, yes: bool, no_tty_next: str) -> None:
+    if yes:
+        return
+    p.newline()
+    answer = ask("      " + question)
+    if answer is None:
+        raise SetupFailed("This step needs your yes, and there is no terminal to ask on.", no_tty_next)
+    if not answer:
+        raise SetupFailed("Stopped here, as you asked.", no_tty_next)
+
+
+def step_brew_uv(p: Progress, yes: bool) -> str:
+    uv = which("uv")
+    if uv and which("uvx"):
+        return "ok"
+    brew = which("brew")
+    if not brew:
+        raise SetupFailed("Homebrew is not installed, and the voice setup needs it.",
+                          f"install Homebrew from https://brew.sh, then run: {CLI_REF} setup voice")
+    consent(p, "uv (Python's package runner) is missing. Install it with Homebrew now "
+            "(brew install uv)?", yes, f"brew install uv, then run: {CLI_REF} setup voice")
+    rc, _ = run([brew, "install", "uv"], timeout=None, stream=p.detail)
+    if rc != 0 or not which("uv"):
+        raise SetupFailed("Homebrew could not install uv (see above).",
+                          f"brew install uv, then run: {CLI_REF} setup voice")
+    return "done, installed uv"
+
+
+def step_voicemode(p: Progress, yes: bool) -> str:
+    if voice_installed():
+        return "ok, already installed"
+    uvx = which("uvx")
+    if not uvx:
+        raise SetupFailed("uvx is missing (it comes with uv).",
+                          f"brew install uv, then run: {CLI_REF} setup voice")
+    if not yes:
+        p.detail("What VoiceMode's installer will do (a dry run, nothing installed yet):")
+        rc, out = run([uvx, "voice-mode-install", "--dry-run"], timeout=600)
+        lines = [l for l in out.splitlines() if l.strip()]
+        for l in lines[-25:]:
+            p.detail("  " + l)
+        if rc != 0:
+            raise SetupFailed("VoiceMode's installer could not plan the install (see above).",
+                              "uvx voice-mode-install --dry-run")
+        consent(p, "Install VoiceMode now?", False, f"{CLI_REF} setup voice --yes")
+    rc, _ = run([uvx, "voice-mode-install", "--yes"], timeout=None, stream=p.detail)
+    if rc != 0:
+        raise SetupFailed("VoiceMode's installer stopped with an error (see above).",
+                          "uvx voice-mode-install --yes")
+    if not voice_installed():
+        raise SetupFailed(f"VoiceMode's installer finished, but {tilde(VM_PY)} or the voicemode "
+                          "command is missing.", "uvx voice-mode-install --yes")
+    return "done"
+
+
+def step_services(p: Progress) -> str:
+    vm = voicemode_cli()
+    if not vm:
+        raise SetupFailed("The voicemode command is missing.", "uvx voice-mode-install --yes")
+    tts = tts_service()
+    todo = []
+    if not service_installed(tts):
+        todo.append(["service", "install", tts])
+    if not service_installed("whisper"):
+        todo.append(["service", "install", "whisper"])
+    if not WHISPER_MODEL.is_file():
+        todo.append(["whisper", "model", "large-v3-turbo"])
+    for svc in ("whisper", tts):
+        if not service_enabled(svc):
+            todo.append(["service", "enable", svc])
+    for args in todo:
+        cmd = "voicemode " + " ".join(args)
+        p.detail(cmd)
+        rc, _ = run([vm, *args], timeout=None, stream=lambda l: p.detail("  " + l))
+        if rc != 0:
+            raise SetupFailed(f"`{cmd}` failed (see above).", cmd)
+    started = []
+    for svc, up in ((tts, lambda: voice_up() is not None), ("whisper", lambda: url_up(URLS["whisper"]))):
+        if not up():
+            run([vm, "service", "start", svc], timeout=180)
+            started.append(svc)
+    if not todo and not started:
+        return "ok, already set up"
+    return "done"
+
+
+def setup_vad(p: Progress | None = None) -> str:
+    if not is_exec(VM_PY):
+        raise SetupFailed("VoiceMode's Python is missing, so Silero VAD cannot be added.",
+                          f"{CLI_REF} setup voice")
+    did = []
+    if run([VM_PY, "-c", "import onnxruntime"], timeout=60)[0] != 0:
+        uv = which("uv")
+        if not uv:
+            raise SetupFailed("uv is missing, and Silero VAD needs it to add onnxruntime.",
+                              f"brew install uv, then run: {CLI_REF} setup vad")
+        rc, out = run([uv, "pip", "install", "--quiet", "--python", VM_PY, "onnxruntime"],
+                      timeout=900)
+        if rc != 0 or run([VM_PY, "-c", "import onnxruntime"], timeout=60)[0] != 0:
+            if p and out.strip():
+                p.detail(last_line(out))
+            pyv = last_line(run([VM_PY, "-V"], timeout=20)[1])
+            raise SetupFailed(f"Could not install onnxruntime into VoiceMode's Python ({pyv}).",
+                              f"uv pip install --python {tilde(VM_PY)} onnxruntime")
+        did.append("installed onnxruntime")
+    if not (SILERO.is_file() and SILERO.stat().st_size > 0):
+        SILERO.parent.mkdir(parents=True, exist_ok=True)
+        part = SILERO.with_name(SILERO.name + ".part")
+        rc, _ = run(["curl", "-fsSL", "-o", part, SILERO_URL], timeout=600)
+        if rc != 0 or not part.is_file() or part.stat().st_size == 0:
+            part.unlink(missing_ok=True)
+            raise SetupFailed("Could not download the Silero VAD model.",
+                              f"curl -fL -o ~/.voicemode/models/silero_vad.onnx {SILERO_URL}")
+        os.replace(part, SILERO)
+        did.append("downloaded the model")
+    return "done, " + " and ".join(did) if did else "ok, already set up"
+
+
+def setup_bluetooth(p: Progress | None = None) -> str:
+    repo = find_repo()
+    patch = repo / "patches" / "voicemode-mouth-bluetooth.patch" if repo else None
+    if patch is None or not patch.is_file():
+        raise SetupFailed("The Bluetooth patch file was not found (no CludeGods source).",
+                          f"run the one-line installer again: {ONE_LINE}")
+    rc, out = run([VM_PY, "-c", "import voice_mode, os; print(os.path.dirname(voice_mode.__path__[0]))"],
+                  timeout=60)
+    site = last_line(out)
+    if rc != 0 or not site:
+        raise SetupFailed("VoiceMode's Python could not say where VoiceMode lives.",
+                          f"{CLI_REF} setup voice")
+    base = ["patch", "-d", site, "-p1"]
+    if run(base + ["-R", "--dry-run", "-s", "-f", "-i", patch], timeout=60)[0] == 0:
+        return "ok, already applied"
+    if run(base + ["--dry-run", "-s", "-f", "-i", patch], timeout=60)[0] == 0:
+        rc, out = run(base + ["-b", "-s", "-i", patch], timeout=60)
+        if rc != 0:
+            raise SetupFailed("The Bluetooth patch failed to apply.", f"patch -d {site} -p1 -b -i {patch}")
+        return "done, applied (the original is kept as .orig)"
+    return "skipped: the patch does not fit this VoiceMode version"
+
+
+def mic_probe() -> tuple[str | None, float | None]:
+    """(input device, peak level) from one second of the default mic. Level 0 means macOS is
+    blocking the mic: a working one always picks up some room noise."""
+    code = ("import json, sounddevice as sd\n"
+            "d = sd.query_devices(kind='input')['name']\n"
+            "x = sd.rec(16000, samplerate=16000, channels=1, dtype='int16'); sd.wait()\n"
+            "print(json.dumps({'device': d, 'peak': int(abs(x).max())}))\n")
+    rc, out = run([VM_PY, "-c", code], timeout=30)
+    if rc != 0:
+        return None, None
+    try:
+        data = json.loads(last_line(out))
+        return data.get("device"), num(data.get("peak"))
+    except ValueError:
+        return None, None
+
+
+def selftest(p: Progress) -> str:
+    if os.environ.get("CLUDEGODS_NO_SELFTEST"):
+        return "skipped"
+    if not (voice_up() and url_up(URLS["whisper"])):
+        p.detail("waiting for the voice services to load (the first time can take a minute)…")
+        try:
+            limit = float(os.environ.get("CLUDEGODS_SERVICE_WAIT_S", 120))
+        except ValueError:
+            limit = 120.0
+        wait_until(lambda: voice_up() is not None and url_up(URLS["whisper"]), limit)
+    if not voice_up():
+        raise SetupFailed("The voice service is not answering on 8890 or 8880.",
+                          f"{CLI_REF} doctor --fix restart-voice  (if it stays down: voicemode service logs {tts_service()})")
+    if not url_up(URLS["whisper"]):
+        raise SetupFailed("Whisper is not answering on 2022.",
+                          f"{CLI_REF} doctor --fix restart-whisper  (if it stays down: voicemode service logs whisper)")
+    if not is_exec(CALL):
+        raise SetupFailed("The call script is missing from ~/.claude/skills/gods.",
+                          f"{CLI_REF} doctor --fix reinstall-skills")
+    if ears_alive():
+        return "skipped: a call is running (hang up, then run this again to test)"
+    try:
+        listen = float(os.environ.get("CLUDEGODS_SELFTEST_S", 15))
+    except ValueError:
+        listen = 15.0
+    t0 = time.time() - 0.2
+    rc, out = run([CALL, "start", "--greet", TEST_LINE], timeout=120)
+    if rc != 0:
+        raise SetupFailed(f"The call could not start: {last_line(out) or 'no output'}.",
+                          f"{CALL_REF} status")
+    m = re.search(r"speaker=([^,\n]+)", out)
+    speaker = m.group(1).strip() if m else "the speaker"
+    p.detail(f"Speaking a test line on {speaker}. Say a few words now to test the mic.")
+    device = error = said = None
+    heard = False
+    end = time.time() + listen
+    try:
+        while time.time() < end:
+            device = error = said = None
+            heard = False
+            for _, r in heard_records(since=t0):
+                kind, ev = r.get("kind"), r.get("event")
+                if r.get("source") == "mic":
+                    if ev == "listen-started":
+                        device = r.get("device") or device
+                    elif ev == "listen-stopped" and r.get("error"):
+                        error = str(r.get("error"))
+                    elif kind in ("partial", "turn") or ev == "turn-discarded":
+                        heard = True
+                        device = r.get("device") or device
+                elif r.get("source") == "mouth" and kind == "said" and r.get("device") != "null":
+                    said = r
+            if error or (heard and said):
+                break
+            time.sleep(0.3)
+    finally:
+        # no call receipt for a test, and the mic is not left on
+        (CALL_DIR / "started").unlink(missing_ok=True)
+        run([CALL, "stop", "--now"], timeout=60)
+    if said is not None and said.get("reason") not in (None, "done"):
+        raise SetupFailed(f"The test line did not play on {speaker} ({said.get('reason')}).",
+                          f"{CALL_REF} status")
+    if error:
+        raise SetupFailed(f"The mic could not start: {error}.", f"{CALL_REF} status")
+    if heard:
+        p.detail(f"mic: {device or 'the default input'}, heard you")
+        return f"ok, spoke on {speaker} and heard you on {device or 'the mic'}"
+    probe_device, peak = mic_probe()
+    device = device or probe_device or "the mic"
+    p.detail(f"mic: {device}, heard no speech in {listen:.0f} s")
+    if peak == 0:
+        apps = "Claude" if mic_app() == "Claude" else f"{mic_app()} (for this test) and Claude (calls run there)"
+        raise SetupFailed(f"{device} is silent: macOS is blocking the microphone.",
+                          f"System Settings, Privacy & Security, Microphone: turn on {apps}, then run "
+                          f"{CLI_REF} setup voice again")
+    if peak is None:
+        raise SetupFailed(f"Heard nothing from {device} in {listen:.0f} s.",
+                          f"check System Settings, Privacy & Security, Microphone (turn on Claude), "
+                          f"then run {CLI_REF} setup voice again")
+    return (f"ok, spoke on {speaker}; {device} picks up sound but heard no speech "
+            f"(fine if you said nothing)")
+
+
+def setup(what: list, yes: bool = False, bluetooth: bool = False) -> int:
+    kind = what[0] if what else "voice"
+    if kind == "voice":
+        steps = [("Checking Homebrew and uv", lambda p: step_brew_uv(p, yes)),
+                 ("Installing VoiceMode", lambda p: step_voicemode(p, yes)),
+                 ("Setting up the voice services (mlx-audio, Whisper)" if tts_service() == "mlx-audio"
+                  else "Setting up the voice services (Kokoro, Whisper)", step_services),
+                 ("Adding Silero VAD", setup_vad),
+                 ("Bluetooth patch", (setup_bluetooth if bluetooth else
+                                      lambda p: "skipped (add --bluetooth-patch for AirPods or other Bluetooth output)")),
+                 ("Self-test", selftest)]
+    elif kind == "vad":
+        steps = [("Adding Silero VAD", setup_vad)]
+    elif kind == "bluetooth":
+        steps = [("Bluetooth patch", setup_bluetooth)]
+    else:
+        print(f"cludegods setup: nothing called {kind!r}. Try: setup voice", file=sys.stderr)
+        return 2
+    p = Progress(len(steps))
+    for label, fn in steps:
+        p.start(label)
+        try:
+            word = fn(p)
+        except SetupFailed as e:
+            p.end("failed")
+            return fail(e.what, e.next_step)
+        p.end(word)
+    if kind == "voice":
+        remember_flags("--voice", *(["--bluetooth-patch"] if bluetooth else []))
+        say("Voice is ready. Type /gods in any chat to start a call.")
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
+# update, uninstall
+
+def cmd_update() -> int:
+    repo = find_repo()
+    if repo is None:
+        return fail("The CludeGods source was not found.", f"run the one-line installer again: {ONE_LINE}")
+    if not (repo / ".git").exists() or not which("git"):
+        return fail(f"{tilde(repo)} is not a git checkout, so it cannot be pulled.",
+                    f"run the one-line installer again: {ONE_LINE}")
+    git = ["git", "-C", repo]
+    old = run(git + ["rev-parse", "HEAD"], timeout=30)[1].strip()
+    say(f"Pulling {tilde(repo)}")
+    rc, out = run(git + ["pull", "--ff-only"], timeout=600)
+    if rc != 0:
+        for l in out.strip().splitlines()[-4:]:
+            say("  " + l)
+        return fail("git pull stopped (local changes, or the branch moved in a way that needs you).",
+                    f"cd {tilde(repo)} && git status")
+    new = run(git + ["rev-parse", "HEAD"], timeout=30)[1].strip()
+    if run_install(list(read_record().get("flags") or [])):
+        return 1
+    panes_note = None
+    cli = claude_cli()
+    if not cli:
+        panes_note = ("The Claude Code CLI was not found: update the panes in the app (+ next to "
+                      "the prompt box, Plugins)")
+    else:
+        say("Updating the panes")
+        rc, out = run([cli, "plugin", "marketplace", "update", MARKETPLACE], timeout=300)
+        say(f"  {'✓' if rc == 0 else '✗'} marketplace {MARKETPLACE}"
+            + ("" if rc == 0 else f": {last_line(out)}"))
+        plugins = plugin_list(cli) or {}
+        for name in PANES:
+            if pane_id(name) not in plugins:
+                continue
+            rc, out = run([cli, "plugin", "update", pane_id(name)], timeout=300)
+            say(f"  {'✓' if rc == 0 else '✗'} {name}: {last_line(out) or ('updated' if rc == 0 else 'failed')}")
+    say("")
+    if old and new and old != new:
+        log = run(git + ["log", "--oneline", "--no-decorate", f"{old}..{new}"], timeout=30)[1].strip()
+        say(f"What changed ({old[:7]}..{new[:7]}):")
+        for l in log.splitlines():
+            say("  " + l)
+    else:
+        say(f"Already up to date ({version()}).")
+    if panes_note:
+        say(panes_note)
+    say("Restart the Claude app to load the updated panes and hooks.")
+    return 0
+
+
+def remove_our_hooks(data: dict) -> bool:
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event in list(hooks):
+        entries = hooks[event]
+        if not isinstance(entries, list):
+            continue
+        keep_entries = []
+        for e in entries:
+            if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+                kept = [h for h in e["hooks"]
+                        if not (isinstance(h, dict) and HOOK_RE.search(str(h.get("command", ""))))]
+                if len(kept) != len(e["hooks"]):
+                    changed = True
+                    if not kept:
+                        continue
+                    e = {**e, "hooks": kept}
+            keep_entries.append(e)
+        if keep_entries:
+            hooks[event] = keep_entries
+        else:
+            del hooks[event]
+    if changed and not hooks:
+        del data["hooks"]
+    return changed
+
+
+def cmd_uninstall(keep_data: bool, yes: bool) -> int:
+    say("This removes CludeGods from this Mac:")
+    say("  - the gods and spaces skills, the cludegods CLI and CallPill (~/.claude/skills)")
+    say("  - the narrate, guard and permit hooks in ~/.claude/settings.json (yours stay)")
+    say("  - the workers-pane, spaces-pane and inbox-relay plugins")
+    if keep_data:
+        say("  Your workers, spaces and settings in ~/.voicemode/call stay (--keep-data).")
+    else:
+        say("  - your workers, spaces, pages and settings in ~/.voicemode/call")
+    say("Everything is backed up first to ~/.claude/cludegods-backups.")
+    if not keep_data and not yes:
+        answer = ask_text('Type "delete" to go ahead: ')
+        if answer is None:
+            return fail("There is no terminal to confirm on, so nothing was removed.",
+                        f"{CLI_REF} uninstall --yes  (or --keep-data to keep your data)")
+        if answer.strip().lower() != "delete":
+            say("Nothing removed.")
+            return 1
+    dest = BACKUPS / f"{stamp()}-uninstall"
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in ("gods", "spaces"):
+        if (SKILLS / name).exists():
+            shutil.copytree(SKILLS / name, dest / "skills" / name, symlinks=True)
+    if SETTINGS.exists():
+        shutil.copy2(SETTINGS, dest / "settings.json")
+    if not keep_data and CALL_DIR.exists():
+        shutil.copytree(CALL_DIR, dest / "call", symlinks=True)
+    say(f"  ✓ backed up to {tilde(dest)}")
+
+    if ears_alive() and is_exec(CALL):
+        run([CALL, "stop", "--now"], timeout=60)
+        say("  ✓ hung up the running call")
+
+    data, err = load_json(SETTINGS)
+    if not err and isinstance(data, dict):
+        if remove_our_hooks(data):
+            write_json(SETTINGS, data)
+            say("  ✓ removed the CludeGods hooks from settings.json")
+    elif err != "missing":
+        say(f"  ! settings.json is not valid JSON ({err}); remove the narrate, guard and permit hooks by hand")
+
+    cli = claude_cli()
+    if cli:
+        plugins = plugin_list(cli) or {}
+        for name in PANES:
+            if pane_id(name) in plugins:
+                rc, out = run([cli, "plugin", "uninstall", pane_id(name)], timeout=120)
+                say(f"  {'✓ removed' if rc == 0 else '✗ could not remove'} {name}"
+                    + ("" if rc == 0 else f": {last_line(out)}"))
+        known = marketplaces(cli) or set()
+        if MARKETPLACE in known:
+            rc, _ = run([cli, "plugin", "marketplace", "remove", MARKETPLACE], timeout=120)
+            if rc == 0:
+                say(f"  ✓ removed the {MARKETPLACE} marketplace")
+    else:
+        say("  ! the Claude Code CLI was not found: remove the panes in the app (+ next to the "
+            "prompt box, Plugins)")
+
+    for name in ("gods", "spaces"):
+        if (SKILLS / name).exists():
+            shutil.rmtree(SKILLS / name)
+    say("  ✓ removed the skills, the cludegods CLI and CallPill")
+    if not keep_data and CALL_DIR.exists():
+        shutil.rmtree(CALL_DIR)
+        say("  ✓ removed ~/.voicemode/call")
+    say("")
+    say("CludeGods is removed. Restart the Claude app to finish.")
+    say("Left in place: VoiceMode and its services (remove with its own uninstaller), the Silero "
+        "model in ~/.voicemode/models, and the source folder you installed from.")
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
+
+def parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="cludegods", description="Set up, check, update and remove CludeGods.",
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = ap.add_subparsers(dest="cmd")
+    s = sub.add_parser("setup", help="set up voice (or only its VAD or Bluetooth step)")
+    s.add_argument("what", nargs="?", default="voice", choices=["voice", "vad", "bluetooth"])
+    s.add_argument("--yes", "-y", action="store_true", help="answer yes to every question")
+    s.add_argument("--bluetooth-patch", action="store_true", help="also patch VoiceMode for Bluetooth output")
+    d = sub.add_parser("doctor", help="health checks")
+    d.add_argument("--json", action="store_true", help="one JSON object for the Workers pane")
+    d.add_argument("--fix", metavar="ID", help="run one repair: " + ", ".join(sorted(FIXES)))
+    sub.add_parser("update", help="pull the source, reinstall, update the panes")
+    u = sub.add_parser("uninstall", help="remove CludeGods (backed up first)")
+    u.add_argument("--keep-data", action="store_true", help="keep ~/.voicemode/call")
+    u.add_argument("--yes", "-y", action="store_true", help="skip the typed confirmation")
+    sub.add_parser("version", help="print the version")
+    return ap
+
+
+def main(argv: list | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["record-install"]:   # install.sh: record-install REPO [FLAGS...]
+        if len(argv) < 2:
+            return 2
+        record_install(argv[1], [a for a in argv[2:] if a != "--"])
+        return 0
+    args = parser().parse_args(argv)
+    if args.cmd == "setup":
+        return setup([args.what], yes=args.yes, bluetooth=args.bluetooth_patch)
+    if args.cmd == "doctor":
+        return cmd_doctor(args.json, args.fix)
+    if args.cmd == "update":
+        return cmd_update()
+    if args.cmd == "uninstall":
+        return cmd_uninstall(args.keep_data, args.yes)
+    if args.cmd == "version":
+        print(f"cludegods {version()}")
+        return 0
+    parser().print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nStopped.", file=sys.stderr)
+        sys.exit(130)
