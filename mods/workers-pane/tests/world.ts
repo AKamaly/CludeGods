@@ -23,6 +23,8 @@ export type World = {
   sends: { to: string; text: string }[]
   toasts: string[]
   prompts: string[]
+  /** A fake command: answers a run before the built-ins (mkdir, rmdir, tee, tail), or undefined to fall through. */
+  run?: (argv: string[], stdin?: string) => { exitCode: number; stdout?: string; stderr?: string } | undefined
 }
 
 export const PANE_PROPS = {
@@ -91,6 +93,11 @@ export function makeWorld(on: On, init: { now: number; registry?: unknown; files
     const argv = [...e.argv]
     const stdin = e.init?.stdin
     w.runs.push({ argv, ...(stdin !== undefined ? { stdin } : {}) })
+    const faked = w.run?.(argv, stdin)
+    if (faked) {
+      const value = { exitCode: faked.exitCode, stdout: faked.stdout ?? '', stderr: faked.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false }
+      return { value }
+    }
     let exitCode = 0
     let stdout = ''
     if (argv[0] === '/bin/mkdir') {
