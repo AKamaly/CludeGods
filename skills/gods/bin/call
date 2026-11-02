@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # call: voice-call plumbing for the gods skill, on VoiceMode's ears and mouth.
 #
-#   call start [--greet TEXT]   start the ears (always-on mic) and the mouth (speaker);
-#                      --greet speaks TEXT as soon as the voice is up (no extra model turn)
+#   call start [--greet TEXT] [--model NAME]
+#                      start the ears (the mic) and the mouth (speaker); --greet speaks TEXT
+#                      as soon as the voice is up (no extra model turn); --model names this
+#                      chat's model, for the once-a-day tip on which one to pick. Exit 3: the
+#                      local voice is not installed (offer `call setup-voice`); exit 4: it is
+#                      installed but its services do not answer
 #   call say TEXT      speak TEXT; returns at once, lines queue in order
 #   call say --now T   cut whatever is playing and speak T
 #   call say --voice V T   speak in Kokoro voice V (default af_heart, speed 1.05)
@@ -11,18 +15,28 @@
 #   call hush          stop speaking and drop the queue
 #   call listen        the user's turns, one line each (run it under Monitor)
 #   call focus KEY     put a worker on the call (exact key or name); `call focus clear` ends it
-#   call mute|unmute   turn the mic fully off / back on (the pill's mic button)
-#   call mic           toggle mute: bind it to a key (see SKILL.md, "When voice breaks")
+#   call mute|unmute   turn the mic fully off / back on (the pill's mic button, open mode)
+#   call talk          push to talk: open the mic for one turn, closed again after it (a
+#                      second press closes it at once); the pill's mic button in talk mode
+#   call mode [open|talk]  the mic mode, config.json "call": {"mic": …}; none: print it
+#   call mic           the mic key: `call talk` in talk mode, else mute/unmute (bind it to a
+#                      keyboard shortcut, see SKILL.md, "Push to talk and the mic key")
 #   call stopwork      cut speech and tell the call session to halt (the pill's stop button)
 #   call stop [--now]  hang up: let the last line (the goodbye) finish, up to 8 s unless
 #                      --now, then stop the ears and the mouth and write the call receipt
 #   call status        what is running, what the ears hear, whether a listener is armed
+#   call setup-voice   install the local voice (cludegods setup voice --yes) in the background
+#                      and print its progress, a line every few seconds (run it under Monitor)
+#   call tip NAME [--never|--reset]   the once-a-day tips (model, headphones): due or not
 set -euo pipefail
 
 PY="${VOICEMODE_PY:-$HOME/.local/share/uv/tools/voice-mode/bin/python}"
 DIR="$HOME/.voicemode/call"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SILERO="${CALL_SILERO_MODEL:-$HOME/.voicemode/models/silero_vad.onnx}"
+CLI="$HERE/cludegods"                         # CludeGods' own CLI: doctor, setup
+VMCLI="$(dirname "$PY")/voicemode"            # VoiceMode's CLI, beside its Python
+PROBE="${CALL_PROBE_HOST:-127.0.0.1}"
 mkdir -p "$DIR"
 
 # Kokoro-82M v1.0's English voices (the mouth's own list). All verified on mlx-audio (8890);
@@ -31,12 +45,16 @@ KOKORO=" af_alloy af_aoede af_bella af_heart af_jessica af_kore af_nicole af_nov
 
 mouth() { "$PY" -m voice_mode.mouth "$@"; }
 
+up() { curl -s -m 0.5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null | grep -q 200; }
+voice_up() { up "http://$PROBE:8890/v1/models" || up "http://$PROBE:8880/v1/models"; }
+whisper_up() { up "http://$PROBE:2022/"; }
+
 # The mouth prefers mlx-audio (port 8890); fall back to Kokoro-FastAPI (port 8880).
 tts_env() {
-  if curl -s -m 0.5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8890/v1/models | grep -q 200; then
+  if up "http://$PROBE:8890/v1/models"; then
     echo "mlx-audio"
   else
-    export VOICEMODE_MOUTH_KOKORO_URL=http://127.0.0.1:8880/v1
+    export VOICEMODE_MOUTH_KOKORO_URL="http://$PROBE:8880/v1"
     export VOICEMODE_MOUTH_KOKORO_MODEL=kokoro
     echo "kokoro"
   fi
@@ -56,6 +74,21 @@ for d in sd.query_devices():
 }
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+on_headphones() { grep -qiE "airpods|headphone|headset|buds|beats" "$DIR/device" 2>/dev/null; }
+
+# The mic mode: config.json "call": {"mic": "talk"} is push to talk, anything else open.
+mic_mode() {
+  python3 -c 'import json, sys
+try:
+    c = json.load(open(sys.argv[1])).get("call")
+except Exception:
+    c = None
+m = c.get("mic") if isinstance(c, dict) else None
+print(m if m in ("open", "talk") else "open")' "$DIR/config.json" 2>/dev/null || echo open
+}
+
+now_s() { python3 -c 'import time; print(f"{time.time():.3f}")'; }
 
 # The output to speak on: CALL_OUTPUT_DEVICE if set, else the system's output right now.
 # When it changes mid-call (AirPods back in the case, a display unplugged) the device file
@@ -92,44 +125,199 @@ sys.exit(0 if s.get("queued") or s.get("playing") else 1)' 2>/dev/null || return
   done
 }
 
-up() { curl -s -m 0.5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null | grep -q 200; }
-
 # A worker from the registry by exact key or exact name: "key<TAB>name<TAB>voice<TAB>session<TAB>god"
 # (an unknown session is "-", so no field is ever empty)
 worker() { python3 "$HERE/listen.py" --worker "$1"; }
 
+# Start the ears; extra arguments go to the capture (later ones win: a talk turn's --silence).
 start_ears() {
-  alive "$DIR/ears.pid" && return 0
+  if alive "$DIR/ears.pid"; then
+    [ -f "$DIR/ears.stop" ] || return 0
+    # on its way down (a mute, or a talk turn that just closed): let it finish, then start anew
+    local end=$((SECONDS + 4))
+    while alive "$DIR/ears.pid" && [ "$SECONDS" -lt "$end" ]; do sleep 0.1; done
+    alive "$DIR/ears.pid" && return 0
+  fi
   rm -f "$DIR/ears.stop"
   # Bluetooth headset mics drop to low-quality call mode; listen on the Mac's own mic instead.
   # CALL_MIC_DEVICE names the input explicitly; otherwise the built-in mic is looked up.
   local mic=() name="${CALL_MIC_DEVICE:-}"
-  if [ -z "$name" ] && grep -qiE "airpods|headphone|buds|beats" "$DIR/device"; then name=$(builtin_mic); fi
+  if [ -z "$name" ] && on_headphones; then name=$(builtin_mic); fi
   if [ -n "$name" ]; then mic=(--device "$name"); fi
   nohup "$PY" -m voice_mode.listen capture ${mic[@]+"${mic[@]}"} --detector silero --silero-model "$SILERO" --silero-threshold "${CALL_SILERO_THRESHOLD:-0.6}" \
-    --silence "${CALL_SILENCE_S:-0.7}" --turn-text redecode --stop-file "$DIR/ears.stop" \
+    --silence "${CALL_SILENCE_S:-0.7}" --turn-text redecode --stop-file "$DIR/ears.stop" "$@" \
     > "$DIR/ears.log" 2>&1 &
   echo $! > "$DIR/ears.pid"; disown
+}
+
+# ---- is the local voice there? -------------------------------------------------------------
+
+# Everything a call needs, checked in a few milliseconds when it is all there.
+voice_ready() { [ -x "$PY" ] && [ -s "$SILERO" ] && voice_up && whisper_up; }
+
+voice_missing_why() {
+  if [ ! -x "$PY" ]; then echo "VoiceMode is not installed"
+  elif [ ! -s "$SILERO" ]; then echo "the Silero voice detector is missing"
+  elif ! voice_up; then echo "no voice service on $PROBE:8890 or :8880"
+  else echo "no Whisper on $PROBE:2022"; fi
+}
+
+# "<installed yes|no> <download GB or ->": `cludegods doctor --json` (voice_installed, and
+# voice_download_gb when it gives one), else VoiceMode's Python and the Silero model.
+voice_installed() {
+  local v=""
+  if [ -x "$CLI" ]; then
+    v=$(python3 - "$CLI" <<'PY' 2>/dev/null || true
+import json, subprocess, sys
+try:
+    d = json.loads(subprocess.run([sys.argv[1], "doctor", "--json"], capture_output=True,
+                                  text=True, timeout=20).stdout)
+except Exception:
+    sys.exit(0)
+v = d.get("voice_installed") if isinstance(d, dict) else None
+gb = d.get("voice_download_gb") if isinstance(d, dict) else None
+if isinstance(v, bool):
+    print("yes" if v else "no", gb if isinstance(gb, (int, float)) and gb > 0 else "-")
+PY
+)
+  fi
+  if [ -z "$v" ]; then
+    if [ -x "$PY" ] && [ -s "$SILERO" ]; then v="yes -"; else v="no -"; fi
+  fi
+  echo "$v"
+}
+
+# 0 ready; 3 not installed; 4 installed, services not answering (after trying to start them).
+preflight() {
+  voice_ready && return 0
+  local why inst gb
+  why=$(voice_missing_why)
+  read -r inst gb <<< "$(voice_installed)"
+  if [ "$inst" = no ]; then
+    [ "$gb" = - ] && gb=3
+    echo "voice: missing ($why). The call needs local speech models: about $gb GB to download," \
+         "a few minutes, and everything stays on this Mac."
+    if [ -x "$CLI" ]; then
+      echo "setup: offer it in the chat; on a yes, run \`${HERE/#$HOME/~}/call setup-voice\` under Monitor."
+    else
+      echo "setup: this install has no one-step setup (no cludegods CLI). Point them to the" \
+           "README, Get started: VoiceMode first, then ./install.sh."
+    fi
+    return 3
+  fi
+  # installed: its services are local launchd jobs; start what is down and give them 30 s
+  if [ -x "$VMCLI" ]; then
+    voice_up || "$VMCLI" service start mlx-audio > /dev/null 2>&1 \
+             || "$VMCLI" service start kokoro > /dev/null 2>&1 || true
+    whisper_up || "$VMCLI" service start whisper > /dev/null 2>&1 || true
+    local end=$((SECONDS + ${CALL_SERVICE_WAIT_S:-30}))
+    while [ "$SECONDS" -lt "$end" ]; do
+      voice_up && whisper_up && return 0
+      sleep 1
+    done
+  fi
+  why=$(voice_missing_why)
+  echo "voice: down ($why). VoiceMode is installed but its services do not answer. Tell them:" \
+       "\`voicemode service start mlx-audio\` and \`voicemode service start whisper\`, then /gods again."
+  return 4
+}
+
+# ---- once-a-day tips -----------------------------------------------------------------------
+
+TIPS="$DIR/tips.json"
+today() { date +%Y-%m-%d; }
+
+# Due: not said today, and not turned off ("never").
+tip_due() {
+  python3 - "$TIPS" "$1" "$(today)" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    d = {}
+v = d.get(sys.argv[2]) if isinstance(d, dict) else None
+sys.exit(1 if v in (sys.argv[3], "never") else 0)
+PY
+}
+
+tip_mark() {
+  python3 - "$TIPS" "$1" "$2" <<'PY'
+import json, os, sys
+p, k, v = sys.argv[1:4]
+try:
+    d = json.load(open(p))
+    d = d if isinstance(d, dict) else {}
+except Exception:
+    d = {}
+if v:
+    d[k] = v
+else:
+    d.pop(k, None)
+tmp = p + ".part"
+with open(tmp, "w") as f:
+    f.write(json.dumps(d, indent=2) + "\n")
+os.replace(tmp, p)
+PY
+}
+
+tip_spoken() {
+  case "$1" in
+    model) echo "One tip: calls run fastest on Haiku. Pick Haiku, low effort, in the model menu, and I'll answer quicker." ;;
+    headphones) echo "Quick tip: you're on speakers. With headphones, cutting in on me works much better." ;;
+  esac
+}
+
+tip_chat() {
+  case "$1" in
+    model) echo "Tip: calls run fastest on **Haiku** at **low** effort. A chat can't switch its own model, so pick it in the model menu under the prompt box; heavier work still goes to Sonnet or Opus helpers. (Once a day.)" ;;
+    headphones) echo "Tip: on speakers the mic hears me too, so cutting in has to tell your voice from mine. Headphones make interruptions work better. (Once a day.)" ;;
+  esac
+}
+
+# After the call's own (not a worker's, not a step's) line: say the next pending tip, once.
+say_tip() {
+  local name voice="$1"
+  [ -s "$DIR/tips-pending" ] || return 0
+  name=$(head -n 1 "$DIR/tips-pending")
+  tail -n +2 "$DIR/tips-pending" > "$DIR/tips-pending.part" && mv -f "$DIR/tips-pending.part" "$DIR/tips-pending"
+  [ "$name" = headphones ] && on_headphones && return 0   # they put headphones on meanwhile
+  tip_due "$name" || return 0
+  mouth say --voice "$voice" --speed "${CALL_SPEED:-1.05}" --device "$(speaker)" "$(tip_spoken "$name")" > /dev/null
+  tip_mark "$name" "$(today)"
+  echo "tip said out loud; put it in the chat too, as its own line: $(tip_chat "$name")"
 }
 
 case "${1:-status}" in
   start)
     shift
-    greet=""
+    greet="" model=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        --greet) [ $# -ge 2 ] || { echo "call start: --greet needs a line" >&2; exit 2; }
-                 greet="$2"; shift 2 ;;
+        --greet|--model)
+          [ $# -ge 2 ] || { echo "call start: $1 needs a value" >&2; exit 2; }
+          if [ "$1" = --greet ]; then greet="$2"; else model="$2"; fi
+          shift 2 ;;
         --greet=*) greet="${1#--greet=}"; shift ;;
+        --model=*) model="${1#--model=}"; shift ;;
         *) echo "call start: unknown option $1" >&2; exit 2 ;;
       esac
     done
     SECONDS=0
-    # the call's start time, for its receipt: kept across a restart mid-call (ears dropped),
-    # new for a fresh call or when a stale one never hung up
-    if [ ! -f "$DIR/started" ] || [ -n "$(find "$DIR/started" -mmin +720 2>/dev/null)" ] \
-       || ! { alive "$DIR/ears.pid" || pgrep -f "voice_mode.mouth (serve|mail)" > /dev/null; }; then
+    # no voice on this Mac yet: say what it needs, start nothing
+    rc=0; preflight || rc=$?
+    [ "$rc" = 0 ] || exit "$rc"
+    # the call's start time, for its receipt: kept across a restart mid-call (ears dropped, or
+    # /gods in another chat taking the call over), new for a fresh call or a stale one
+    live_before=0
+    if alive "$DIR/ears.pid" || pgrep -f "voice_mode.mouth (serve|mail)" > /dev/null; then live_before=1; fi
+    if [ ! -f "$DIR/started" ] || [ -n "$(find "$DIR/started" -mmin +720 2>/dev/null)" ] || [ "$live_before" = 0 ]; then
       date +%s > "$DIR/started"
+    fi
+    took=""
+    prev=$(cat "$DIR/session" 2>/dev/null || true)
+    if [ "$live_before" = 1 ] && [ -n "$prev" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] \
+       && [ "$prev" != "$CLAUDE_CODE_SESSION_ID" ]; then
+      took=1
     fi
     # mouth: restart the player so it picks up the backend and device
     pkill -f "voice_mode.mouth (serve|mail)" 2>/dev/null || true
@@ -140,14 +328,24 @@ case "${1:-status}" in
     # of the start runs, and the greeting queued behind it is not a cold start
     mouth say --device null --voice "$(checked_voice)" "Ready." > /dev/null 2>&1 || true
     output_device > "$DIR/device"
-    rm -f "$DIR/muted"
-    start_ears
+    rm -f "$DIR/muted" "$DIR/talk"
+    mic=$(mic_mode)
+    if [ "$mic" = talk ]; then
+      # push to talk: the mic stays off until they press talk
+      alive "$DIR/ears.pid" && touch "$DIR/ears.stop"
+    else
+      start_ears
+    fi
     # floating status pill
     if [ -d "$HERE/CallPill.app" ]; then
       pgrep -x CallPill > /dev/null || open -g "$HERE/CallPill.app"
     fi
-    # the narrate hook only speaks for this session
+    # the narrate hook only speaks for this session, and a listener in any other chat steps back
     [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo "$CLAUDE_CODE_SESSION_ID" > "$DIR/session"
+    # the once-a-day tips, said after the call's first lines (`call say` picks them up)
+    : > "$DIR/tips-pending"
+    if [ -n "$model" ] && ! grep -qi haiku <<< "$model" && tip_due model; then echo model >> "$DIR/tips-pending"; fi
+    if ! on_headphones && tip_due headphones; then echo headphones >> "$DIR/tips-pending"; fi
     # the greeting goes out from here, so it does not wait for another model turn; the
     # listener armed after it still hears anything said from the call's start
     if [ -n "$greet" ]; then
@@ -155,7 +353,12 @@ case "${1:-status}" in
         --device "$(cat "$DIR/device")" "$greet" > /dev/null || true
       touch "$DIR/last-say"
     fi
-    echo "call up in ${SECONDS} s: voice=$backend, speaker=$(cat "$DIR/device")${greet:+, greeting queued}"
+    echo "call up in ${SECONDS} s: voice=$backend, speaker=$(cat "$DIR/device"), mic=$mic${greet:+, greeting queued}"
+    [ -n "$took" ] && echo "took the call over from another chat (its listener steps back; what was said meanwhile is delivered)"
+    if [ -f "$DIR/handoff.md" ] && [ -z "$(find "$DIR/handoff.md" -mmin +15 2>/dev/null)" ]; then
+      echo "handoff: ~/.voicemode/call/handoff.md, from the chat the call came from: read it before the first answer"
+    fi
+    true
     ;;
   say)
     shift
@@ -197,6 +400,7 @@ case "${1:-status}" in
     mouth say ${flag[@]+"${flag[@]}"} ${expires[@]+"${expires[@]}"} --voice "$voice" \
       --speed "${CALL_SPEED:-1.05}" --device "$(speaker)" "$*" > /dev/null
     touch "$DIR/last-say"   # narrate keeps its steps off a line that was just queued
+    if [ -z "$as" ] && [ -z "$step" ]; then say_tip "$voice" || true; fi
     ;;
   hush)
     mouth stop > /dev/null
@@ -228,16 +432,72 @@ case "${1:-status}" in
   mute)
     # the mic is really off (capture stops), not just ignored: for phone calls and visitors
     touch "$DIR/muted" "$DIR/ears.stop"
+    rm -f "$DIR/talk"
     echo "muted"
     ;;
   unmute)
     rm -f "$DIR/muted"
-    start_ears
-    echo "unmuted"
+    if [ "$(mic_mode)" = talk ]; then
+      echo "unmuted (push to talk: \`call talk\` opens the mic for a turn)"
+    else
+      start_ears
+      echo "unmuted"
+    fi
+    ;;
+  talk)
+    # push to talk: open the mic for one turn. `listen.py --talk-watch` closes it after his
+    # first turn, or when nothing is said; a second press while it is open closes it now.
+    now=$(now_s)
+    if [ -f "$DIR/talk" ]; then
+      tok=$(cat "$DIR/talk" 2>/dev/null || true)
+      rm -f "$DIR/talk"
+      if python3 -c 'import sys; sys.exit(0 if float(sys.argv[2]) - float(sys.argv[1]) < float(sys.argv[3]) + 5 else 1)' \
+           "$tok" "$now" "${CALL_TALK_MAX_S:-90}" 2>/dev/null; then
+        touch "$DIR/ears.stop"
+        echo "talk: done (mic closed)"
+        exit 0
+      fi   # a press left over from long ago: start a new one
+    fi
+    [ -f "$DIR/started" ] || { echo "call talk: no call is live (type /gods to start one)" >&2; exit 3; }
+    if [ "$(mic_mode)" != talk ]; then
+      if [ -f "$DIR/muted" ]; then
+        echo "talk: the mic is muted (open mode). \`call unmute\` turns it back on; \`call mode talk\` switches to push to talk"
+      else
+        echo "talk: the mic is already open (\`call mode talk\` switches to push to talk)"
+      fi
+      exit 0
+    fi
+    mouth stop > /dev/null 2>&1 || true   # pressing talk asks for the floor
+    rm -f "$DIR/muted"
+    printf '%s\n' "$now" > "$DIR/talk.part" && mv -f "$DIR/talk.part" "$DIR/talk"
+    start_ears --silence "${CALL_TALK_SILENCE_S:-1.2}" --ceiling "${CALL_TALK_MAX_S:-90}"
+    nohup python3 "$HERE/listen.py" --talk-watch "$now" > /dev/null 2>&1 &
+    disown
+    echo "talk: go ahead (the mic closes after your turn)"
+    ;;
+  mode)
+    want="${2:-}"
+    case "$want" in
+      "") echo "mic: $(mic_mode)"; exit 0 ;;
+      open|talk) ;;
+      *) echo "call mode: open or talk" >&2; exit 2 ;;
+    esac
+    python3 "$HERE/listen.py" --set-mic "$want" > /dev/null
+    if [ -f "$DIR/started" ]; then   # a live call: switch it now; a mute stays a mute
+      rm -f "$DIR/talk"
+      if [ "$want" = talk ]; then
+        alive "$DIR/ears.pid" && touch "$DIR/ears.stop"
+      elif [ ! -f "$DIR/muted" ]; then
+        start_ears
+      fi
+    fi
+    if [ "$want" = talk ]; then echo "mic: talk (push to talk: \`call talk\`, the pill's mic button, or your shortcut)"
+    else echo "mic: open"; fi
     ;;
   mic)
-    # one key for both: bind `call mic` to a keyboard shortcut (Shortcuts app, "Run Shell
-    # Script"), the same as the pill's mic button
+    # one key for everything: bind `call mic` to a keyboard shortcut (Shortcuts app, "Run Shell
+    # Script"). In talk mode it is push to talk; in open mode it mutes and unmutes.
+    if [ "$(mic_mode)" = talk ]; then exec "$0" talk; fi
     if [ -f "$DIR/muted" ]; then exec "$0" unmute; else exec "$0" mute; fi
     ;;
   stopwork)
@@ -253,7 +513,7 @@ case "${1:-status}" in
     pkill -f "voice_mode.mouth (serve|mail)" 2>/dev/null || true
     rm -f "$DIR/mouth.pid"
     pkill -x CallPill 2>/dev/null || true
-    rm -f "$DIR/session" "$DIR/muted"
+    rm -f "$DIR/session" "$DIR/muted" "$DIR/talk" "$DIR/tips-pending"
     : > "$DIR/focus"
     echo "call down"
     # the receipt: his turns and the spoken replies, as a page in the Spaces "calls" space
@@ -263,20 +523,115 @@ case "${1:-status}" in
     fi
     ;;
   status)
-    alive "$DIR/ears.pid" && echo "ears: up" || echo "ears: down"
+    mic=$(mic_mode)
+    if alive "$DIR/ears.pid"; then echo "ears: up"
+    elif [ "$mic" = talk ]; then echo "ears: off between turns (push to talk)"
+    else echo "ears: down"; fi
     [ -f "$DIR/muted" ] && echo "mic: muted"
+    if [ "$mic" = talk ]; then echo "mic mode: talk (push to talk)"; else echo "mic mode: open"; fi
+    [ -f "$DIR/talk" ] && echo "talk: a turn is open"
     pgrep -f "voice_mode.mouth (serve|mail)" > /dev/null && echo "mouth: up" || echo "mouth: down"
-    if up http://127.0.0.1:8890/v1/models; then echo "voice: mlx-audio (8890)"
-    elif up http://127.0.0.1:8880/v1/models; then echo "voice: Kokoro-FastAPI (8880), mlx-audio is down"
+    if up "http://$PROBE:8890/v1/models"; then echo "voice: mlx-audio (8890)"
+    elif up "http://$PROBE:8880/v1/models"; then echo "voice: Kokoro-FastAPI (8880), mlx-audio is down"
     else echo "voice: DOWN, nothing on 8890 or 8880 (voicemode service start mlx-audio)"; fi
-    if up http://127.0.0.1:2022/; then echo "whisper: up (2022)"
+    if whisper_up; then echo "whisper: up (2022)"
     else echo "whisper: DOWN on 2022 (voicemode service start whisper)"; fi
     [ -f "$DIR/device" ] && echo "speaker: $(cat "$DIR/device")"
     [ -s "$DIR/focus" ] && echo "focus: $(cat "$DIR/focus")"
     python3 "$HERE/listen.py" --status 2>/dev/null || true
     true
     ;;
+  setup-voice)
+    # The install runs in its own session, so neither the Monitor's 30-minute expiry nor a
+    # closed chat kills it half done; this command only follows its log. Run it again to
+    # re-attach. Progress lines start with SETUP:, the last one is SETUP: done / failed.
+    [ -x "$CLI" ] || { echo "SETUP: failed (this install has no cludegods CLI: README, Get started, VoiceMode first, then ./install.sh)"; exit 2; }
+    log="$DIR/setup-voice.log" rc="$DIR/setup-voice.exit" pidf="$DIR/setup-voice.pid"
+    attach=1
+    if ! alive "$pidf"; then
+      attach=0
+      rm -f "$rc"; : > "$log"
+      python3 - "$CLI" "$log" "$rc" "$pidf" <<'PY'
+import subprocess, sys
+cli, log, rc, pidf = sys.argv[1:5]
+p = subprocess.Popen(["/bin/bash", "-c", '"$0" setup voice --yes > "$1" 2>&1; echo $? > "$2"', cli, log, rc],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+with open(pidf, "w") as f:
+    f.write(str(p.pid))
+PY
+    fi
+    exec python3 - "$log" "$rc" "$pidf" "$attach" "${CALL_SETUP_EVERY_S:-10}" <<'PY'
+import os, re, sys, time
+log, rc, pidf, attach, every = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1", float(sys.argv[5])
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+BAD = re.compile(r"\b(error|failed|failure|denied|not found)\b", re.I)
+
+def alive():
+    try:
+        os.kill(int(open(pidf).read().strip()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+def say(text):
+    print(f"SETUP: {text}", flush=True)
+
+t0, last_out, last, buf = time.time(), 0.0, "", ""
+pos = os.path.getsize(log) if attach and os.path.exists(log) else 0
+if attach:
+    say("already running; following it")
+else:
+    say("started (local speech models; this takes a few minutes)")
+last_out = time.time()
+while True:
+    try:
+        with open(log, "rb") as fh:
+            fh.seek(pos)
+            data = fh.read()
+    except OSError:
+        data = b""
+    pos += len(data)
+    buf += data.decode("utf-8", "replace")
+    parts = re.split(r"[\r\n]", buf)
+    buf = parts.pop()
+    for raw in parts:
+        line = ANSI.sub("", raw).strip()
+        if not line:
+            continue
+        last = line
+        if BAD.search(line) or time.time() - last_out >= every:
+            say(line[:160])
+            last_out = time.time()
+    if os.path.exists(rc) or not alive():
+        time.sleep(0.5)
+        try:
+            code = open(rc).read().strip()
+        except OSError:
+            code = "?"
+        if code == "0":
+            say("done. The voice is installed: start the call now.")
+        else:
+            say(f"failed (exit {code}). Last line: {last[:160] or 'none'}. "
+                "Full log: ~/.voicemode/call/setup-voice.log")
+        sys.exit(0)
+    if time.time() - last_out >= 60:
+        say(f"still working, {int((time.time() - t0) // 60)} min in" + (f"; last: {last[:100]}" if last else ""))
+        last_out = time.time()
+    time.sleep(0.5)
+PY
+    ;;
+  tip)
+    name="${2:-}"
+    case "$name" in model|headphones) ;; *) echo "call tip: model or headphones" >&2; exit 2 ;; esac
+    case "${3:-}" in
+      --never) tip_mark "$name" never; echo "tip $name: off" ;;
+      --reset) tip_mark "$name" ""; echo "tip $name: on" ;;
+      "") if tip_due "$name"; then echo "tip $name: due"; else echo "tip $name: not due"; exit 1; fi ;;
+      *) echo "call tip: --never or --reset" >&2; exit 2 ;;
+    esac
+    ;;
   *)
-    sed -n '2,19p' "$0"; exit 2
+    sed -n '2,30p' "$0"; exit 2
     ;;
 esac
