@@ -5,8 +5,12 @@ No silence while work runs: a short sentence about what the session is doing. It
 (`call start` records it in ~/.voicemode/call/session), so every other session is untouched.
 One exception: a worker on the call (`call focus <key>`) gets its steps said too, in its own
 voice, when the hook fires in that worker's session (matched by its registry "transcript").
-At most one line every NARRATE_GAP_S seconds; the call's own plumbing is never narrated.
-Lines go out as `call say --step` (tagged, so the call receipt counts them, not quotes them).
+At most one line every NARRATE_GAP_S seconds (6) after any line, a step or a reply, so a step
+never lands right on top of an answer; a helper agent's steps (the hook carries an agent_id)
+at most every NARRATE_HELPER_GAP_S (20). A line that says nothing specific ("Working on it.")
+waits for NARRATE_QUIET_S (20) of quiet, and the same line is never said twice in a minute.
+Steps go out as `call say --step --expires NARRATE_EXPIRES_S` (4): a step stuck in the queue
+behind a long answer is dropped, not said late. The call's own plumbing is never narrated.
 Standard library only; always exits 0 and prints nothing, so it can never block a tool.
 """
 
@@ -22,6 +26,11 @@ from pathlib import Path
 CALL_DIR = Path.home() / ".voicemode" / "call"
 CALL = Path(__file__).resolve().parent / "call"
 GAP_S = float(os.environ.get("NARRATE_GAP_S", "6"))
+HELPER_GAP_S = float(os.environ.get("NARRATE_HELPER_GAP_S", "20"))
+QUIET_S = float(os.environ.get("NARRATE_QUIET_S", "20"))
+EXPIRES_S = os.environ.get("NARRATE_EXPIRES_S", "4")
+REPEAT_S = 60.0
+GENERIC = {"Working on it.", "Searching the code.", "Looking at the page.", "Searching the web."}
 
 SILENT_TOOLS = re.compile(
     r"^(Monitor|TaskStop|ToolSearch|Skill|SendMessage|AskUserQuestion|ExitPlanMode|EnterPlanMode"
@@ -86,6 +95,30 @@ def line_for(tool, inp):
     return None
 
 
+def age(path, now):
+    try:
+        return now - path.stat().st_mtime
+    except OSError:
+        return float("inf")
+
+
+def should_say(line, now, helper, call_dir=None):
+    """Is this step worth saying now? (the pacing rules in the docstring)"""
+    d = call_dir or CALL_DIR
+    stamp = d / "narrated"
+    since_step, since_any = age(stamp, now), min(age(stamp, now), age(d / "last-say", now))
+    if since_any < GAP_S or (helper and since_step < HELPER_GAP_S):
+        return False
+    if line in GENERIC and since_any < QUIET_S:
+        return False
+    try:
+        if since_step < REPEAT_S and stamp.read_text().strip() == line:
+            return False
+    except OSError:
+        pass
+    return True
+
+
 def main():
     try:
         event = json.load(sys.stdin)
@@ -97,22 +130,62 @@ def main():
     who = speaker(event.get("session_id", ""))
     if who is None:
         return
-    stamp = CALL_DIR / "narrated"
-    try:
-        if time.time() - stamp.stat().st_mtime < GAP_S:
-            return
-    except OSError:
-        pass
     line = line_for(tool, inp)
-    if not line:
+    if not line or not should_say(line, time.time(), bool(event.get("agent_id"))):
         return
-    stamp.touch()
+    (CALL_DIR / "narrated").write_text(line + "\n")
     voice = ["--as", who] if who else []
-    subprocess.Popen([str(CALL), "say", *voice, "--step", line], stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+    subprocess.Popen([str(CALL), "say", *voice, "--step", "--expires", EXPIRES_S, line],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def selftest():
+    """The pacing rules, against a temp folder. Prints each check; returns the failures."""
+    import tempfile
+
+    d = Path(tempfile.mkdtemp(prefix="narrate-test-"))
+    fails = 0
+
+    def check(name, got, want):
+        nonlocal fails
+        fails += got != want
+        print(f"{'PASS' if got == want else 'FAIL'}  narrate: {name}"
+              + ("" if got == want else f"\n      got  {got!r}\n      want {want!r}"))
+
+    def stamp(name, ago, text=""):
+        p = d / name
+        p.write_text(text)
+        t = time.time() - ago
+        os.utime(p, (t, t))
+
+    now = time.time()
+    check("nothing said yet -> say it", should_say("Reading listen.py.", now, False, d), True)
+    stamp("last-say", 2)
+    check("a reply queued 2 s ago -> wait", should_say("Reading listen.py.", now, False, d), False)
+    stamp("last-say", 30)
+    stamp("narrated", 8, "Reading call.\n")
+    check("8 s since the last step -> say it", should_say("Reading listen.py.", now, False, d), True)
+    check("a helper's step 8 s after the last -> wait", should_say("Reading listen.py.", now, True, d),
+          False)
+    check("'Working on it.' with 8 s of quiet -> skip", should_say("Working on it.", now, False, d), False)
+    stamp("narrated", 25, "Reading call.\n")
+    check("'Working on it.' after 25 s of quiet -> say it", should_say("Working on it.", now, False, d),
+          True)
+    check("the same line again within a minute -> skip", should_say("Reading call.", now, False, d),
+          False)
+    check("lines for tools", [line_for("Read", {"file_path": "/x/listen.py"}),
+                              line_for("Bash", {"command": "~/.claude/skills/colleague/bin/call say hi",
+                                                "description": "Speak"}),
+                              line_for("mcp__x__y", {})],
+          ["Reading listen.py.", None, "Working on it."])
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
+    return fails
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        raise SystemExit(1 if selftest() else 0)
     try:
         main()
     except Exception:

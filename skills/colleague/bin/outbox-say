@@ -2,10 +2,12 @@
 # outbox-say KEY ID TEXT: speak a worker's outbox heads-up once, only if a call is live,
 # in that worker's own voice (its registry "voice", else its god's default; `call say --as`).
 # The Workers pane calls it for each new outbox line. The mkdir lock makes it once per
-# line even when several pane instances see the same line. Exit 0 spoke, 3 no call, 4 already said.
+# line even when several pane instances see the same line. Exit 0 spoke, 3 no call (or the mic is
+# muted: a phone call or a visitor, so the heads-up stays in the pane), 4 already said.
 set -uo pipefail
 DIR="$HOME/.voicemode/call"
 key="$1"; idx="$2"; shift 2; text="$*"
+[ -f "$DIR/muted" ] && exit 3
 mkdir -p "$DIR/outbox/.said"
 mkdir "$DIR/outbox/.said/$key-$idx" 2>/dev/null || exit 4
 # A call is live when the call session is recorded and the mouth is serving.

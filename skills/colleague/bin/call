@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # call: voice-call plumbing for the colleague skill, on VoiceMode's ears and mouth.
 #
-#   call start         start the ears (always-on mic) and the mouth (speaker)
+#   call start [--greet TEXT]   start the ears (always-on mic) and the mouth (speaker);
+#                      --greet speaks TEXT as soon as the voice is up (no extra model turn)
 #   call say TEXT      speak TEXT; returns at once, lines queue in order
 #   call say --now T   cut whatever is playing and speak T
 #   call say --voice V T   speak in Kokoro voice V (default af_heart, speed 1.05)
 #   call say --as KEY T    a worker's line: its registry voice, tagged KEY in the heard log
+#   call say --expires S T drop the line unspoken if it has not started within S seconds
 #   call hush          stop speaking and drop the queue
 #   call listen        the user's turns, one line each (run it under Monitor)
 #   call focus KEY     put a worker on the call (exact key or name); `call focus clear` ends it
 #   call mute|unmute   turn the mic fully off / back on (the pill's mic button)
+#   call mic           toggle mute: bind it to a key (see SKILL.md, "When voice breaks")
 #   call stopwork      cut speech and tell the call session to halt (the pill's stop button)
-#   call stop          hang up: stop the ears and the mouth, write the call receipt
-#   call status        what is running
+#   call stop [--now]  hang up: let the last line (the goodbye) finish, up to 8 s unless
+#                      --now, then stop the ears and the mouth and write the call receipt
+#   call status        what is running, what the ears hear, whether a listener is armed
 set -euo pipefail
 
 PY="${VOICEMODE_PY:-$HOME/.local/share/uv/tools/voice-mode/bin/python}"
@@ -53,6 +57,43 @@ for d in sd.query_devices():
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 
+# The output to speak on: CALL_OUTPUT_DEVICE if set, else the system's output right now.
+# When it changes mid-call (AirPods back in the case, a display unplugged) the device file
+# follows, so lines keep playing instead of failing as "device-absent", and the echo gate
+# knows speakers from headphones.
+speaker() {
+  local want="${CALL_OUTPUT_DEVICE:-}" have
+  have=$(cat "$DIR/device" 2>/dev/null || true)
+  [ -n "$want" ] || want=$(output_device 2>/dev/null) || want=""
+  if [ -n "$want" ] && [ "$want" != "$have" ]; then
+    printf '%s\n' "$want" > "$DIR/device.part" && mv -f "$DIR/device.part" "$DIR/device"
+  fi
+  printf '%s' "${want:-$have}"
+}
+
+# A Kokoro-looking id the voice model does not have would drop the line: fall back.
+checked_voice() {
+  local voice="${1:-${CALL_VOICE:-af_heart}}"
+  if [[ "$voice" =~ ^[a-z][a-z]_[a-z0-9]+$ ]] && [[ "$KOKORO" != *" $voice "* ]]; then
+    echo "call say: no Kokoro voice '$voice', speaking as ${CALL_VOICE:-af_heart}" >&2
+    voice="${CALL_VOICE:-af_heart}"
+  fi
+  printf '%s' "$voice"
+}
+
+# Wait while the mouth is still speaking or has lines queued, at most $1 seconds.
+drain() {
+  local end=$((SECONDS + $1))
+  while [ "$SECONDS" -lt "$end" ]; do
+    mouth status 2>/dev/null | python3 -c 'import json, sys
+s = json.load(sys.stdin)
+sys.exit(0 if s.get("queued") or s.get("playing") else 1)' 2>/dev/null || return 0
+    sleep 0.3
+  done
+}
+
+up() { curl -s -m 0.5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null | grep -q 200; }
+
 # A worker from the registry by exact key or exact name: "key<TAB>name<TAB>voice<TAB>session<TAB>god"
 # (an unknown session is "-", so no field is ever empty)
 worker() { python3 "$HERE/listen.py" --worker "$1"; }
@@ -73,6 +114,17 @@ start_ears() {
 
 case "${1:-status}" in
   start)
+    shift
+    greet=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --greet) [ $# -ge 2 ] || { echo "call start: --greet needs a line" >&2; exit 2; }
+                 greet="$2"; shift 2 ;;
+        --greet=*) greet="${1#--greet=}"; shift ;;
+        *) echo "call start: unknown option $1" >&2; exit 2 ;;
+      esac
+    done
+    SECONDS=0
     # the call's start time, for its receipt: kept across a restart mid-call (ears dropped),
     # new for a fresh call or when a stale one never hung up
     if [ ! -f "$DIR/started" ] || [ -n "$(find "$DIR/started" -mmin +720 2>/dev/null)" ] \
@@ -82,27 +134,39 @@ case "${1:-status}" in
     # mouth: restart the player so it picks up the backend and device
     pkill -f "voice_mode.mouth (serve|mail)" 2>/dev/null || true
     backend=$(tts_env)
-    output_device > "$DIR/device"
     nohup "$PY" -m voice_mode.mouth serve > "$DIR/mouth.log" 2>&1 &
     echo $! > "$DIR/mouth.pid"; disown
+    # warm the voice model first, in the call's own voice, silently: it loads while the rest
+    # of the start runs, and the greeting queued behind it is not a cold start
+    mouth say --device null --voice "$(checked_voice)" "Ready." > /dev/null 2>&1 || true
+    output_device > "$DIR/device"
     rm -f "$DIR/muted"
     start_ears
     # floating status pill
     if [ -d "$HERE/CallPill.app" ]; then
       pgrep -x CallPill > /dev/null || open -g "$HERE/CallPill.app"
     fi
-    # warm the voice model silently so the first real line is not a cold start
-    ( mouth say --device null "Ready." > /dev/null 2>&1 & )
     # the narrate hook only speaks for this session
     [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo "$CLAUDE_CODE_SESSION_ID" > "$DIR/session"
-    echo "call up: voice=$backend, speaker=$(cat "$DIR/device")"
+    # the greeting goes out from here, so it does not wait for another model turn; the
+    # listener armed after it still hears anything said from the call's start
+    if [ -n "$greet" ]; then
+      mouth say --voice "$(checked_voice)" --speed "${CALL_SPEED:-1.05}" \
+        --device "$(cat "$DIR/device")" "$greet" > /dev/null || true
+      touch "$DIR/last-say"
+    fi
+    echo "call up in ${SECONDS} s: voice=$backend, speaker=$(cat "$DIR/device")${greet:+, greeting queued}"
     ;;
   say)
     shift
-    flag=(); voice=""; as=""; step=""
+    flag=(); voice=""; as=""; step=""; expires=()
     while [ $# -gt 0 ]; do
       case "$1" in
         --now) flag=(--now); shift ;;
+        --expires)
+          [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+            || { echo "call say: --expires needs seconds" >&2; exit 2; }
+          expires=(--expires "$2"); shift 2 ;;
         --voice|--as)
           [ $# -ge 2 ] || { echo "call say: $1 needs a value" >&2; exit 2; }
           if [ "$1" = "--voice" ]; then voice="$2"; else as="$2"; fi
@@ -123,13 +187,16 @@ case "${1:-status}" in
     elif [ -n "$step" ]; then
       export VOICEMODE_AGENT="colleague:step"
     fi
-    voice="${voice:-${CALL_VOICE:-af_heart}}"
-    # a Kokoro-looking id the voice model does not have would drop the line: fall back
-    if [[ "$voice" =~ ^[a-z][a-z]_[a-z0-9]+$ ]] && [[ "$KOKORO" != *" $voice "* ]]; then
-      echo "call say: no Kokoro voice '$voice', speaking as ${CALL_VOICE:-af_heart}" >&2
-      voice="${CALL_VOICE:-af_heart}"
+    voice=$(checked_voice "$voice")
+    # a long line is long to sit through, and he can't skim it: nudge, never block
+    words=$(printf '%s' "$*" | wc -w | tr -d ' ')
+    if [ -z "$step" ] && [ "$words" -gt "${CALL_SAY_MAX_WORDS:-45}" ]; then
+      echo "call say: $words words is long to listen to. Keep a spoken line under 40 words;" \
+           "put the detail in the chat and say it's there." >&2
     fi
-    mouth say ${flag[@]+"${flag[@]}"} --voice "$voice" --speed "${CALL_SPEED:-1.05}" --device "$(cat "$DIR/device")" "$*" > /dev/null
+    mouth say ${flag[@]+"${flag[@]}"} ${expires[@]+"${expires[@]}"} --voice "$voice" \
+      --speed "${CALL_SPEED:-1.05}" --device "$(speaker)" "$*" > /dev/null
+    touch "$DIR/last-say"   # narrate keeps its steps off a line that was just queued
     ;;
   hush)
     mouth stop > /dev/null
@@ -168,6 +235,11 @@ case "${1:-status}" in
     start_ears
     echo "unmuted"
     ;;
+  mic)
+    # one key for both: bind `call mic` to a keyboard shortcut (Shortcuts app, "Run Shell
+    # Script"), the same as the pill's mic button
+    if [ -f "$DIR/muted" ]; then exec "$0" unmute; else exec "$0" mute; fi
+    ;;
   stopwork)
     # cut speech now; the listener tells the call session to halt its current work
     mouth stop > /dev/null 2>&1 || true
@@ -176,6 +248,7 @@ case "${1:-status}" in
     ;;
   stop)
     touch "$DIR/ears.stop"
+    [ "${2:-}" = "--now" ] || drain "${CALL_STOP_WAIT_S:-8}"
     mouth stop > /dev/null 2>&1 || true
     pkill -f "voice_mode.mouth (serve|mail)" 2>/dev/null || true
     rm -f "$DIR/mouth.pid"
@@ -193,11 +266,17 @@ case "${1:-status}" in
     alive "$DIR/ears.pid" && echo "ears: up" || echo "ears: down"
     [ -f "$DIR/muted" ] && echo "mic: muted"
     pgrep -f "voice_mode.mouth (serve|mail)" > /dev/null && echo "mouth: up" || echo "mouth: down"
+    if up http://127.0.0.1:8890/v1/models; then echo "voice: mlx-audio (8890)"
+    elif up http://127.0.0.1:8880/v1/models; then echo "voice: Kokoro-FastAPI (8880), mlx-audio is down"
+    else echo "voice: DOWN, nothing on 8890 or 8880 (voicemode service start mlx-audio)"; fi
+    if up http://127.0.0.1:2022/; then echo "whisper: up (2022)"
+    else echo "whisper: DOWN on 2022 (voicemode service start whisper)"; fi
     [ -f "$DIR/device" ] && echo "speaker: $(cat "$DIR/device")"
     [ -s "$DIR/focus" ] && echo "focus: $(cat "$DIR/focus")"
+    python3 "$HERE/listen.py" --status 2>/dev/null || true
     true
     ;;
   *)
-    sed -n '2,15p' "$0"; exit 2
+    sed -n '2,19p' "$0"; exit 2
     ;;
 esac
