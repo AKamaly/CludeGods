@@ -7,6 +7,8 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-02
+
 ### Added
 
 - **One-line install:**
@@ -261,7 +263,8 @@ release adds features and a patch release fixes things.
 - A Bluetooth patch for VoiceMode's mouth.
 - The silent launch film, attached to the release.
 
-[Unreleased]: https://github.com/AKamaly/CludeGods/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/AKamaly/CludeGods/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/AKamaly/CludeGods/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AKamaly/CludeGods/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AKamaly/CludeGods/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AKamaly/CludeGods/compare/v0.1.0...v0.2.0
