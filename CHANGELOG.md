@@ -7,6 +7,10 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+### Changed
+
+- The README's launch film link opens the film on YouTube.
+
 ## [0.4.0] - 2026-11-02
 
 ### Added
