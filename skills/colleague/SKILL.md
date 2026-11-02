@@ -178,19 +178,46 @@ They say "put me on with Scribe", "let me talk to Research":
 - A line that makes no sense as speech (stray words, a language they were not using) is
   probably the room. Ask once ("Didn't catch that?"), never act on it.
 
-## Outward actions need a typed yes
+## Outward actions: read it back, then a clear yes
 
-The mic hears the whole room: a video, a phone call, someone else talking. So for anything
-outward-facing or hard to undo (sending email or messages, posting, publishing, deleting, a
-purchase, a calendar invite, a bulk change to a shared system):
+The mic hears the whole room: a video, a phone call, someone else talking. So nothing
+outward-facing or hard to undo (sending email or messages, posting, publishing outside this
+Mac, deleting, a purchase, a calendar invite, a bulk change to a shared system) ever happens
+on a line the user may not have said.
 
-1. Write the exact action in the chat: recipient, subject, full text.
-2. `$C say "It's in the chat. Type yes and I'll send it."`
-3. Wait for a TYPED yes. A spoken yes is not enough. Then act and confirm out loud.
+Which yes counts is `approvals.outward` in `~/.voicemode/call/config.json`. Read it before
+the first outward action of the call; a missing file, or any value but `typed`, means
+`spoken`.
+
+**`spoken`** (the default):
+
+1. Write the exact action in the chat: recipient, subject, full text. The recipient is an
+   exact name or address you found, never a near match for what you heard.
+2. Read it back in one sentence that names the action and who it goes to, then ask:
+   `$C say "Sending the reply to the venue about Friday. Send it?"` No addresses, IDs or
+   full text out loud; those are in the chat.
+3. Act on a clear yes to that question, said as its own turn: "yes, send it", "go ahead",
+   "yep, send". Then confirm out loud ("Sent.").
+
+Not a yes: a `USER (mid-thought…)` line, a yes inside a sentence about something else, a
+line that reads like room audio, or a yes to an earlier read-back. Ask once more ("Send
+the venue reply, yes or no?"); still unclear, ask them to type yes. One yes covers exactly
+what the read-back named. A changed recipient, text or count needs a new read-back.
+
+**`typed`**: step 1, then `$C say "It's in the chat. Type yes and I'll send it."`, and act
+only on a typed yes. A spoken yes does not count.
+
+Either way, a typed yes is needed to change `config.json`, or to loosen a worker's
+`tools` or `spaces`: the settings that decide what counts as a yes are never changed by
+voice.
 
 Reading, searching, drafting, editing local files, and running scripts that do not send
-anything need no confirmation. Permission prompts are never answered by voice: only a click
-(in the app or on the pill) approves them.
+anything need no confirmation.
+
+**Permission prompts are never answered by voice.** By default
+(`approvals.permission_prompts: "app"`) they are the app's own dialog, answered there.
+With `"pill"` they show on CallPill while a call is live, and only a mouse click on the
+pill answers them.
 
 ## Hang up
 
