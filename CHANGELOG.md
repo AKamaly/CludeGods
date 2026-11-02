@@ -14,6 +14,11 @@ release adds features and a patch release fixes things.
   actions, and only the selected card is highlighted.
 - Workers pane: the Ask, Ask all, Change and New worker fields stretch to the card's full
   width (two-line fields; the desktop keeps a one-line field narrow).
+- Workers pane: the health strip shows only problems you can act on, every error and any
+  warning with a Fix button. Passive warnings no longer appear or turn a dot amber.
+- `cludegods doctor`: no warning about the mic of a call that already ended, or about a
+  worker that has not started its chat yet or is paused. The mic error says what happened in
+  plain words.
 
 ## [0.5.0] - 2026-11-02
 

@@ -147,6 +147,10 @@ test('doctor --json: the contract parsed, junk refused, malformed checks skipped
   expect(groupState(report!, 'workers')).toBe('warn')
   expect(groupState({ ...report!, voice_installed: false }, 'voice')).toBe('off')
   expect(groupState({ ...report!, checks: [] }, 'workers')).toBe('none')
+  // A warning with nothing to press is never shown and never turns a dot amber.
+  const quiet = parseDoctor(JSON.stringify({ ...REPORT, checks: [check('worker-chats', "Workers' chats", false, 'warn', null, null, 'Inbox: no transcript yet')] }))!
+  expect(problems(quiet)).toEqual([])
+  expect(groupState(quiet, 'workers')).toBe('ok')
 })
 
 test('needs you, pure: permits, wake ids, the order of the four sources, the badge', () => {

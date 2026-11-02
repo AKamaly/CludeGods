@@ -689,13 +689,20 @@ def check_mic() -> dict:
     if start is None and turn is None:
         return check("mic", label, True, "warn", "No call yet, so the mic has not been used")
     device = (start or turn)[1].get("device") or "the default input"
+    # Only a call that is on (or just ended) can have a mic problem worth showing: how an
+    # old call ended is history, not something to fix now.
+    live = ears_alive() or (stop is not None and now - stop[0] < 600)
+    if not live:
+        return check("mic", label, True, "warn",
+                     f"Not in a call. Last heard you {ago(now - turn[0])}" if turn else "Not in a call")
     if beat is not None and num(beat[1].get("peak")) == 0:
         return check("mic", label, False, "warn",
                      f"{device} is sending silence (level 0): macOS is blocking the mic. System "
                      "Settings, Privacy & Security, Microphone: turn on Claude")
     if stop is not None and start is not None and stop[0] >= start[0] and stop[1].get("error"):
         return check("mic", label, False, "warn",
-                     f"The ears stopped with an error {ago(now - stop[0])}: {stop[1].get('error')}",
+                     f"The mic stopped sending sound {ago(now - stop[0])} (this happens when AirPods "
+                     "connect or the lid closes). Start the call again with /gods",
                      "restart-whisper" if "whisper" in str(stop[1].get("error")).lower() else None,
                      "Restart Whisper")
     if turn is not None:
@@ -737,18 +744,21 @@ def check_worker_chats() -> dict:
         if not isinstance(w, dict):
             continue
         name = w.get("name") or w.get("key") or "?"
+        # A worker links its own transcript on its first turn, so "not yet" is normal, and a
+        # paused worker isn't expected to have run.
+        if w.get("paused") is True:
+            continue
         if not w.get("session"):
-            bad.append(f"{name}: no chat")
-        elif not w.get("transcript"):
-            bad.append(f"{name}: no transcript yet")
-        elif resolve_transcript(w["transcript"]) is None:
-            bad.append(f"{name}: transcript not found")
+            bad.append(f"{name} has no chat yet (press Start chat on its card)")
+        elif w.get("transcript") and resolve_transcript(w["transcript"]) is None:
+            bad.append(f"{name}'s chat can't be found (press Start chat on its card)")
     if not bad:
-        n = len(workers)
+        n = sum(1 for w in workers if isinstance(w, dict) and w.get("paused") is not True)
+        if n == 0:
+            return check("worker-chats", label, True, "warn", "All workers are paused")
         return check("worker-chats", label, True, "warn",
-                     f"{'Its' if n == 1 else 'All ' + str(n)} chat{'' if n == 1 else 's'} found")
-    return check("worker-chats", label, False, "warn",
-                 "; ".join(bad) + ". Open the Workers pane to start or re-link them", None)
+                     f"{'Its' if n == 1 else 'All ' + str(n)} chat{'' if n == 1 else 's'} ready")
+    return check("worker-chats", label, False, "warn", "; ".join(bad), None)
 
 
 def doctor_report() -> dict:
