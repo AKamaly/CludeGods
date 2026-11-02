@@ -1,7 +1,7 @@
 {
   "name": "workers-pane",
-  "version": "0.4.0",
-  "description": "A Workers pane beside the chat: standing worker chats as god cards with live status, one-step creation, an Ask field and Ask all, scheduled wakes, a Today digest, an outbox to approve, change or decline, recent activity, and per-worker settings",
+  "version": "0.5.0",
+  "description": "A Workers pane beside the chat: a Welcome view and ready-made worker templates for a two-minute start, a Needs you list of everything waiting on you, a health strip, standing worker chats as god cards with live status, scheduled wakes, a Today digest, and per-worker settings in plain words",
   "author": {
     "name": "AKamaly"
   },
