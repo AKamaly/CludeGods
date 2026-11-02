@@ -279,7 +279,8 @@ run again. Then:
 
 1. Restart the Claude app (quit it fully, then open it again).
 2. Type `/gods` in any chat. The **Workers** and **Spaces** buttons are in the chat footer;
-   the Workers pane opens on a Welcome view with three first steps.
+   press **Workers** (or type `/workers`) to open the pane, which starts on a Welcome view
+   with three first steps. It never opens by itself.
 
 #### Voice is optional
 

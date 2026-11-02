@@ -1320,8 +1320,8 @@ export const register: Register = on => {
   })
 
   on('session.start', async ($, e, next) => {
+    // The pane opens only when asked: the footer's Workers button, /workers, or the open flag.
     await $.command.register({ name: 'workers', description: 'Show the Workers pane' })
-    void $.ui.open({ id: PANE, title: 'Workers', columns: COLUMNS })
     // Picks from before a reload have no write left to settle them.
     await update($, edits, old => (Object.keys(old).length === 0 ? old : {}))
     try {
