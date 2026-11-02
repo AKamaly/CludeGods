@@ -21,9 +21,9 @@ release adds features and a patch release fixes things.
 
 ### Fixed
 
-- Workers pane: pressing a worker's name, role line or status selects its card, and so does
-  any action on the card (Ask, Run now, Outbox); exactly one card is highlighted, and hovering
-  another no longer draws it in its own colour. The name no longer opens the chat; Open does.
+- Workers pane: a click anywhere on a worker's card selects it and moves the highlight there;
+  exactly one card is highlighted, and hovering another no longer draws it in its own colour.
+  The name selects the card; Open opens the chat.
 
 ## [0.4.0] - 2026-11-02
 
