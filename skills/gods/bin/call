@@ -342,10 +342,6 @@ case "${1:-status}" in
     fi
     # the narrate hook only speaks for this session, and a listener in any other chat steps back
     [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo "$CLAUDE_CODE_SESSION_ID" > "$DIR/session"
-    # the once-a-day tips, said after the call's first lines (`call say` picks them up)
-    : > "$DIR/tips-pending"
-    if [ -n "$model" ] && ! grep -qi haiku <<< "$model" && tip_due model; then echo model >> "$DIR/tips-pending"; fi
-    if ! on_headphones && tip_due headphones; then echo headphones >> "$DIR/tips-pending"; fi
     # the greeting goes out from here, so it does not wait for another model turn; the
     # listener armed after it still hears anything said from the call's start
     if [ -n "$greet" ]; then
@@ -353,6 +349,11 @@ case "${1:-status}" in
         --device "$(cat "$DIR/device")" "$greet" > /dev/null || true
       touch "$DIR/last-say"
     fi
+    # the once-a-day tips, said after the call's first lines (`call say` picks them up);
+    # worked out once the greeting is queued, so they cost it nothing
+    : > "$DIR/tips-pending"
+    if ! on_headphones && tip_due headphones; then echo headphones >> "$DIR/tips-pending"; fi
+    if [ -n "$model" ] && ! grep -qi haiku <<< "$model" && tip_due model; then echo model >> "$DIR/tips-pending"; fi
     echo "call up in ${SECONDS} s: voice=$backend, speaker=$(cat "$DIR/device"), mic=$mic${greet:+, greeting queued}"
     [ -n "$took" ] && echo "took the call over from another chat (its listener steps back; what was said meanwhile is delivered)"
     if [ -f "$DIR/handoff.md" ] && [ -z "$(find "$DIR/handoff.md" -mmin +15 2>/dev/null)" ]; then
