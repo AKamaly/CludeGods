@@ -72,6 +72,8 @@ release adds features and a patch release fixes things.
 
 ### Fixed
 
+- `install.sh` keeps its backups of replaced skills in `~/.claude/cludegods-backups/`. A
+  backup left in `~/.claude/skills/` loaded as a second copy of the skill.
 - CI: the worker-permissions speed check gives shared CI runners more room (200 ms instead of
   50 ms), so a slow runner no longer fails `main`.
 - Workers never got a `transcript`, so their status stayed New, Activity stayed empty, and
