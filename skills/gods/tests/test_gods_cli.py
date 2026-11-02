@@ -490,6 +490,14 @@ class TestDoctor(Base):
         c = self.checks()["skills"]
         self.assertEqual((c["ok"], c["severity"]), (False, "warn"))
         self.assertIn("colleague", c["detail"])
+        shutil.rmtree(self.home / ".claude/skills/gods")
+        c = self.checks()["skills"]
+        self.assertEqual((c["ok"], c["severity"]), (False, "error"))
+        self.assertIn("Missing from ~/.claude/skills: gods (the old colleague skill is still there", c["detail"])
+        r = self.cli("doctor", "--fix", "reinstall-skills")   # install.sh moves it to gods
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(self.checks()["skills"]["ok"])
+        self.assertFalse((self.home / ".claude/skills/colleague").exists())
 
     def test_hooks(self):
         c = self.checks()["hooks"]
@@ -514,6 +522,7 @@ class TestDoctor(Base):
         self.write(".claude/settings.json", s)
         c = self.checks()["hooks"]
         self.assertFalse(c["ok"])
+        self.assertEqual(c["detail"], "Still pointing at the old colleague skill: narrate, guard, permit")
         self.assertEqual(self.cli("doctor", "--fix", "reinstall-hooks").returncode, 0)
         self.assertTrue(self.checks()["hooks"]["ok"])
         self.assertNotIn("colleague", (self.home / ".claude/settings.json").read_text())

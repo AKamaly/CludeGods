@@ -446,6 +446,8 @@ def check_skills() -> dict:
     old = (SKILLS / "colleague").exists()
     if missing:
         detail = "Missing from ~/.claude/skills: " + ", ".join(missing)
+        if old:
+            detail += " (the old colleague skill is still there; Reinstall moves it to gods)"
     elif old:
         detail = "The old colleague skill is still in ~/.claude/skills and loads as a second skill"
     else:
@@ -481,13 +483,14 @@ def check_hooks() -> dict:
     found = our_hooks(data)
     missing = [n for n, ev in HOOK_EVENTS.items()
                if not any(e == ev and s == "gods" for e, s in found.get(n, []))]
-    stale = sorted({n for n, lst in found.items() if any(s == "colleague" for _, s in lst)})
-    if missing:
-        detail = "Missing: " + ", ".join(missing)
-    elif stale:
-        detail = "Still pointing at the old colleague skill: " + ", ".join(stale)
-    else:
-        detail = "narrate, guard and permit are registered"
+    stale = [n for n in HOOK_EVENTS if any(s == "colleague" for _, s in found.get(n, []))]
+    bits = []
+    if stale:
+        bits.append("Still pointing at the old colleague skill: " + ", ".join(stale))
+    gone = [n for n in missing if n not in stale]
+    if gone:
+        bits.append("Missing: " + ", ".join(gone))
+    detail = "; ".join(bits) or "narrate, guard and permit are registered"
     return check("hooks", label, not missing and not stale, "error", detail, "reinstall-hooks",
                  "Add hooks")
 
