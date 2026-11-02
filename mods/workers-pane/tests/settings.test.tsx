@@ -318,10 +318,11 @@ test('wide: a list of compact rows beside the selected worker\'s tabbed detail',
   const tabs = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /^(overview|outboxtab|activity|settings)-/.test(k ?? ''))
   expect(tabs).toEqual(['overview-quick', 'outboxtab-quick', 'activity-quick', 'settings-quick'])
   expect((await ui.findAll({ type: 'Input' })).map(i => i.key)).toEqual(['task-quick'])
-  expect((await ui.find({ key: 'hours-quick' }))?.props.label).toBe('Manual')
+  expect((await ui.find({ key: 'hours-quick' }))?.props.label).toBe('When you ask')
   expect((await ui.find({ key: 'open-quick' }))?.props.label).toBe('Open chat')
-  expect(await ui.find({ key: 'run-quick' })).toBeUndefined() // no charter, nothing to run
-  expect(await ui.find({ type: 'Text', text: 'No schedule: it works when you ask.' })).toBeDefined()
+  expect((await ui.find({ key: 'talk-quick' }))?.props.label).toBe('Talk to Quick')
+  expect(await ui.find({ key: 'run-quick' })).toBeUndefined() // no instructions, nothing to run
+  expect(await ui.find({ type: 'Text', text: 'Works when you ask. Set times under When it works in Settings.' })).toBeDefined()
 
   // A row's name selects it, and opens nothing.
   await ui.press({ key: 'pick-work' })
@@ -383,8 +384,15 @@ test('the width comes from the body, else the surface, else the docked default',
 })
 
 test('narrow: the empty states say what to do', async ($, on) => {
-  world(on, { workers: [] })
+  const w = world(on, { workers: [] })
   const ui = await $.ui.mount({ ...NARROW, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /^No workers yet\. \+ New worker makes one/ })).toBeDefined()
+  // A first run opens on Welcome; once it is dismissed, the empty list says what to do.
+  expect(await ui.find({ key: 'welcome' })).toBeDefined()
+  await ui.press({ key: 'onboarding-dismiss' })
+  expect(await ui.find({ key: 'welcome' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^No workers yet\. \+ New worker picks a ready-made one/ })).toBeDefined()
+  expect(JSON.parse(w.files.get(`${HOME}/.voicemode/call/onboarding.json`) ?? '{}')).toEqual({ done: [], dismissed: true })
+  await ui.press({ key: 'needs' })
+  expect(await ui.find({ type: 'Text', text: /^Nothing needs you\. Drafts waiting for your yes, permission requests/ })).toBeDefined()
   await ui.unmount()
 })

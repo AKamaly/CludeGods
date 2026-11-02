@@ -66,9 +66,9 @@ test('labels read as the film writes them', async () => {
   expect(daysLabel('sun-thu')).toBe('Sun to Thu')
   expect(chipLabel({ schedule: WEEKDAYS })).toBe('Mon to Fri · 9:00')
   expect(chipLabel({ schedule: WEEKDAYS, paused: true })).toBe('Paused')
-  expect(chipLabel({})).toBe('Manual')
-  expect(outboxLabel(2, false)).toBe('Outbox · 2')
-  expect(outboxLabel(0, false)).toBe('Outbox · 0')
+  expect(chipLabel({})).toBe('When you ask')
+  expect(outboxLabel(2, false)).toBe('Needs you · 2')
+  expect(outboxLabel(0, false)).toBe('Outbox')
   expect(outboxLabel(2, true)).toBe('Hide outbox')
 })
 

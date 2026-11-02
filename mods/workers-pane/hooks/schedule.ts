@@ -218,10 +218,10 @@ export function scheduleSentence(schedule: Schedule): string {
   return `${days === 'Daily' ? 'Every day' : days} at ${shortTime(schedule.time ?? '')}`
 }
 
-/** The chip's text: the schedule, "Paused" while paused, "Manual" with none. */
+/** The chip's text: the schedule, "Paused" while paused, "When you ask" with none. */
 export function chipLabel(w: { schedule?: Schedule; paused?: boolean }): string {
   if (w.paused === true) return 'Paused'
-  return w.schedule ? scheduleLabel(w.schedule) : 'Manual'
+  return w.schedule ? scheduleLabel(w.schedule) : 'When you ask'
 }
 
 /** The Hours control's mode: 'off', 'daily', or the interval ("3h"). */

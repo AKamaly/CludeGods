@@ -157,14 +157,16 @@ test('cards follow the film: header, god, name, status, role, the Ask field and 
     (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(x => x?.endsWith(`-${k}`) && !/^name-/.test(x ?? ''))
   expect(await keysOf('quick')).toEqual([
     'hours-quick', 'feed-quick', 'open-quick', 'overview-quick', 'outboxtab-quick', 'activity-quick', 'settings-quick',
+    'talk-quick',
   ])
+  expect((await ui.find({ key: 'talk-quick' }))?.props.label).toBe('Talk to Quick')
   expect((await ui.find({ key: 'overview-quick' }))?.props.dimColor).toBe(false)
   expect((await ui.find({ key: 'activity-quick' }))?.props.dimColor).toBe(true)
   // Every other card is the film's card alone: no tabs, no Delete on its face.
   expect(await keysOf('deep')).toEqual(['hours-deep', 'feed-deep', 'open-deep'])
   expect(await ui.find({ key: 'delete-deep' })).toBeUndefined()
-  expect((await ui.find({ key: 'hours-quick' }))?.props.label).toBe('Manual')
-  expect((await ui.find({ key: 'feed-quick' }))?.props.label).toBe('Outbox · 0')
+  expect((await ui.find({ key: 'hours-quick' }))?.props.label).toBe('When you ask')
+  expect((await ui.find({ key: 'feed-quick' }))?.props.label).toBe('Outbox')
   // Line icons, not emoji: a clock, an inbox and an external-link glyph on every card.
   const svgs = await ui.findAll({ type: 'Svg' })
   expect(svgs.filter(s => s.props.alt === 'clock')).toHaveLength(4)
@@ -184,7 +186,7 @@ test('the terminal draws the same cards with no Svg', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.findAll({ type: 'Svg' })).toHaveLength(0)
   expect(await ui.find({ key: 'name-quick' })).toBeDefined()
-  expect((await ui.find({ key: 'feed-deep' }))?.props.label).toBe('Outbox · 0')
+  expect((await ui.find({ key: 'feed-deep' }))?.props.label).toBe('Outbox')
   await ui.unmount()
 })
 
@@ -192,6 +194,7 @@ test('each Input is the only submit control: no separate Send or Create Buttons'
   world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
 
   const labels = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label ?? b.text))
   expect(labels.filter(l => /^(send|create)$/i.test(l))).toEqual([])
@@ -263,6 +266,7 @@ test('the New worker form picks one of six gods as a radio, Scribe first, the fo
   world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
 
   const tiles = (await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('nw-god-'))
   expect(tiles.map(b => b.key)).toEqual([
@@ -286,7 +290,7 @@ test('the New worker form picks one of six gods as a radio, Scribe first, the fo
   expect((await ui.find({ key: 'nw-god-tile-herald' }))?.props.borderColor).toBe(HERALD)
   expect((await ui.find({ key: 'new-form' }))?.props.borderColor).toBe(HERALD)
   // New workers start with full access unless config.json says otherwise.
-  expect(await ui.find({ type: 'Text', text: /Voice bm_george · full access/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Voice bm_george · can do anything/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -294,12 +298,15 @@ test('Enter splits the one field at the first comma and puts the create request 
   const w = world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.press({ key: 'nw-god-herald' })
   await ui.input({ key: 'nw-entry', text: 'Herald, announcements', kind: 'change' })
   await ui.input({ key: 'nw-entry', text: 'Herald, announcements' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.input({ key: 'nw-entry', text: 'Scribe 2, drafts, posts; comments' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.input({ key: 'nw-entry', text: '  Solo  ' })
 
   // The v1 fields lead, so an older call session still reads the first line; the key
@@ -326,6 +333,7 @@ test('an invalid name does not submit', async ($, on) => {
   const w = world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'new-worker' })
+  await ui.press({ key: 'nw-blank' })
   await ui.input({ key: 'nw-entry', text: 'bad;name!', kind: 'change' })
   expect(await ui.find({ type: 'Text', text: /1 to 24 letters/ })).toBeUndefined()
   await ui.input({ key: 'nw-entry', text: 'bad;name!' })
@@ -354,15 +362,17 @@ test('Enter in a task box sends the task to that worker chat; a blank one is not
   await ui.unmount()
 })
 
-test('a missing registry draws an empty pane with the New worker button', async ($, on) => {
+test('a missing registry opens on Welcome, with the New worker button', async ($, on) => {
   mock.env(on, { HOME })
   on('clock.now', () => ({ value: NOW }))
   on('fs.read', (_, e) => ({ deny: `ENOENT ${e.path}` }))
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.findAll({ type: 'Svg' })).toHaveLength(0)
+  // Only the colleague god heads it; no worker icons.
+  expect((await ui.findAll({ type: 'Svg' })).map(s => s.props.alt)).toEqual(['CludeGods'])
   expect(await ui.find({ key: 'new-worker' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'No workers.json yet' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Welcome to CludeGods' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'No workers.json yet' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -454,11 +464,12 @@ test('a proactive card: a badge for what waits, the hours chip, Run now, Outbox 
   expect(tag?.props.color).toBe(SCRIBE)
   expect(tag?.props.backgroundColor).toBe(`${SCRIBE}24`)
   expect((await ui.find({ key: 'hours-sales' }))?.props.label).toBe('Mon to Fri · 9:00')
-  expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Outbox · 3')
+  expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Needs you · 3')
   expect(await ui.find({ type: 'Text', text: 'Follow-ups' })).toBeDefined()
   const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /-sales$/.test(k ?? '') && !/^name-/.test(k ?? ''))
   expect(keys).toEqual([
     'hours-sales', 'run-sales', 'feed-sales', 'open-sales', 'overview-sales', 'outboxtab-sales', 'activity-sales', 'settings-sales',
+    'talk-sales',
   ])
   // The tab reads the count; Overview says when it wakes, in words.
   expect((await ui.find({ key: 'outboxtab-sales' }))?.props.label).toBe('Outbox · 3')
@@ -482,7 +493,7 @@ test('an item with a decision on file leaves the count; nothing waiting means no
   })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: ' 2 drafts ' })).toBeDefined()
-  expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Outbox · 2')
+  expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Needs you · 2')
   await ui.unmount()
 })
 
@@ -496,7 +507,7 @@ test('Run now sends the charter wake to that worker chat', async ($, on) => {
   expect(w.sends[0]?.text).toMatch(/^Run now, from the Workers pane: run your charter now/)
   expect(w.sends[0]?.text).toContain('~/.voicemode/call/outbox/sales.jsonl')
   expect(w.sends[0]?.text).toContain('More rules here.')
-  expect(await ui.find({ type: 'Text', text: /^Last: Run its charter now/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Last: Run its instructions now/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -757,7 +768,7 @@ test('each setting is written into the registry entry, every other key kept', as
   expect('schedule' in after).toBe(false)
   expect(after.name).toBe('Sales Desk')
   expect(w.toasts).toContain('A name is 1 to 24 letters, digits or spaces')
-  expect((await ui.find({ key: 'hours-sales' }))?.props.label).toBe('Manual')
+  expect((await ui.find({ key: 'hours-sales' }))?.props.label).toBe('When you ask')
   expect(await ui.find({ key: 'time-sales' })).toBeUndefined()
   expect(await ui.find({ key: 'days-sales' })).toBeUndefined()
   expect((await ui.find({ key: 'mode-sales' }))?.props.value).toBe('off')
@@ -844,8 +855,8 @@ test('Activity says so when the chat has not run or its transcript is not found'
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   // Its chip selects it; then its Activity tab.
   await ui.press({ key: 'feed-scout' })
-  expect(await ui.find({ type: 'Text', text: /^Nothing here yet\. What Scout drafts/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Nothing here yet\. When Scout drafts something to send or post, it waits here for your yes\. Ask it a task/ })).toBeDefined()
   await ui.press({ key: 'activity-scout' })
-  expect(await ui.find({ type: 'Text', text: 'No steps yet: the chat has not run' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'No steps yet. Ask it a task and its steps show here.' })).toBeDefined()
   await ui.unmount()
 })
