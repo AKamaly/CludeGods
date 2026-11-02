@@ -21,6 +21,7 @@ What CI runs, and you can run locally from the repo root:
 ```bash
 python3 -I skills/colleague/bin/listen.py --selftest
 python3 -I skills/colleague/bin/guard --selftest
+python3 -I skills/colleague/bin/permit --selftest
 python3 -B -I -m unittest discover -s skills/spaces/tests
 python3 -B -I -m unittest discover -s skills/colleague/bridges/slack/tests
 scripts/build-pill.sh && skills/colleague/bin/pill --snapshot /tmp/callpill.png
@@ -50,8 +51,9 @@ While the version is 0.x, a minor release adds features and a patch release fixe
 
 - **Keep the [safety model](README.md#safety-model) intact.** Anything that approves,
   sends, or starts sessions needs to say in its pull request how the change preserves it:
-  only a click or a typed yes approves, voice never starts sessions, names are never
-  fuzzy-matched.
+  nothing outward on an unconfirmed line (a read-back and a clear yes, or a typed yes in
+  strict mode), voice never answers a permission prompt, voice never starts sessions,
+  names are never fuzzy-matched.
 - **No secrets and no personal data** in commits: no tokens, no real names, emails or
   session ids, no absolute home paths (use `~` or `$HOME`).
 - **Credit what you build on** in [NOTICE](NOTICE) and the README's Credits.

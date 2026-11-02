@@ -136,15 +136,16 @@ The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
   or `daily`), and a `charter` (the worker's standing brief, limits included). The Workers
   pane wakes it at those times: with a charter, to run it; with none, to check in on its
   `role`. Do not use a scheduled task or cron for this: neither can put a message into an
-  existing chat. A charter must say: drafts only, never send, and append one JSON line per
-  item to `~/.voicemode/call/outbox/<key>.jsonl`:
+  existing chat. The charter says what the worker does on its own and what waits for a yes
+  (sends, posts, anything outward), and that it appends one JSON line per item to
+  `~/.voicemode/call/outbox/<key>.jsonl`:
   `{"at", "kind": "draft"|"note", "title", "body", "to" (drafts only), "needs_approval"}`.
   A worker's own chat runs its charter on "run your charter now" (`SendMessage`), the same
   text the pane's Run now sends.
 - **Outbox**: each new line is toasted by the pane and, during a call, spoken once by
   `bin/outbox-say` ("Inbox drafted a reply to …"); do not repeat it. Asked what is in an
-  outbox, read the file and give the short version. Drafts are approved in the pane (a
-  click) or in the worker's own chat with a typed yes, never on a spoken yes and never from
+  outbox, read the file and give the short version. Drafts are approved with Approve on
+  the card, or in the worker's own chat under the Outward actions rule below; never from
   this session. The pane's **Change** sends the worker a note on what to revise and records
   `{"id", "decision": "changes", "note", "at"}` in `outbox/<key>.decisions.jsonl`; the
   worker then appends a revised item.
@@ -171,7 +172,9 @@ They say "put me on with Scribe", "let me talk to Research":
    I'll pass you each thing they say. Answer out loud with
    `~/.claude/skills/colleague/bin/call say --voice <its voice> --as <key> "<text>"`: one to
    three short spoken sentences, no paths, IDs or tables (those go in your chat). Same rules
-   and tools as always; anything outward still waits for their typed yes."
+   and tools as always; anything outward still follows the Outward actions rule: the exact
+   action in your chat, a one-sentence read-back, and their clear yes (a typed yes if
+   `approvals.outward` in `~/.voicemode/call/config.json` is `typed`)."
 4. Every `USER:` line after that, except "back to you" (step 5) and a hang-up: `SendMessage`
    it to the worker word for word (`User: <text>`) and do not answer it yourself.
    `USER (over you)` and `USER (earlier, …)`: forward them the same way (the listener has
