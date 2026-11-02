@@ -15,11 +15,81 @@ release adds features and a patch release fixes things.
 - **One-paste install**: the README's Get started now opens with a prompt you paste into
   Claude Code; Claude installs VoiceMode, CludeGods and the panes, checks them, and tells you
   how to start your first call.
+- **A settings file**: `~/.voicemode/call/config.json`, with an `approvals` block
+  (`outward`, `permission_prompts`, `worker_publish`), `user_label`, and
+  `workers.default_tools`. `install.sh` creates it from `config/config.example.json`, which
+  explains every key, and never overwrites it.
+- **Nothing said is lost when the listener restarts**: the Monitor that hears you expires
+  every 30 minutes; a re-armed listener now delivers what you said in between, and one armed
+  right after the call starts hears you from the first word.
+- **Your name on the call**: `user_label` sets the label your lines carry (default `USER`).
+- **`call status` explains itself**: the voice and Whisper services, what the ears last heard
+  and how far behind, and whether a listener is armed.
+- **A mute key**: `call mic` toggles the mic; bind it to a keyboard shortcut.
+- **Today view** in the Workers pane: what waits for your yes across all workers, an **Ask
+  all** field, and what each worker did since midnight.
+- **Change** on an outbox item sends the worker a note on what to revise.
+- **Workers report on themselves**: a worker's own chat fills in its `transcript` and writes
+  `status/<key>.json` and `runs/<key>.jsonl`.
+- **Default tools for new workers**: `workers.default_tools` in `config.json`, with "Make this
+  the default" in the + New worker form.
+- CI runs `permit --selftest`.
+
+### Changed
+
+- **Outward actions on a spoken yes**: on a call, a send, post, delete or purchase goes ahead
+  on a clear spoken yes after Claude writes the exact action in the chat and reads it back in
+  one sentence. `"outward": "typed"` restores the typed-yes rule.
+- **Permission prompts stay in the app's own dialog** by default. `"permission_prompts":
+  "pill"` sends them to CallPill, now only while a call is live.
+- **Workers save Spaces pages directly** in the spaces they may write (`pages new`, or `pages
+  publish` of their own draft). `"worker_publish": "approve"` restores draft-then-Approve for
+  every worker. `pages publish` marks the draft's outbox item approved.
+- **New workers start with full tools** (was drafts only) unless `config.json` says
+  otherwise. The `read` and `drafts` presets are opt-in restrictions, and guard messages name
+  the preset that denied a call.
+- **One-step create**: + New worker adds the card at once and asks for its chat in one
+  self-contained request; **Start chat** on the card asks again. A name already in use is
+  refused.
+- A worker with hours and no charter now wakes to check in on its role (**Check in** on the
+  card).
+- Status reads the worker's own report: Working and for how long, Idle, Stopped, an error, or
+  No chat yet.
+- The example Inbox worker files mail and sends drafts once you approve them.
+- **A faster first word**: `call start --greet` speaks the greeting as soon as the voice is
+  up, warmed in the call's own voice, and the skill starts the call in fewer steps.
+- **Cut in and get an answer**: when you talk over Claude, the listener cuts the speech itself
+  and Claude answers out loud right away; every turn gets a spoken reply, and spoken lines
+  stay under 40 words.
+- **Calmer narration**: steps never land on top of an answer, a helper's steps come at most
+  every 20 seconds, "Working on it." only after a quiet stretch, and a step that would play
+  late is dropped.
+- `call stop` lets the goodbye finish (`--now` cuts it).
 
 ### Fixed
 
 - CI: the worker-permissions speed check gives shared CI runners more room (200 ms instead of
   50 ms), so a slow runner no longer fails `main`.
+- Workers never got a `transcript`, so their status stayed New, Activity stayed empty, and
+  the guard never enforced their tools. It does now: a worker given a narrow tool list may be
+  denied tools it was quietly using; widen them in its Settings.
+- Scheduled wakes with several chats open: a failed delivery is retried by any pane after a
+  shared backoff, and a claim left by a closed chat is taken over once.
+- inbox-relay could relay a worker's own messages back to it when its transcript was stored
+  as a path.
+- On laptop speakers, Claude's own narrated steps and worker intros, garbled by the mic, no
+  longer cut its speech as if you had cut in, and a long echoed answer no longer comes back
+  as a turn of stray numbers.
+- Lines keep playing when the sound output changes mid-call (AirPods back in the case)
+  instead of being dropped until the call is restarted.
+- Outbox heads-ups stay quiet while the mic is muted.
+
+### Security
+
+- Memory pages change only through a draft you approve, whatever the settings.
+- A worker's `pages new` and `pages draft` must carry its own `--worker` key.
+- Changing `config.json`, or loosening a worker's tools or spaces, needs a typed yes, never a
+  spoken one.
 
 ## [0.3.0] - 2026-11-01
 

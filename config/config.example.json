@@ -14,6 +14,6 @@
     "approvals.permission_prompts": "Where Claude Code's permission prompts show. app (default): the app's own dialog, as without CludeGods. pill: on CallPill while a call is live, answered only by a mouse click; with no live call the app's dialog shows as usual.",
     "approvals.worker_publish": "How workers save Spaces pages. direct (default): a worker may save pages itself (pages new, pages publish, pages mkspace) in the spaces it may write. approve: workers save drafts and a page lands only on your Approve in the Workers pane. Either way Memory changes are drafts you approve, and a worker with the drafts or read preset never publishes.",
     "user_label": "How your turns are labelled on a call. Default USER.",
-    "workers.default_tools": "The tools preset a new worker gets: full (default), drafts, read, or a list of tool names. drafts and read are opt-in restrictions the guard hook enforces."
+    "workers.default_tools": "The tools preset a new worker gets: full (default), drafts or read. The Workers pane's form sets it with Make this the default. drafts and read are opt-in restrictions the guard hook enforces; a list of tool names can be set per worker in workers.json, not here."
   }
 }

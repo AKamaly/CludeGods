@@ -13,5 +13,5 @@
 ## Checklist
 
 - [ ] A line under `## [Unreleased]` in CHANGELOG.md
-- [ ] The safety model holds (only a click or a typed yes approves; voice never starts sessions)
+- [ ] The safety model holds (nothing outward on an unconfirmed line: a read-back and a clear yes, or a typed yes in strict mode; voice never answers a permission prompt; voice never starts sessions; names are never fuzzy-matched)
 - [ ] No secrets, personal data, session ids or absolute home paths
