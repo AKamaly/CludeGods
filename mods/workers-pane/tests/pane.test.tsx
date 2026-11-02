@@ -154,7 +154,7 @@ test('cards follow the film: header, god, name, status, role, the Ask field and 
   // The footer: hours chip, then (no charter, so no Run now) Outbox and Open. The
   // first worker is the selected one: under its footer, the tabs, Overview picked.
   const keysOf = async (k: string) =>
-    (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(x => x?.endsWith(`-${k}`) && !/^name-/.test(x ?? ''))
+    (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(x => x?.endsWith(`-${k}`) && !/^(name|role|status)-/.test(x ?? ''))
   expect(await keysOf('quick')).toEqual([
     'hours-quick', 'feed-quick', 'open-quick', 'overview-quick', 'outboxtab-quick', 'activity-quick', 'settings-quick',
     'talk-quick',
@@ -207,7 +207,7 @@ test('each Input is the only submit control: no separate Send or Create Buttons'
   await ui.unmount()
 })
 
-test("the name and Open both open the worker chat and mark the card selected in its god's colour", async ($, on) => {
+test("the name selects the card and Open opens the worker chat, both in its god's colour", async ($, on) => {
   const w = world(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   // With none picked yet, the first card is the selected one.
@@ -228,10 +228,42 @@ test("the name and Open both open the worker chat and mark the card selected in 
   expect((await ui.find({ key: 'card-deep' }))?.props.borderColor).toBe(SALES_GOD)
   expect((await ui.find({ key: 'card-work' }))?.props.borderColor).toBeUndefined()
   expect(await dot()).toBe(SALES_GOD)
-  expect(w.runs).toEqual([
-    ['open', 'claude://claude.ai/epitaxy/local_work-2'],
-    ['open', 'claude://claude.ai/epitaxy/local_deep-3'],
-  ])
+  // Pressing a name selects without opening its chat; only Open opens it.
+  expect(w.runs).toEqual([['open', 'claude://claude.ai/epitaxy/local_deep-3']])
+
+  // Its role line and its status select a card too, and exactly one card is highlighted.
+  await ui.press({ key: 'role-quick' })
+  expect((await ui.find({ key: 'card-quick' }))?.props.borderColor).toBe(SCRIBE)
+  expect((await ui.find({ key: 'card-deep' }))?.props.borderColor).toBeUndefined()
+  await ui.press({ key: 'status-work' })
+  expect((await ui.find({ key: 'card-work' }))?.props.borderColor).toBe(RESEARCH)
+  expect((await ui.find({ key: 'card-quick' }))?.props.borderColor).toBeUndefined()
+  // Hovering an unselected card never borrows a worker's colour, so it can't look selected.
+  expect((await ui.find({ key: 'card-quick' }))?.props.hover?.borderColor).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a press anywhere on a card that is not selected selects it; the selected card has no layer', async ($, on) => {
+  world(on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // The first card is selected: it carries no layer, every other card does.
+  expect(await ui.find({ key: 'hitc-quick' })).toBeUndefined()
+  expect(await ui.find({ key: 'hitc-work' })).toBeDefined()
+  expect(await ui.find({ key: 'hitc-deep' })).toBeDefined()
+
+  await ui.pointer({ type: 'down', x: 20, y: 3, button: 'left', in: 'hitc-work' })
+  expect((await ui.find({ key: 'card-work' }))?.props.borderColor).toBe(RESEARCH)
+  expect((await ui.find({ key: 'card-quick' }))?.props.borderColor).toBeUndefined()
+  // Now work is selected: its layer is gone and quick has one.
+  expect(await ui.find({ key: 'hitc-work' })).toBeUndefined()
+  expect(await ui.find({ key: 'hitc-quick' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the terminal draws no card layer', async ($, on) => {
+  world(on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'hitc-work' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -466,7 +498,7 @@ test('a proactive card: a badge for what waits, the hours chip, Run now, Outbox 
   expect((await ui.find({ key: 'hours-sales' }))?.props.label).toBe('Mon to Fri · 9:00')
   expect((await ui.find({ key: 'feed-sales' }))?.props.label).toBe('Needs you · 3')
   expect(await ui.find({ type: 'Text', text: 'Follow-ups' })).toBeDefined()
-  const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /-sales$/.test(k ?? '') && !/^name-/.test(k ?? ''))
+  const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /-sales$/.test(k ?? '') && !/^(name|role|status)-/.test(k ?? ''))
   expect(keys).toEqual([
     'hours-sales', 'run-sales', 'feed-sales', 'open-sales', 'overview-sales', 'outboxtab-sales', 'activity-sales', 'settings-sales',
     'talk-sales',

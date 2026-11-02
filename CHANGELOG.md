@@ -88,6 +88,12 @@ release adds features and a patch release fixes things.
   midnight, and writes its cursor when it is stopped.
 - A quick mute and unmute could leave the mic off and report the ears as down.
 
+### Fixed
+
+- Workers pane: a click anywhere on a worker's card selects it and moves the highlight there;
+  exactly one card is highlighted, and hovering another no longer draws it in its own colour.
+  The name selects the card; Open opens the chat.
+
 ## [0.4.0] - 2026-11-02
 
 ### Added

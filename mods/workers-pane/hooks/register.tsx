@@ -1580,9 +1580,21 @@ export const register: Register = on => {
     return { text: 'Workers pane opened.' }
   })
 
+  // A card's clear layer (hooks/cardhit.ts) posts { select: key } when pressed.
+  on('ui.message', async ($, e, next) => {
+    const data = e.data as { select?: unknown } | null
+    if (e.module.endsWith('cardhit.ts') && data && typeof data.select === 'string') {
+      const key = data.select
+      await update($, selected, old => (old === key ? old : key))
+      return {}
+    }
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const ui = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Input?: any; Select?: any; Svg?: any }
     const { Box, Text, Button, Input, Select, Svg } = ui
+    const Client = (ui as { Client?: any }).Client
     // The terminal paints no alpha hex and draws no Svg; tints, icons and gods are for
     // the graphical surfaces.
     const isGraphical = e.surface !== 'terminal'
@@ -1648,6 +1660,16 @@ export const register: Register = on => {
 
     const select = (w: RegistryWorker) => update($, selected, old => (old === w.key ? old : w.key))
 
+    // A press anywhere on a card that isn't selected selects it: a clear Client layer over
+    // the whole card catches the press (hooks/cardhit.ts posts the key; the `ui.message` hook
+    // selects it). The selected card has no layer, so its buttons and fields work as usual.
+    const hitLayer = (w: RegistryWorker, isSelected: boolean) =>
+      Client && e.surface === 'desktop' && !isSelected ? (
+        <Box key={`hit-${w.key}`} position="absolute" top={0} left={0} right={0} bottom={0}>
+          <Client key={`hitc-${w.key}`} module="./cardhit.ts" props={{ k: w.key }} width="100%" height="100%" />
+        </Box>
+      ) : null
+
     const setTab = (w: RegistryWorker, tab: Panel) =>
       update($, panels, old => {
         if (tab === 'overview') return withoutKey(old, w.key)
@@ -1681,6 +1703,7 @@ export const register: Register = on => {
 
     // The card's Outbox chip: opens that tab, or closes it back to Overview.
     const toggleFeed = async (w: RegistryWorker) => {
+      await select(w)
       if ((await tabNow(w)) === 'outbox') await setTab(w, 'overview')
       else await showTab(w, 'outbox')
     }
@@ -1762,6 +1785,7 @@ export const register: Register = on => {
     }
 
     const send = async (w: RegistryWorker, text: string) => {
+      await select(w)
       const task = text.trim()
       if (!task) return
       if (!w.session) {
@@ -1775,6 +1799,7 @@ export const register: Register = on => {
 
     // Run now: the same wake the schedule sends, at once (paused or not).
     const runNow = async (w: RegistryWorker) => {
+      await select(w)
       if (!w.session) {
         $.ui.toast(`${w.name} has no chat yet`)
         return
@@ -3135,12 +3160,13 @@ export const register: Register = on => {
       return (
         <Box
           key={`card-${w.key}`}
+          position="relative"
           flexDirection="column"
           borderStyle="round"
           borderColor={isSelected ? th.accent : undefined}
           borderDimColor={!isSelected}
           backgroundColor={isSelected && isGraphical ? th.wash : undefined}
-          hover={isGraphical ? { borderColor: isSelected ? th.accent : th.hover, borderDimColor: false } : undefined}
+          hover={isGraphical && !isSelected ? { borderDimColor: false } : undefined}
           width="100%"
           paddingX="sm"
           paddingY="sm"
@@ -3150,18 +3176,24 @@ export const register: Register = on => {
             {godAvatar(god, 40, isWorking, `${w.name}, ${GOD_LABEL[god]}`, `avatar-${w.key}`)}
             <Box flexDirection="column" flexGrow={1} flexShrink={1}>
               <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
-                <Button key={`name-${w.key}`} plain onPress={() => void openChat(w)}>
+                <Button key={`name-${w.key}`} plain onPress={() => void select(w)}>
                   <Text bold>{w.name}</Text>
                 </Button>
                 {badgeText(w, tag, th.accent)}
                 <Box flexGrow={1} />
-                <Text key={`status-${w.key}`} size="caption" color={status.color} dimColor={status.color === undefined}>
-                  {status.text}
-                </Text>
+                <Button key={`status-${w.key}`} plain onPress={() => void select(w)}>
+                  <Text size="caption" color={status.color} dimColor={status.color === undefined}>
+                    {status.text}
+                  </Text>
+                </Button>
               </Box>
               {/* One dim line: what it does. The charter is the worker's instructions, not
-                  display copy, so the card never shows it. */}
-              {w.role ? <Text dimColor size="footnote" wrap="truncate-end">{w.role}</Text> : null}
+                  display copy, so the card never shows it. Pressing it selects the card. */}
+              {w.role ? (
+                <Button key={`role-${w.key}`} plain onPress={() => void select(w)}>
+                  <Text dimColor size="footnote" wrap="truncate-end">{w.role}</Text>
+                </Button>
+              ) : null}
             </Box>
           </Box>
           {askField(w)}
@@ -3187,6 +3219,7 @@ export const register: Register = on => {
           {isSelected ? tabStrip(w, tab, th.accent, waiting) : null}
           {isSelected ? await tabBody(w, tab, th.accent, false) : null}
           {lastLine(w)}
+          {hitLayer(w, isSelected)}
         </Box>
       )
     }
@@ -3202,6 +3235,7 @@ export const register: Register = on => {
       return (
         <Box
           key={`row-${w.key}`}
+          position="relative"
           flexDirection="row"
           alignItems="center"
           gap="xs"
@@ -3209,7 +3243,7 @@ export const register: Register = on => {
           borderColor={isSelected ? th.accent : undefined}
           borderDimColor={!isSelected}
           backgroundColor={isSelected && isGraphical ? th.soft : undefined}
-          hover={isGraphical ? { borderColor: isSelected ? th.accent : th.hover, borderDimColor: false } : undefined}
+          hover={isGraphical && !isSelected ? { borderDimColor: false } : undefined}
           width="100%"
           paddingX="xs"
         >
@@ -3223,6 +3257,7 @@ export const register: Register = on => {
               {status.text}
             </Text>
           </Box>
+          {hitLayer(w, isSelected)}
         </Box>
       )
     }
