@@ -148,8 +148,9 @@ test('registry v2 defaults: god from the avatar, voice from the god, full tools 
   expect(toolsOf({ tools: 'read' })).toBe('read')
   expect(toolsOf({ tools: ['Read', 'Grep'] })).toEqual(['Read', 'Grep'])
   expect(createText({ name: 'Scout', role: 'watch; repos\nand issues', god: 'scout' })).toBe(
-    'Create worker: name=Scout; role=watch, repos and issues; avatar=lime; god=scout; voice=am_adam; tools=drafts',
+    'Create worker: name=Scout; role=watch, repos and issues; avatar=lime; god=scout; voice=am_adam; tools=full',
   )
+  expect(createText({ name: 'Scout', role: 'r', god: 'scout', tools: 'read' })).toMatch(/; tools=read$/)
 })
 
 test('a tool call reads as its tool and one short argument', async () => {

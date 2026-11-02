@@ -201,12 +201,15 @@ test('a worker created here gets the god, voice and tools it was made with, once
   await ui.press({ key: 'new-worker' })
   await ui.press({ key: 'nw-god-herald' })
   await ui.input({ key: 'nw-entry', text: 'Herald, announcements' })
-  // A same-named worker that was already there is never touched.
+  // A second worker of an existing name is refused, and the existing one never touched.
   await ui.press({ key: 'new-worker' })
   await ui.input({ key: 'nw-entry', text: 'Sales, again' })
   await ui.unmount()
+  // The pane wrote Herald's entry at once (one write), and nothing for the second Sales.
+  expect(w.writes.filter(x => x.path.endsWith('/workers.json')).length).toBe(1)
 
-  // The call session registers Herald with the v1 fields only.
+  // A call session that predates the pane's own entry rewrites the file with Herald's
+  // v1 fields only.
   w.registry = {
     note: 'kept',
     workers: [...SALES.workers, { key: 'herald', name: 'Herald', role: 'announcements', session: 'local_h', avatar: 'gold', model: 'm' }],
@@ -218,14 +221,14 @@ test('a worker created here gets the god, voice and tools it was made with, once
   expect(reg.workers[0]).toEqual(SALES.workers[0])
   expect(reg.workers[1]).toEqual({
     key: 'herald', name: 'Herald', role: 'announcements', session: 'local_h', avatar: 'gold', model: 'm',
-    god: 'herald', voice: 'bm_george', tools: 'drafts',
+    god: 'herald', voice: 'bm_george', tools: 'full',
   })
-  // Once only.
+  // Once only: the create, then the fill-in.
   const count = w.writes.filter(x => x.path.endsWith('/workers.json')).length
-  expect(count).toBe(1)
+  expect(count).toBe(2)
   await start($)
   await settle()
-  expect(w.writes.filter(x => x.path.endsWith('/workers.json')).length).toBe(1)
+  expect(w.writes.filter(x => x.path.endsWith('/workers.json')).length).toBe(2)
 })
 
 // Every 3h, 9:00 to 18:00 Riyadh (UTC+3), Monday to Friday.

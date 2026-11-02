@@ -1,7 +1,7 @@
 {
   "name": "workers-pane",
-  "version": "0.3.0",
-  "description": "A Workers pane beside the chat: standing worker chats as god cards with live status, an Ask field, scheduled wakes, an outbox to approve or decline, recent activity, and per-worker settings",
+  "version": "0.4.0",
+  "description": "A Workers pane beside the chat: standing worker chats as god cards with live status, one-step creation, an Ask field and Ask all, scheduled wakes, a Today digest, an outbox to approve, change or decline, recent activity, and per-worker settings",
   "author": {
     "name": "AKamaly"
   },

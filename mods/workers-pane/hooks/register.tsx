@@ -1,8 +1,25 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, RenderChildren, Timer } from 'claude-code'
 
+import { DEFAULT_TOOLS, isPreset, parseConfig, withDefaultTools } from './config'
 import { GOD_KINDS, godSvg } from './gods'
 import type { GodKind } from './gods'
+import {
+  endedState,
+  isKey,
+  keyFor,
+  liveState,
+  markerKey,
+  parseRuns,
+  parseState,
+  runLine,
+  standbyPrompt,
+  startedState,
+  transcriptName,
+  whoAmI,
+} from './self'
+import { startOfDay, todayEntries } from './today'
+import type { TodayEntry } from './today'
 import {
   ALL_DAY,
   END_OF_DAY,
@@ -24,14 +41,17 @@ import type {
   EditValue,
   FormState,
   OutboxItem,
+  PaneView,
   Panel,
   PendingCreate,
   PendingEdit,
   PendingEdits,
   RegistryWorker,
+  RunRecord,
   Schedule,
   SentTask,
   ToolsPreset,
+  WorkerState,
   WorkerStatus,
 } from '../types'
 
@@ -47,6 +67,9 @@ export {
   scheduleLabel,
   scheduleSentence,
 } from './schedule'
+export { parseConfig, withDefaultTools } from './config'
+export { keyFor, liveState, markerKey, parseRuns, parseState, runLine, standbyPrompt, whoAmI } from './self'
+export { runLabel, startOfDay, todayEntries } from './today'
 
 // The pane draws one card per worker (the launch film's card) while it is narrow; once
 // it is expanded to WIDE_AT columns or more, a list of compact rows beside the selected
@@ -79,6 +102,19 @@ export {
 // run this poll, a slot wakes the worker once. A paused worker is not woken. A worker appends what it finds and drafts to `outbox/<key>.jsonl`; an
 // Approve or Decline here is recorded in `outbox/<key>.decisions.jsonl` and told to the
 // worker's chat. `outboxSay` speaks one heads-up per new item if a call is live.
+//
+// Every chat runs this mod, so a slot is claimed by whichever pane gets there first. A
+// claim holds `result.json` once the wake is delivered; a wake that was not delivered
+// gives the claim back and writes `wakes/<id>.retry` (when to try again), which every
+// pane honours, so N open chats never retry N times; a claim left without a result for
+// CLAIM_STALE_MS (its pane closed mid-send) is taken over once, through an atomic mkdir
+// of `<claim>/takeover`. A worker with hours and no charter is woken to check in on its
+// role. Inside a worker's own chat the pane reports on that worker (./self): its
+// transcript, `status/<key>.json` and `runs/<key>.jsonl`.
+//
+// The Today view lists what every worker did since midnight and what waits for a yes,
+// with Ask all. A waiting item can be approved, declined, or sent back with "Change":
+// a note to the worker saying what to revise (`changes` in the decisions file).
 
 type Paths = {
   home: string
@@ -92,6 +128,9 @@ type Paths = {
   spaces: string
   outboxSay: string
   pages: string
+  config: string
+  status: string
+  runs: string
 }
 
 // The minimal surface of `$` the helpers below take, typed loosely so a helper can
@@ -131,6 +170,9 @@ async function paths($: Host): Promise<Paths> {
     spaces: `${call}/spaces`,
     outboxSay: `${bin}/outbox-say`,
     pages: `${bin}/pages`,
+    config: `${call}/config.json`,
+    status: `${call}/status`,
+    runs: `${call}/runs`,
   }
 }
 
@@ -143,7 +185,11 @@ const WAKE_RETRY_MS = 10 * 60_000
 const ACTIVITY_STEPS = 10
 const TAIL_BYTES = 262_144 // the activity view reads this much of a transcript's end, never the whole file
 const SEARCH_RETRY_MS = 60_000 // how often a transcript not found under ~/.claude/projects is looked for again
-const PENDING_TTL_MS = 60 * 60_000
+const PENDING_TTL_MS = 24 * 60 * 60_000 // a create's prompt may sit in the box a while before Enter
+const CLAIM_STALE_MS = 10 * 60_000 // a claim with no result this old: its pane went away mid-send
+const CLAIM_LOOK_MS = 60_000 // how soon a claim held elsewhere, with no result yet, is looked at again
+const RUNS_TAIL_BYTES = 131_072 // the Today view reads this much of each worker's runs file
+const TODAY_ITEMS = 30
 
 const PANE = 'workers'
 const COLUMNS = 46
@@ -238,6 +284,7 @@ const TOOL_PRESETS: readonly { value: ToolsPreset; label: string; about: string 
   { value: 'drafts', label: 'Drafts only', about: 'Reads, and writes drafts under ~/.voicemode/call only.' },
   { value: 'full', label: 'Full access', about: 'No guard: anything this Mac lets Claude Code do.' },
 ]
+const TOOLS_SHORT: Record<ToolsPreset, string> = { full: 'full access', drafts: 'drafts only', read: 'read only' }
 
 const DAY_PRESETS: readonly { value: string; label: string }[] = [
   { value: 'mon-fri', label: 'Mon to Fri' },
@@ -258,6 +305,7 @@ const TAB_LABEL: Record<Panel, string> = { overview: 'Overview', outbox: 'Outbox
 const TABS: readonly Panel[] = ['overview', 'outbox', 'activity', 'settings']
 
 const NAME_RE = /^[\p{L}\p{N} ]{1,24}$/u
+const ASK_ALL = '\n*' // the Ask all field's slot among the per-worker task drafts; no worker key looks like it
 
 const roster = atom({ plugin: 'workers-pane', key: 'roster' } as const, '', { shape: 'roster-1' })
 const rev = atom({ plugin: 'workers-pane', key: 'rev' } as const, 0, { shape: 'rev-1' })
@@ -265,7 +313,7 @@ const sent = atom({ plugin: 'workers-pane', key: 'sent' } as const, {}, { shape:
 const formState = atom(
   { plugin: 'workers-pane', key: 'form' } as const,
   { isOpen: false, isValid: false, isTried: false, god: 'scribe' } as FormState,
-  { shape: 'form-5' },
+  { shape: 'form-6' },
 )
 const selected = atom({ plugin: 'workers-pane', key: 'selected' } as const, '', { shape: 'selected-1' })
 const confirming = atom({ plugin: 'workers-pane', key: 'confirming' } as const, {}, { shape: 'confirming-1' })
@@ -279,6 +327,10 @@ const pending = atom({ plugin: 'workers-pane', key: 'pending' } as const, {} as 
 const edits = atom({ plugin: 'workers-pane', key: 'edits' } as const, {} as PendingEdits, {
   shape: 'edits-1',
 })
+const view = atom({ plugin: 'workers-pane', key: 'view' } as const, 'workers' as PaneView, { shape: 'view-1' })
+const changing = atom({ plugin: 'workers-pane', key: 'changing' } as const, {} as Record<string, boolean>, {
+  shape: 'changing-1',
+})
 
 type Snapshot = {
   workers: RegistryWorker[]
@@ -290,6 +342,8 @@ type Snapshot = {
   /** Worker key to item id to its decision. */
   decided: Record<string, Record<string, Decision>>
   seen: Record<string, number>
+  /** The tools a new worker starts with (config.json's workers.default_tools). */
+  defaultTools: ToolsPreset
   error?: string
 }
 
@@ -341,15 +395,29 @@ function splitEntry(text: string): { name: string; role: string } {
 }
 
 /**
- * The one-line prompt the call session acts on. `;` and newlines would break its
- * fields. The v1 fields come first, so a call session that only knows them still works.
+ * The request + New worker puts in the prompt box. Its first line is the one-line form a
+ * call session parses (`;` and newlines would break its fields; the v1 fields come
+ * first, so a call session that only knows them still works). With a `key`, the pane
+ * has already written the entry, and the lines after it tell any chat, colleague skill
+ * loaded or not, how to start the worker's chat and where its id goes.
  */
-export function createText(f: { name: string; role: string; god: GodKind }): string {
+export function createText(f: { name: string; role: string; god: GodKind; tools?: ToolsPreset; key?: string }): string {
   const clean = (s: string) => s.replace(/[\r\n]+/g, ' ').replace(/;/g, ',').trim()
-  return (
-    `Create worker: name=${clean(f.name)}; role=${clean(f.role)}; avatar=${GOD_AVATAR[f.god]}; ` +
-    `god=${f.god}; voice=${DEFAULT_VOICE[f.god]}; tools=drafts`
-  )
+  const name = clean(f.name)
+  const first =
+    `Create worker: name=${name}; role=${clean(f.role)}; avatar=${GOD_AVATAR[f.god]}; ` +
+    `god=${f.god}; voice=${DEFAULT_VOICE[f.god]}; tools=${f.tools ?? DEFAULT_TOOLS}${f.key ? `; key=${f.key}` : ''}`
+  if (!f.key) return first
+  return [
+    first,
+    '',
+    `The Workers pane has already added ${name} to ~/.voicemode/call/workers.json under key "${f.key}". ` +
+      `Start its chat: start_session with initiation user_asked, a fresh chat, no worktree, title "Worker: ${name}", ` +
+      `a mid-tier model at medium effort, and exactly this prompt: ` +
+      standbyPrompt({ name, key: f.key, role: clean(f.role) }),
+    `Then set that entry's "session" to the new chat's id and change no other key: the pane fills in the rest ` +
+      `once the chat runs. Say in one line that ${name} is ready.`,
+  ].join('\n')
 }
 
 function isGod(v: unknown): v is GodKind {
@@ -480,6 +548,70 @@ export async function patchWorker(
 }
 
 /**
+ * Appends one entry, built from the keys already in the registry, keeping every other
+ * key in the file. A missing registry is started; one that is not JSON is never
+ * overwritten. Answers an error to show, or undefined once written.
+ */
+export async function addWorker(
+  $: Host,
+  p: Paths,
+  build: (keys: string[]) => Record<string, unknown>,
+): Promise<string | undefined> {
+  let raw: string | undefined
+  try {
+    raw = String(await $.fs.read(p.registry))
+  } catch {
+    raw = undefined // no registry yet: this is the first worker
+  }
+  let doc: Record<string, unknown> = { workers: [] }
+  if (raw !== undefined && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (!isObject(parsed)) return 'workers.json is not an object'
+      doc = parsed
+    } catch {
+      return 'workers.json is not valid JSON'
+    }
+  }
+  const workers = Array.isArray(doc.workers) ? doc.workers : []
+  const keys = workers.filter(isObject).map(w => w.key).filter((k): k is string => typeof k === 'string')
+  workers.push(build(keys))
+  doc.workers = workers
+  try {
+    if (raw === undefined) await $.process.run(['/bin/mkdir', '-p', p.registry.slice(0, p.registry.lastIndexOf('/'))])
+    await $.fs.write(p.registry, JSON.stringify(doc, null, 2))
+  } catch (err) {
+    return `couldn't write workers.json: ${String(err)}`
+  }
+  return undefined
+}
+
+/**
+ * Folds into the entry under `key` every other entry for the same new worker: one under
+ * the same key, or under a key that was not in the registry before the create (`known`)
+ * with exactly the same name (never a near match). The first entry keeps its own values
+ * (the owner's picks); a duplicate only fills in what it lacks (its chat's `session`,
+ * `transcript`, model). Answers whether anything changed.
+ */
+export function foldDuplicates(workers: unknown[], key: string, name: string, known: readonly string[]): boolean {
+  const ours = workers.find(w => isObject(w) && w.key === key)
+  if (!isObject(ours)) return false
+  let isChanged = false
+  for (let j = workers.length - 1; j >= 0; j--) {
+    const w = workers[j]
+    if (w === ours || !isObject(w)) continue
+    const isDupe = w.key === key || (w.name === name && typeof w.key === 'string' && !known.includes(w.key))
+    if (!isDupe) continue
+    for (const [k, v] of Object.entries(w)) {
+      if (k !== 'key' && (ours[k] === undefined || ours[k] === null)) ours[k] = v
+    }
+    workers.splice(j, 1)
+    isChanged = true
+  }
+  return isChanged
+}
+
+/**
  * A registry `transcript` as a path: absolute, `~/`-relative, relative to
  * ~/.claude/projects, or a bare file name found under one of its project folders
  * (remembered once found; a miss is looked for again after a minute).
@@ -521,27 +653,45 @@ async function resolveTranscript(
   return undefined
 }
 
+async function readText($: Host, path: string): Promise<string | undefined> {
+  try {
+    return String(await $.fs.read(path))
+  } catch {
+    return undefined
+  }
+}
+
+/** The worker's own report on itself (`status/<key>.json`), if its chat has written one. */
+async function readState($: Host, p: Paths, key: string): Promise<WorkerState | undefined> {
+  return isKey(key) ? parseState(await readText($, `${p.status}/${key}.json`)) : undefined
+}
+
 async function snapshot($: Host, p: Paths, cache: Cache, now: number): Promise<Snapshot> {
   const { workers, error } = await readRegistry($, p)
   const status: Record<string, WorkerStatus> = {}
   const transcripts: Record<string, string> = {}
   for (const w of workers) {
+    const report = await readState($, p, w.key)
     if (!w.transcript) {
-      status[w.key] = { isWorking: false, lastActiveMs: 0, isNew: true }
+      // No transcript yet: New until its chat reports. No session: its chat was asked
+      // for (+ New worker) and has not started.
+      status[w.key] = report
+        ? { ...liveState(report, 0, now, WORKING_WINDOW_MS), isNew: false }
+        : { isWorking: false, lastActiveMs: 0, isNew: true, isStarting: !w.session }
       continue
     }
     const path = await resolveTranscript($, p, cache, w.transcript, now)
     if (!path) {
-      status[w.key] = { isWorking: false, lastActiveMs: 0, isNew: false }
+      status[w.key] = { ...liveState(report, 0, now, WORKING_WINDOW_MS), isNew: false }
       continue
     }
     try {
       const st = await $.fs.stat(path)
       transcripts[w.key] = path
-      status[w.key] = { isWorking: now - st.mtimeMs < WORKING_WINDOW_MS, lastActiveMs: st.mtimeMs, isNew: false }
+      status[w.key] = { ...liveState(report, st.mtimeMs, now, WORKING_WINDOW_MS), isNew: false }
     } catch {
       cache.where.delete(w.transcript) // moved or gone: look for it again
-      status[w.key] = { isWorking: false, lastActiveMs: 0, isNew: false }
+      status[w.key] = { ...liveState(report, 0, now, WORKING_WINDOW_MS), isNew: false }
     }
   }
   const outbox: Record<string, OutboxItem[]> = {}
@@ -550,7 +700,8 @@ async function snapshot($: Host, p: Paths, cache: Cache, now: number): Promise<S
     outbox[w.key] = await readOutbox($, p, w.key)
     decided[w.key] = await readDecisions($, p, w.key)
   }
-  return { workers, status, transcripts, outbox, decided, seen: await readSeen($, p), error }
+  const defaultTools = parseConfig(await readText($, p.config)).defaultTools
+  return { workers, status, transcripts, outbox, decided, seen: await readSeen($, p), defaultTools, error }
 }
 
 /** What a redraw depends on, coarse enough that an idle pane is not redrawn every poll. */
@@ -561,9 +712,10 @@ function signature(s: Snapshot, watched: ReadonlySet<string>): string {
       w.key, w.name, w.role, w.session, w.transcript, w.avatar, w.god, w.voice, w.tools, w.paused, w.spaces,
       w.charter ? 1 : 0, w.schedule,
     ]),
+    s.defaultTools,
     s.workers.map(w => {
       const st = s.status[w.key]
-      return [st?.isWorking, st?.isNew, Math.floor((st?.lastActiveMs ?? 0) / 60_000)]
+      return [st?.isWorking, st?.isNew, st?.isStarting, st?.state, Math.floor((st?.lastActiveMs ?? 0) / 60_000), st?.sinceMs ?? 0]
     }),
     s.workers.map(w => {
       const items = s.outbox[w.key] ?? []
@@ -667,6 +819,7 @@ export function parseOutbox(raw: string): OutboxItem[] {
         title: o.title,
         body: typeof o.body === 'string' ? o.body : '',
         to: typeof o.to === 'string' && o.to ? o.to : undefined,
+        subject: typeof o.subject === 'string' && o.subject.trim() ? o.subject.trim() : undefined,
         needs_approval: o.needs_approval === true,
         space: typeof o.space === 'string' && o.space ? o.space : undefined,
         draft_path: typeof o.draft_path === 'string' && o.draft_path ? o.draft_path : undefined,
@@ -686,8 +839,13 @@ export function parseDecisions(raw: string): Record<string, Decision> {
     if (!line.trim()) continue
     try {
       const o = JSON.parse(line) as Partial<Decision>
-      if (typeof o.id !== 'string' || (o.decision !== 'approved' && o.decision !== 'declined')) continue
-      out[o.id] = { id: o.id, decision: o.decision, at: typeof o.at === 'string' ? o.at : '' }
+      if (typeof o.id !== 'string' || (o.decision !== 'approved' && o.decision !== 'declined' && o.decision !== 'changes')) continue
+      out[o.id] = {
+        id: o.id,
+        decision: o.decision,
+        at: typeof o.at === 'string' ? o.at : '',
+        ...(typeof o.note === 'string' && o.note ? { note: o.note } : {}),
+      }
     } catch {
       // skipped
     }
@@ -758,9 +916,30 @@ export function pageSavedText(item: Pick<OutboxItem, 'id' | 'title' | 'space'>):
 export function declineText(item: Pick<OutboxItem, 'id' | 'title'>): string {
   return `Declined: ${item.title} (${item.id}). Don't do it.`
 }
+/** What the worker is told on Change: what to revise, and that the old item is withdrawn. */
+export function changesText(item: Pick<OutboxItem, 'id' | 'title' | 'kind'>, note: string): string {
+  const again = item.kind === 'page' ? 'run `pages draft` again for the revision' : 'append the revised version to your outbox as a new item'
+  return (
+    `Changes requested in the Workers pane for ${item.title} (${item.id}): ${note.trim()}\n` +
+    `Revise it and ${again}. Do nothing outward with the old one.`
+  )
+}
 
-/** The message that wakes a worker to run its charter; it carries the whole charter. */
+/**
+ * The message that wakes a worker: with a charter, to run it (the whole charter rides
+ * along); without one, to check in on its role and put what it finds in its outbox.
+ */
 export function wakeText(w: RegistryWorker, why: string): string {
+  if (!w.charter) {
+    const role = (w.role ?? '').replace(/\s+/g, ' ').trim()
+    return (
+      `${why}: check in now. Your role: ${role || 'whatever the owner has asked of you in this chat'}. ` +
+      `Look at what is new for it, and append each thing worth the owner's attention to ` +
+      `~/.voicemode/call/outbox/${w.key}.jsonl, one JSON line per item ` +
+      `({"at", "kind": "draft" or "note", "title", "body", "to" for drafts, "needs_approval": true for drafts}). ` +
+      `If nothing needs a move, append one note saying so. Drafts only: send, post or change nothing outward.`
+    )
+  }
   return [
     `${why}: run your charter now. Read what is new, draft what needs a move, and append each item ` +
       `to ~/.voicemode/call/outbox/${w.key}.jsonl. Drafts only: send, post or change nothing outward.`,
@@ -864,6 +1043,48 @@ function ago(ms: number): string {
   return `${Math.round(h / 24)}d ago`
 }
 
+/** `mkdir -p`, once per folder per session. */
+async function ensureDir($: Host, made: Set<string>, dir: string): Promise<void> {
+  if (made.has(dir)) return
+  const r = await $.process.run(['/bin/mkdir', '-p', dir])
+  if (r.exitCode === 0) made.add(dir)
+}
+
+/**
+ * A chat that starts with a worker's standby prompt is that worker: it takes the entry's
+ * empty `session` (the desktop's id for this chat) and its `transcript`. An entry another
+ * chat already holds is never taken. Answers whether this chat is now that worker.
+ */
+async function claimByMarker(
+  $: Host,
+  p: Paths,
+  key: string,
+  hostId: string,
+  selfId: string,
+  serial: <T>(job: () => Promise<T>) => Promise<T>,
+): Promise<boolean> {
+  const { workers } = await readRegistry($, p)
+  const w = workers.find(x => x.key === key)
+  if (!w) return false
+  const mine = selfId ? `${selfId}.jsonl` : ''
+  if (hostId && w.session && w.session !== hostId) return false
+  if (!hostId && w.transcript && transcriptName(w.transcript) !== mine) return false
+  const patch: Record<string, unknown> = {}
+  if (!w.session && hostId) patch.session = hostId
+  if (mine && transcriptName(w.transcript) !== mine) patch.transcript = mine
+  if (Object.keys(patch).length === 0) return true
+  return (await serial(() => patchWorker($, p, key, patch))) === undefined
+}
+
+/** How long something has run: '' under a minute, then "4m", "1h 5m". */
+export function spanText(ms: number): string {
+  const m = Math.floor(Math.max(0, ms) / 60_000)
+  if (m < 1) return ''
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`
+}
+
 function randomId(): string {
   try {
     return crypto.randomUUID()
@@ -926,6 +1147,8 @@ export const register: Register = on => {
   // What is typed per worker, so a status redraw does not wipe a half-typed task or name.
   const drafts = new Map<string, string>()
   const names = new Map<string, string>()
+  // What is typed into an outbox item's "What should change?" field, per item id.
+  const notes = new Map<string, string>()
   // The New worker form's one field ("Name, then what it does"), kept here for the same reason.
   const form = { text: '' }
   // Wakes this instance has already handled ("<key>-<date>"), when an undelivered one
@@ -935,13 +1158,76 @@ export const register: Register = on => {
   const retryAt = new Map<string, number>()
   const heard = new Map<string, Set<string>>()
   const cache: Cache = { where: new Map(), missAt: new Map(), steps: new Map() }
+  const runsCache = new Map<string, { mtimeMs: number; runs: RunRecord[] }>()
   let isPolling = false
+  // Who this chat is: the desktop's id for it (what a worker's `session` holds) and its
+  // transcript id; and, once found in the registry, the worker it is (./self).
+  let hostId = ''
+  let selfId = ''
+  let me: string | undefined
+  // The running turn's report, so its end can say when it started and what it was asked.
+  let turnState: WorkerState | undefined
+  const madeDirs = new Set<string>()
+
+  // Inside a worker's own chat: each main-loop turn's start and end, reported.
+  on('turn.start', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId !== undefined) return result
+    try {
+      const p = await paths($ as unknown as Host)
+      let key = me
+      if (!key) {
+        // The first turn can come before the first poll has learnt this chat's id.
+        if (!selfId) selfId = await $.session.id().catch(() => '')
+        const named = markerKey(e.text)
+        if (named && (await claimByMarker($ as unknown as Host, p, named, hostId, selfId, serial))) {
+          key = named
+          me = named
+        }
+      }
+      if (!key) return result
+      turnState = startedState(e.text, await $.clock.now())
+      await ensureDir($ as unknown as Host, madeDirs, p.status)
+      await $.fs.write(`${p.status}/${key}.json`, JSON.stringify(turnState))
+    } catch {
+      // a report that cannot be written leaves the mtime-based status
+    }
+    return result
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId !== undefined || !me) return result
+    const key = me
+    try {
+      const p = await paths($ as unknown as Host)
+      const now = await $.clock.now()
+      const started = turnState
+      turnState = undefined
+      const reason = e.reason as RunRecord['reason']
+      await ensureDir($ as unknown as Host, madeDirs, p.status)
+      await $.fs.write(`${p.status}/${key}.json`, JSON.stringify(endedState(reason, started, now)))
+      await ensureDir($ as unknown as Host, madeDirs, p.runs)
+      // O_APPEND, so a line is never lost to another writer's read-modify-write.
+      await $.process.run(['/usr/bin/tee', '-a', `${p.runs}/${key}.jsonl`], {
+        stdin: runLine({ turnId: e.turnId, reason, durationMs: e.durationMs, answer: e.answer, asked: started?.asked ?? '', now }),
+      })
+    } catch {
+      // the next turn reports again
+    }
+    return result
+  })
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'workers', description: 'Show the Workers pane' })
     void $.ui.open({ id: PANE, title: 'Workers', columns: COLUMNS })
     // Picks from before a reload have no write left to settle them.
     await update($, edits, old => (Object.keys(old).length === 0 ? old : {}))
+    try {
+      hostId = ((await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')) ?? '').trim()
+    } catch {
+      hostId = '' // not the desktop app: found by its transcript alone
+    }
 
     timer?.cancel()
     let openedAt = await $.clock.now()
@@ -956,6 +1242,7 @@ export const register: Register = on => {
           // Review) also opens that worker's outbox.
           const key = await flagOutbox($ as unknown as Host, p)
           if (key) {
+            await update($, view, old => (old === 'workers' ? old : 'workers'))
             await update($, panels, old => (old[key] === 'outbox' ? old : { ...old, [key]: 'outbox' as const }))
             await update($, selected, old => (old === key ? old : key))
           }
@@ -991,6 +1278,7 @@ export const register: Register = on => {
       if (isPolling) return
       isPolling = true
       try {
+        if (!snap.error) await identify(snap, p)
         await wakeDue(snap, now, p)
         announce(snap, p)
         if (!snap.error) await fillPending(snap, now, p)
@@ -999,27 +1287,59 @@ export const register: Register = on => {
       }
     }
 
+    // Is this chat a worker? Then its entry's `transcript` is kept right (filled in, or
+    // corrected after a /clear), which the status, Activity and the guard all key on.
+    const identify = async (snap: Snapshot, p: Paths) => {
+      selfId = await $.session.id().catch(() => selfId)
+      const found = whoAmI(snap.workers, hostId, selfId)
+      me = found?.key ?? (me && snap.workers.some(w => w.key === me) ? me : undefined)
+      const patch = found?.patch
+      if (found && patch) await serial(() => patchWorker($ as unknown as Host, p, found.key, patch))
+    }
+
     // Wakes each scheduled, unpaused worker once per due slot (a day, or an interval's
-    // slot). `checked` spares the mkdir on every poll; the mkdir is what makes it once
-    // across sessions. A wake that is not delivered (the chat not running yet) gives the
-    // claim back and retries later, while its slot is still due.
+    // slot), whichever of the open chats' panes claims it first. `checked` spares the
+    // mkdir on every poll once a slot is known done; the mkdir is what makes it once.
     const wakeDue = async (snap: Snapshot, now: number, p: Paths) => {
-      const self = await $.session.id().catch(() => '')
+      const mine = selfId ? `${selfId}.jsonl` : ''
       for (const w of snap.workers) {
-        if (!w.schedule || !w.session || !w.charter) continue
+        if (!w.schedule || !w.session) continue
         if (w.paused === true) continue
         // The worker's own chat never wakes itself.
-        if (self && w.transcript?.split('/').pop() === `${self}.jsonl`) continue
+        if (w.key === me || (mine && transcriptName(w.transcript) === mine)) continue
         const slot = dueSlot(w.schedule, now)
         if (!slot) continue
         const id = `${w.key}-${slot.id}`
         if (checked.has(id) || (retryAt.get(id) ?? 0) > now) continue
-        checked.add(id)
         const claimDir = `${p.wakes}/${id}`
+        const retryFile = `${p.wakes}/${id}.retry`
+        let takeover = ''
         try {
           await $.process.run(['/bin/mkdir', '-p', p.wakes])
+          // A wake that was not delivered says when any pane may try it again.
+          const notBefore = Number((await readText($ as unknown as Host, retryFile))?.trim())
+          if (Number.isFinite(notBefore) && notBefore > now) {
+            retryAt.set(id, notBefore)
+            continue
+          }
           const claim = await $.process.run(['/bin/mkdir', claimDir])
-          if (claim.exitCode !== 0) continue // this slot already woke it, from this or another session
+          if (claim.exitCode !== 0) {
+            // Held: delivered (it has a result), on its way, or left by a pane that closed.
+            const isDone = await $.fs.stat(`${claimDir}/result.json`).then(() => true, () => false)
+            if (isDone) {
+              checked.add(id)
+              continue
+            }
+            const held = await $.fs.stat(claimDir).catch(() => undefined)
+            if (held && now - held.mtimeMs >= CLAIM_STALE_MS) {
+              const take = await $.process.run(['/bin/mkdir', `${claimDir}/takeover`])
+              if (take.exitCode === 0) takeover = `${claimDir}/takeover`
+            }
+            if (!takeover) {
+              retryAt.set(id, now + CLAIM_LOOK_MS)
+              continue
+            }
+          }
         } catch {
           continue
         }
@@ -1028,7 +1348,7 @@ export const register: Register = on => {
         try {
           const result = await $.session.send({
             to: w.session,
-            text: wakeText(w, `Scheduled run (${slot.date} ${slot.time} ${w.schedule.tz})`),
+            text: wakeText(w, `Scheduled ${w.charter ? 'run' : 'check-in'} (${slot.date} ${slot.time} ${w.schedule.tz})`),
           })
           isDelivered = result.isDelivered !== false
           reason = result.isDelivered === false ? result.reason : undefined
@@ -1036,17 +1356,20 @@ export const register: Register = on => {
           reason = String(err)
         }
         if (!isDelivered) {
+          // Give the claim back, and tell every pane to wait before trying again.
+          await $.fs.write(retryFile, String(now + WAKE_RETRY_MS)).catch(() => undefined)
+          if (takeover) await $.process.run(['/bin/rmdir', takeover]).catch(() => undefined)
           await $.process.run(['/bin/rmdir', claimDir]).catch(() => undefined)
-          checked.delete(id)
           retryAt.set(id, now + WAKE_RETRY_MS)
         } else {
+          checked.add(id)
           await $.fs
             .write(`${claimDir}/result.json`, JSON.stringify({ at: now, isDelivered, reason }))
             .catch(() => undefined)
         }
         await update($, sent, old => ({
           ...old,
-          [w.key]: { text: 'Scheduled run of its charter', atMs: now, isDelivered, reason },
+          [w.key]: { text: w.charter ? 'Scheduled run of its charter' : 'Scheduled check-in', atMs: now, isDelivered, reason },
         }))
         $.ui.toast(isDelivered ? `${w.name} woke for its scheduled run` : `${w.name} didn't wake, retrying in 10 min: ${reason ?? 'not delivered'}`)
       }
@@ -1074,14 +1397,38 @@ export const register: Register = on => {
       }
     }
 
-    // A worker created from this pane: once the call session has registered it, the
-    // god, voice and tools it was created with are filled in where the entry lacks them.
+    // A worker created from this pane. With a `key`, the pane wrote its entry: a second
+    // entry a call session from before that appends (same key, or the same exact name
+    // under a new key) is folded into it, until its chat is known. Without one (made by
+    // an older pane), the god, voice and tools it was made with are filled in where the
+    // call session's entry lacks them.
     const fillPending = async (snap: Snapshot, now: number, p: Paths) => {
       const waiting = await read($, pending)
       const done: string[] = []
       for (const [name, pc] of Object.entries(waiting)) {
         if (now - pc.atMs > PENDING_TTL_MS) {
           done.push(name)
+          continue
+        }
+        if (pc.key) {
+          const key = pc.key
+          const ours = snap.workers.find(x => x.key === key)
+          if (!ours) {
+            done.push(name) // deleted before its chat started
+            continue
+          }
+          const dupes = snap.workers.filter(x => x !== ours && (x.key === key || (x.name === name && !pc.known.includes(x.key))))
+          if (dupes.length > 0) {
+            await serial(() => editRegistry($ as unknown as Host, p, ws => foldDuplicates(ws, key, name, pc.known)))
+            continue
+          }
+          // A call session that rewrote the entry may have dropped what it was made with.
+          const lost: Record<string, unknown> = {}
+          if (ours.god === undefined) lost.god = pc.god
+          if (ours.voice === undefined) lost.voice = pc.voice
+          if (ours.tools === undefined) lost.tools = pc.tools
+          if (Object.keys(lost).length > 0) await serial(() => patchWorker($ as unknown as Host, p, key, lost))
+          if (ours.session) done.push(name)
           continue
         }
         const w = snap.workers.find(x => x.name === name && !pc.known.includes(x.key))
@@ -1134,6 +1481,8 @@ export const register: Register = on => {
     const open = await read($, panels)
     const busy = await read($, deciding)
     const picks = await read($, edits)
+    const shownView = await read($, view)
+    const asking = await read($, changing)
 
     const refresh = () => update($, rev, n => n + 1)
 
@@ -1295,12 +1644,58 @@ export const register: Register = on => {
         return
       }
       const result = await $.session.send({ to: w.session, text: wakeText(w, 'Run now, from the Workers pane') })
-      const entry = await record(w, 'Run its charter now', result)
-      $.ui.toast(entry.isDelivered ? `${w.name} is running its charter` : `${w.name} didn't get it: ${entry.reason ?? 'not delivered'}`)
+      const entry = await record(w, w.charter ? 'Run its charter now' : 'Check in now', result)
+      const doing = w.charter ? 'is running its charter' : 'is checking in'
+      $.ui.toast(entry.isDelivered ? `${w.name} ${doing}` : `${w.name} didn't get it: ${entry.reason ?? 'not delivered'}`)
     }
 
-    const decide = async (w: RegistryWorker, item: OutboxItem, decision: Decision['decision']) => {
-      const line: Decision = { id: item.id, decision, at: new Date(await $.clock.now()).toISOString() }
+    // Ask all: one message to every worker with a chat; what did not arrive is named.
+    const askAll = async (text: string) => {
+      const task = text.trim()
+      if (!task) return
+      drafts.set(ASK_ALL, '')
+      const targets = live.filter(w => w.session)
+      if (targets.length === 0) {
+        $.ui.toast('No worker has a chat yet')
+        return
+      }
+      const missed: string[] = []
+      for (const w of targets) {
+        let result: { isDelivered?: boolean; reason?: string }
+        try {
+          result = await $.session.send({ to: w.session as string, text: task })
+        } catch (err) {
+          result = { isDelivered: false, reason: String(err) }
+        }
+        const entry = await record(w, task, result)
+        if (!entry.isDelivered) missed.push(w.name)
+      }
+      const got = targets.length - missed.length
+      const skipped = live.length - targets.length
+      const parts = [
+        missed.length === 0 ? `Sent to ${got === 1 ? '1 worker' : `all ${got} workers`}` : `Sent to ${got} of ${targets.length}; didn't reach ${missed.join(', ')}`,
+        skipped > 0 ? `${skipped} without a chat yet` : '',
+      ].filter(Boolean)
+      $.ui.toast(parts.join('. '))
+    }
+
+    // Start chat, on a worker whose chat was asked for and never started: the create
+    // request goes back in the prompt box for the person's own Enter.
+    const startChat = async (w: RegistryWorker) => {
+      const god = godOf(w)
+      const tools = toolsOf(w)
+      const text = createText({ name: w.name, role: w.role ?? '', god, tools: Array.isArray(tools) ? 'full' : tools, key: w.key })
+      const filled = await $.prompt.fill({ text, mode: 'replace' }).catch(() => ({ isFilled: false }))
+      $.ui.toast(filled.isFilled ? `Press Enter to start ${w.name}'s chat` : `Couldn't put the request for ${w.name} in the prompt box`)
+    }
+
+    const decide = async (w: RegistryWorker, item: OutboxItem, decision: Decision['decision'], note?: string) => {
+      const line: Decision = {
+        id: item.id,
+        decision,
+        at: new Date(await $.clock.now()).toISOString(),
+        ...(note ? { note } : {}),
+      }
       const file = `${p.outbox}/${w.key}.decisions.jsonl`
       let before = ''
       try {
@@ -1412,6 +1807,30 @@ export const register: Register = on => {
         $.ui.toast(told.isDelivered ? `Declined: ${item.title}` : `Declined. ${w.name} didn't get the message: ${told.reason ?? 'not delivered'}`)
       })
 
+    // Change: the "What should change?" field opens under the item; its Enter sends the
+    // worker the note. Recorded only once the chat has it, so an item it never heard
+    // about still waits.
+    const toggleChange = (item: OutboxItem) =>
+      update($, changing, old => (old[item.id] ? withoutKey(old, item.id) : { ...old, [item.id]: true }))
+    const requestChanges = (w: RegistryWorker, item: OutboxItem, note: string) =>
+      once(item, async () => {
+        const text = note.trim()
+        if (!text) return
+        if (!w.session) {
+          $.ui.toast(`${w.name} has no chat yet`)
+          return
+        }
+        const told = await record(w, `Changes: ${item.title}`, await $.session.send({ to: w.session, text: changesText(item, text) }))
+        if (!told.isDelivered) {
+          $.ui.toast(`${w.name} didn't get it, so it still waits: ${told.reason ?? 'not delivered'}`)
+          return
+        }
+        notes.delete(item.id)
+        await decide(w, item, 'changes', text)
+        await update($, changing, old => withoutKey(old, item.id))
+        $.ui.toast(`Asked ${w.name} to revise ${item.title}`)
+      })
+
     // Delete arms on the first press and fires on a second within CONFIRM_MS. The
     // call session archives the chat; the pane writes the request and drops the
     // registry entry at once, keeping everything else in the file.
@@ -1463,7 +1882,7 @@ export const register: Register = on => {
       update($, formState, old => {
         const nextState = { ...old, ...patchForm }
         return nextState.isOpen === old.isOpen && nextState.isValid === old.isValid &&
-          nextState.isTried === old.isTried && nextState.god === old.god
+          nextState.isTried === old.isTried && nextState.god === old.god && nextState.tools === old.tools
           ? old
           : nextState
       })
@@ -1478,28 +1897,65 @@ export const register: Register = on => {
       await setForm({ isOpen: false, isValid: false, isTried: false })
     }
 
+    // Create: the pane writes the worker's entry at once (its card shows, "No chat yet"),
+    // then puts the request to start its chat in the prompt box. The app starts a new
+    // chat only from the person's own words, and treats a submit by a mod as automated,
+    // so the Enter is theirs. Its chat fills in its own `transcript` once it runs.
     const create = async () => {
       const current = await read($, formState)
       const god = isGod(current.god) ? current.god : 'scribe'
+      const tools: ToolsPreset = isPreset(current.tools) ? current.tools : snap.defaultTools
       const { name, role } = splitEntry(form.text)
       if (!isValidName(name)) {
         await setForm({ isTried: true, isValid: false })
         return
       }
-      // The app starts a new chat only from the person's own words, and treats a submit
-      // by a mod as automated, so the request goes into the prompt box for their Enter.
-      const filled = await $.prompt.fill({ text: createText({ name, role, god }), mode: 'replace' }).catch(() => ({ isFilled: false }))
-      if (!filled.isFilled) {
-        $.ui.toast(`Couldn't put the request for ${name} in the prompt box`)
+      const clash = live.find(w => w.name.trim().toLowerCase() === name.toLowerCase())
+      if (clash) {
+        $.ui.toast(`There is already a worker named ${clash.name}. Pick another name.`)
         return
       }
       const at = await $.clock.now()
-      await update($, pending, old => ({
-        ...old,
-        [name]: { god, voice: DEFAULT_VOICE[god], tools: 'drafts' as const, atMs: at, known: snap.workers.map(w => w.key) },
-      }))
-      $.ui.toast(`Press Enter to create ${name}`)
+      let key = ''
+      let known: string[] = []
+      const err = await serial(() =>
+        addWorker($ as unknown as Host, p, keys => {
+          known = keys
+          key = keyFor(name, keys)
+          return {
+            key, name, ...(role ? { role } : {}), god, avatar: GOD_AVATAR[god], voice: DEFAULT_VOICE[god], tools,
+            created: new Date(at).toISOString(),
+          }
+        }),
+      )
+      if (err || !key) {
+        $.ui.toast(`Couldn't add ${name}: ${err ?? 'no key'}`)
+        return
+      }
+      await update($, pending, old => ({ ...old, [name]: { god, voice: DEFAULT_VOICE[god], tools, atMs: at, known, key } }))
+      await update($, selected, () => key)
+      await update($, view, old => (old === 'workers' ? old : 'workers'))
+      await refresh()
       await closeForm()
+      const filled = await $.prompt.fill({ text: createText({ name, role, god, tools, key }), mode: 'replace' }).catch(() => ({ isFilled: false }))
+      $.ui.toast(filled.isFilled ? `Press Enter to start ${name}'s chat` : `${name} is added. Press Start chat on its card to start its chat.`)
+    }
+
+    // "Make it the default": config.json's workers.default_tools, every other key kept.
+    const makeDefault = async (tools: ToolsPreset) => {
+      const result = withDefaultTools(await readText($ as unknown as Host, p.config), tools)
+      if (result.error || result.text === undefined) {
+        $.ui.toast(`Couldn't save the default: ${result.error ?? 'nothing to write'}`)
+        return
+      }
+      try {
+        await $.fs.write(p.config, result.text)
+      } catch (err) {
+        $.ui.toast(`Couldn't save the default: ${String(err)}`)
+        return
+      }
+      await refresh()
+      $.ui.toast(`New workers now start with ${TOOLS_SHORT[tools]}`)
     }
 
     // An Input takes no flex props of its own: a growing column inside a full-width
@@ -1558,8 +2014,11 @@ export const register: Register = on => {
       }))
 
     const formGod = isGod(fs.god) ? fs.god : 'scribe'
+    const formTools: ToolsPreset = isPreset(fs.tools) ? fs.tools : snap.defaultTools
     const formAccent = GOD_ACCENT[formGod]
     const showHint = fs.isTried && !fs.isValid
+    const waitingAll = live.reduce((n, w) => n + awaiting(snap.outbox[w.key] ?? [], snap.decided[w.key] ?? {}).length, 0)
+    const isToday = shownView === 'today'
 
     // The header's dot carries the selected worker's colour.
     const headAccent = current ? GOD_ACCENT[godOf(current)] : ACCENT
@@ -1572,13 +2031,21 @@ export const register: Register = on => {
             {`· ${live.length === 1 ? '1 standing chat' : `${live.length} standing chats`}`}
           </Text>
         </Box>
-        <Button
-          key="new-worker"
-          label="+ New worker"
-          variant={fs.isOpen ? 'secondary' : 'primary'}
-          dimColor={fs.isOpen}
-          onPress={() => void setForm({ isOpen: true })}
-        />
+        <Box flexDirection="row" gap="xs" alignItems="center">
+          <Button
+            key="today"
+            label={isToday ? 'All workers' : waitingAll > 0 ? `Today · ${waitingAll}` : 'Today'}
+            variant="secondary"
+            onPress={() => void update($, view, old => (old === 'today' ? 'workers' : 'today'))}
+          />
+          <Button
+            key="new-worker"
+            label="+ New worker"
+            variant={fs.isOpen ? 'secondary' : 'primary'}
+            dimColor={fs.isOpen}
+            onPress={() => void setForm({ isOpen: true })}
+          />
+        </Box>
       </Box>
     )
 
@@ -1618,20 +2085,39 @@ export const register: Register = on => {
             )
           : null}
         {radio('nw-god', formGod, godChoices(), formAccent, kind => void setForm({ god: kind }), true)}
-        <Text dimColor size="caption">{`Voice ${DEFAULT_VOICE[formGod]} · drafts only. Change both later in Settings.`}</Text>
+        {radio(
+          'nw-tools',
+          formTools,
+          TOOL_PRESETS.map(t => ({ value: t.value as string, label: t.label })).reverse(),
+          formAccent,
+          value => void setForm({ tools: value }),
+        )}
+        <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs" width="100%">
+          <Box flexGrow={1} flexShrink={1}>
+            <Text dimColor size="caption">{`Voice ${DEFAULT_VOICE[formGod]} · ${TOOLS_SHORT[formTools]}. Change both later in Settings.`}</Text>
+          </Box>
+          {formTools !== snap.defaultTools ? (
+            <Button key="nw-default" label="Make this the default" plain dimColor onPress={() => void makeDefault(formTools)} />
+          ) : null}
+        </Box>
         {showHint ? (
           <Text size="footnote" color={RED}>Name, before the comma: 1 to 24 letters, digits or spaces</Text>
         ) : null}
       </Box>
     ) : null
 
-    const statusOf = (w: RegistryWorker) => {
+    const statusOf = (w: RegistryWorker): { text: string; color: string | undefined } => {
       const s = snap.status[w.key]
-      return s?.isNew
-        ? { text: '✦ New', color: BLUE as string | undefined }
-        : s?.isWorking
-          ? { text: '● Working', color: GREEN as string | undefined }
-          : { text: `○ Idle${s?.lastActiveMs ? ` · ${ago(now - s.lastActiveMs)}` : ''}`, color: undefined as string | undefined }
+      const since = s?.lastActiveMs ? ` · ${ago(now - s.lastActiveMs)}` : ''
+      if (s?.isStarting) return { text: '◌ No chat yet', color: BLUE }
+      if (s?.isNew) return { text: '✦ New', color: BLUE }
+      if (s?.isWorking) {
+        const run = s.sinceMs ? spanText(now - s.sinceMs) : ''
+        return { text: run ? `● Working · ${run}` : '● Working', color: GREEN }
+      }
+      if (s?.state === 'error') return { text: `▲ Stopped on an error${since}`, color: RED }
+      if (s?.state === 'stopped') return { text: `■ Stopped${since}`, color: undefined }
+      return { text: `○ Idle${since}`, color: undefined }
     }
 
     const badgeText = (w: RegistryWorker, tag: string, accent: string) =>
@@ -1690,10 +2176,13 @@ export const register: Register = on => {
       return withZone && w.schedule.tz ? `${sentence} (${w.schedule.tz})` : sentence
     }
 
+    // Run now runs the charter; a worker with hours and no charter gets Check in instead.
+    const canRun = (w: RegistryWorker) => Boolean(w.session && (w.charter || w.schedule))
+    const runLabelOf = (w: RegistryWorker) => (w.charter ? 'Run now' : 'Check in')
+
     /** What it cannot do yet, or '' when nothing is missing. */
     const missing = (w: RegistryWorker): string => {
-      if (!w.session) return 'Its chat has not started yet, so it cannot take tasks.'
-      if (w.schedule && !w.charter) return 'It wakes only once it has a charter.'
+      if (!w.session) return 'Its chat has not started yet: press Enter on the request in the prompt box, or Start chat.'
       return ''
     }
 
@@ -1732,8 +2221,101 @@ export const register: Register = on => {
       </Box>
     )
 
-    // The outbox, newest first: a file icon, the title, "needs your yes" in amber and
-    // Approve / Decline for what waits; a note shows with no buttons.
+    // One outbox item: a file icon, the title, "needs your yes" in amber and Decline,
+    // Change and Approve for what waits (Change opens "What should change?" under it); a
+    // note shows with no buttons. In the Today view, `who` leads with the worker's god.
+    const itemBox = (
+      w: RegistryWorker,
+      item: OutboxItem,
+      decided: Record<string, Decision>,
+      accent: string,
+      who?: RenderChildren,
+    ) => {
+      const d = decided[item.id]
+      const isWaiting = item.needs_approval && d === undefined
+      const isBusy = busy[item.id] !== undefined
+      const isAsking = isWaiting && asking[item.id] === true
+      const lines = item.body.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 2)
+      const meta = [
+        item.kind === 'page' ? `${item.page ? 'revision' : 'page'}${item.space ? ` in ${item.space}` : ''}` : item.kind,
+        item.to ? `to ${item.to}` : '',
+        item.subject ? `"${oneLine(item.subject, 60)}"` : '',
+        ago(now - atMs(item)),
+      ].filter(Boolean).join(' · ')
+      const glyph: IconName = item.kind === 'note' ? 'note' : item.kind === 'page' ? 'fileText' : 'file'
+      const state = d
+        ? d.decision === 'approved'
+          ? { text: '✓ Approved', color: GREEN as string | undefined }
+          : d.decision === 'changes'
+            ? { text: '↺ Changes asked', color: undefined }
+            : { text: 'Declined', color: undefined }
+        : undefined
+      return (
+        <Box
+          key={`item-${w.key}-${item.id}`}
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={isWaiting ? tint(accent, 0.6) : undefined}
+          borderDimColor={!isWaiting}
+          width="100%"
+          paddingX="sm"
+          paddingY="xs"
+          gap="xs"
+        >
+          <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
+            {who ?? icon(glyph, isWaiting ? accent : SUB, 14)}
+            <Box flexGrow={1} flexShrink={1}>
+              <Text bold size="footnote" wrap="truncate-end">{item.title}</Text>
+            </Box>
+            {isWaiting ? (
+              <Text size="caption" color={AMBER}>needs your yes</Text>
+            ) : state ? (
+              <Text size="caption" color={state.color} dimColor={state.color === undefined}>{state.text}</Text>
+            ) : null}
+          </Box>
+          <Text dimColor size="caption" wrap="truncate-end">{who ? `${w.name} · ${meta}` : meta}</Text>
+          {lines.map((l, n) => (
+            <Text key={`item-${w.key}-${item.id}-l${n}`} size="footnote" wrap="truncate-end">{l}</Text>
+          ))}
+          {d?.decision === 'changes' && d.note ? (
+            <Text dimColor size="caption" wrap="truncate-end">{`You asked: ${oneLine(d.note, 90)}`}</Text>
+          ) : null}
+          {isAsking && Input
+            ? fill(
+                <Input
+                  key={`changenote-${w.key}-${item.id}`}
+                  placeholder="What should change?"
+                  value={notes.get(item.id) ?? ''}
+                  submitLabel="send"
+                  autoFocus
+                  onInput={(value: string) => void notes.set(item.id, value)}
+                  onSubmit={(value: string) => void requestChanges(w, item, value)}
+                />,
+              )
+            : null}
+          {isWaiting ? (
+            <Box flexDirection="row" gap="xs" alignItems="center" justifyContent="flex-end" width="100%">
+              {isBusy ? (
+                <Text dimColor size="caption">Sending…</Text>
+              ) : (
+                <Box flexDirection="row" gap="xs" alignItems="center">
+                  <Button key={`decline-${w.key}-${item.id}`} label="Decline" variant="secondary" onPress={() => void decline(w, item)} />
+                  <Button
+                    key={`change-${w.key}-${item.id}`}
+                    label={isAsking ? 'Cancel change' : 'Change'}
+                    variant="secondary"
+                    onPress={() => void toggleChange(item)}
+                  />
+                  <Button key={`approve-${w.key}-${item.id}`} label="Approve" variant="primary" onPress={() => void approve(w, item)} />
+                </Box>
+              )}
+            </Box>
+          ) : null}
+        </Box>
+      )
+    }
+
+    // The outbox, newest first.
     function feed(w: RegistryWorker, items: readonly OutboxItem[], decided: Record<string, Decision>, accent: string) {
       const shown = [...items].reverse().slice(0, FEED_ITEMS)
       return (
@@ -1741,64 +2323,10 @@ export const register: Register = on => {
           {shown.length === 0 ? (
             <Text dimColor size="footnote">{`Nothing here yet. What ${w.name} drafts or notes lands here for your yes.`}</Text>
           ) : null}
-          {shown.map(item => {
-            const d = decided[item.id]
-            const isWaiting = item.needs_approval && d === undefined
-            const isBusy = busy[item.id] !== undefined
-            const lines = item.body.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 2)
-            const meta = [
-              item.kind === 'page' ? `${item.page ? 'revision' : 'page'}${item.space ? ` in ${item.space}` : ''}` : item.kind,
-              item.to ? `to ${item.to}` : '',
-              ago(now - atMs(item)),
-            ].filter(Boolean).join(' · ')
-            const glyph: IconName = item.kind === 'note' ? 'note' : item.kind === 'page' ? 'fileText' : 'file'
-            return (
-              <Box
-                key={`item-${w.key}-${item.id}`}
-                flexDirection="column"
-                borderStyle="round"
-                borderColor={isWaiting ? tint(accent, 0.6) : undefined}
-                borderDimColor={!isWaiting}
-                width="100%"
-                paddingX="sm"
-                paddingY="xs"
-                gap="xs"
-              >
-                <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
-                  {icon(glyph, isWaiting ? accent : SUB, 14)}
-                  <Box flexGrow={1} flexShrink={1}>
-                    <Text bold size="footnote" wrap="truncate-end">{item.title}</Text>
-                  </Box>
-                  {isWaiting ? (
-                    <Text size="caption" color={AMBER}>needs your yes</Text>
-                  ) : d ? (
-                    <Text size="caption" color={d.decision === 'approved' ? GREEN : undefined} dimColor={d.decision !== 'approved'}>
-                      {d.decision === 'approved' ? '✓ Approved' : 'Declined'}
-                    </Text>
-                  ) : null}
-                </Box>
-                <Text dimColor size="caption" wrap="truncate-end">{meta}</Text>
-                {lines.map((l, n) => (
-                  <Text key={`item-${w.key}-${item.id}-l${n}`} size="footnote" wrap="truncate-end">{l}</Text>
-                ))}
-                {isWaiting ? (
-                  <Box flexDirection="row" gap="xs" alignItems="center" justifyContent="flex-end" width="100%">
-                    {isBusy ? (
-                      <Text dimColor size="caption">Sending…</Text>
-                    ) : (
-                      <Box flexDirection="row" gap="xs" alignItems="center">
-                        <Button key={`decline-${w.key}-${item.id}`} label="Decline" variant="secondary" onPress={() => void decline(w, item)} />
-                        <Button key={`approve-${w.key}-${item.id}`} label="Approve" variant="primary" onPress={() => void approve(w, item)} />
-                      </Box>
-                    )}
-                  </Box>
-                ) : null}
-              </Box>
-            )
-          })}
+          {shown.map(item => itemBox(w, item, decided, accent))}
           <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
             <Box flexGrow={1} flexShrink={1}>
-              <Text dimColor size="caption">{`Approve tells ${w.name} to go ahead. Decline tells it not to.`}</Text>
+              <Text dimColor size="caption">{`Approve tells ${w.name} to go ahead. Change sends it back with a note. Decline drops it.`}</Text>
             </Box>
             <Button key={`feed-open-${w.key}`} label="Open chat" variant="secondary" onPress={() => void openChat(w)} />
           </Box>
@@ -2016,7 +2544,7 @@ export const register: Register = on => {
               </Box>
             ) : null}
             {sched ? <Text dimColor size="caption">{scheduleSentence(sched)}</Text> : null}
-            {sched && !w.charter ? <Text dimColor size="caption">It wakes only once it has a charter.</Text> : null}
+            {sched && !w.charter ? <Text dimColor size="caption">With no charter, each wake asks it to check in on its role.</Text> : null}
             <Box flexDirection="row" gap="xs" alignItems="center" width="100%">
               {icon('pause', w.paused === true ? AMBER : SUB, 13)}
               <Box flexGrow={1} flexShrink={1}>
@@ -2098,11 +2626,15 @@ export const register: Register = on => {
       if (tab === 'activity') return await activity(w)
       if (tab === 'settings') return settings(w, accent)
       const gap = missing(w)
+      const start = !w.session ? (
+        <Button key={`start-${w.key}`} label="Start chat" variant="primary" onPress={() => void startChat(w)} />
+      ) : null
       if (!isDetail) {
         return (
           <Box key={`overview-${w.key}`} flexDirection="column" gap="xs" width="100%">
             <Text dimColor size="caption">{hoursAbout(w, false)}</Text>
             {gap ? <Text dimColor size="caption">{gap}</Text> : null}
+            {start}
           </Box>
         )
       }
@@ -2116,7 +2648,8 @@ export const register: Register = on => {
             </Box>
           </Box>
           <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
-            {w.charter ? <Button key={`run-${w.key}`} label="Run now" variant="primary" onPress={() => void runNow(w)} /> : null}
+            {start}
+            {canRun(w) ? <Button key={`run-${w.key}`} label={runLabelOf(w)} variant="primary" onPress={() => void runNow(w)} /> : null}
             <Button key={`open-${w.key}`} label="Open chat" variant="secondary" onPress={() => void openChat(w)} />
             <Box flexGrow={1} />
           </Box>
@@ -2177,10 +2710,10 @@ export const register: Register = on => {
           <Box key={`footer-${w.key}`} flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs" width="100%">
             {hoursChip(w, th.accent)}
             <Box flexGrow={1} />
-            {w.charter ? (
+            {canRun(w) ? (
               <Box flexDirection="row" alignItems="center" gap="xs">
                 {icon('play', SUB, 11)}
-                <Button key={`run-${w.key}`} label="Run now" plain onPress={() => void runNow(w)} />
+                <Button key={`run-${w.key}`} label={runLabelOf(w)} plain onPress={() => void runNow(w)} />
               </Box>
             ) : null}
             <Box flexDirection="row" alignItems="center" gap="xs">
@@ -2287,6 +2820,126 @@ export const register: Register = on => {
       ) : snap.error ? (
         <Text dimColor>{snap.error}</Text>
       ) : null
+
+    // Today: what waits for a yes across every worker, Ask all, and what each did since
+    // midnight (finished turns from runs/<key>.jsonl, notes and decided drafts).
+    const readRuns = async (key: string): Promise<RunRecord[]> => {
+      if (!isKey(key)) return []
+      const path = `${p.runs}/${key}.jsonl`
+      let mtimeMs: number
+      try {
+        mtimeMs = (await $.fs.stat(path)).mtimeMs
+      } catch {
+        return []
+      }
+      const hit = runsCache.get(path)
+      if (hit && hit.mtimeMs === mtimeMs) return hit.runs
+      try {
+        const r = await $.process.run(['/usr/bin/tail', '-c', String(RUNS_TAIL_BYTES), path])
+        if (r.exitCode !== 0) return []
+        const runs = parseRuns(r.stdout)
+        runsCache.set(path, { mtimeMs, runs })
+        return runs
+      } catch {
+        return []
+      }
+    }
+
+    const todayPanel = async () => {
+      const runs: Record<string, RunRecord[]> = {}
+      for (const w of live) runs[w.key] = await readRuns(w.key)
+      const entries: TodayEntry[] = todayEntries({
+        keys: live.map(w => w.key), runs, outbox: snap.outbox, decided: snap.decided, since: startOfDay(now),
+      }).slice(0, TODAY_ITEMS)
+      const waiting = live
+        .flatMap(w => awaiting(snap.outbox[w.key] ?? [], snap.decided[w.key] ?? {}).map(item => ({ w, item })))
+        .sort((a, b) => atMs(b.item) - atMs(a.item))
+      const withChat = live.filter(w => w.session).length
+      const onHours = live.filter(w => w.schedule && w.paused !== true && w.session).length
+      const paused = live.filter(w => w.paused === true).length
+      const byKey = new Map(live.map(w => [w.key, w]))
+      const rhythm =
+        live.length === 0
+          ? ''
+          : [
+              onHours === 0
+                ? 'None wakes on its own: give one hours in its Settings.'
+                : `${onHours === 1 ? '1 wakes' : `${onHours} wake`} on its own hours.`,
+              paused > 0 ? `${paused} paused.` : '',
+            ].filter(Boolean).join(' ')
+      let day = ''
+      try {
+        day = new Date(now).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+      } catch {
+        day = ''
+      }
+      return (
+        <Box key="today-panel" flexDirection="column" gap="sm" width="100%">
+          <Text bold>{day ? `Today · ${day}` : 'Today'}</Text>
+          {Input && withChat > 0
+            ? fill(
+                <Input
+                  key="ask-all"
+                  placeholder={withChat === 1 ? 'Ask your worker…' : `Ask all ${withChat} workers…`}
+                  value={drafts.get(ASK_ALL) ?? ''}
+                  submitLabel="send"
+                  onInput={(value: string) => void drafts.set(ASK_ALL, value)}
+                  onSubmit={(value: string) => void askAll(value)}
+                />,
+              )
+            : null}
+          {rhythm ? <Text dimColor size="caption">{rhythm}</Text> : null}
+          {heading('h-waiting', waiting.length > 0 ? `Needs your yes · ${waiting.length}` : 'Needs your yes')}
+          {waiting.length === 0 ? (
+            <Text key="none-waiting" dimColor size="footnote">Nothing waits for you.</Text>
+          ) : (
+            waiting.map(({ w, item }) =>
+              itemBox(w, item, snap.decided[w.key] ?? {}, GOD_ACCENT[godOf(w)], godAvatar(godOf(w), 16, false, w.name, `who-${w.key}-${item.id}`)),
+            )
+          )}
+          {heading('h-done', 'Done today')}
+          {entries.length === 0 ? (
+            <Text key="none-done" dimColor size="footnote">
+              {live.length === 0
+                ? 'No workers yet. + New worker makes one.'
+                : 'Nothing yet today. What your workers finish, note or draft shows here.'}
+            </Text>
+          ) : (
+            entries.map(en => {
+              const w = byKey.get(en.key)
+              if (!w) return null
+              const god = godOf(w)
+              return (
+                <Box key={`today-${en.id}`} flexDirection="row" alignItems="flex-start" gap="xs" width="100%">
+                  {godAvatar(god, 20, false, w.name, `today-av-${en.id}`)}
+                  <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+                    <Box flexDirection="row" alignItems="center" gap="xs" width="100%">
+                      <Button key={`today-open-${en.id}`} label={w.name} plain onPress={() => void openChat(w)} />
+                      <Box flexGrow={1} flexShrink={1}>
+                        <Text size="footnote" color={en.kind === 'error' ? RED : undefined} wrap="truncate-end">{en.title}</Text>
+                      </Box>
+                      <Text dimColor size="caption">{ago(now - en.atMs)}</Text>
+                    </Box>
+                    {en.detail ? <Text dimColor size="caption" wrap="truncate-end">{en.detail}</Text> : null}
+                  </Box>
+                </Box>
+              )
+            })
+          )}
+        </Box>
+      )
+    }
+
+    if (isToday) {
+      return (
+        <Box flexDirection="column" alignItems="stretch" width="100%" gap="sm">
+          {header}
+          {newForm}
+          {snap.error && live.length > 0 ? <Text dimColor>{snap.error}</Text> : null}
+          {await todayPanel()}
+        </Box>
+      )
+    }
 
     if (isWide && live.length > 0 && current) {
       return (
