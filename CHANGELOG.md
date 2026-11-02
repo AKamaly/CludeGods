@@ -19,6 +19,12 @@ release adds features and a patch release fixes things.
 - The README's release link always points to the latest release.
 - The README opens with "Always-on Claude Code Gods that you can talk to" and the feature list.
 
+### Fixed
+
+- Workers pane: pressing a worker's name, role line or status selects its card, and so does
+  any action on the card (Ask, Run now, Outbox); exactly one card is highlighted, and hovering
+  another no longer draws it in its own colour. The name no longer opens the chat; Open does.
+
 ## [0.4.0] - 2026-11-02
 
 ### Added
