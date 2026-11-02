@@ -142,6 +142,12 @@ if [ -f "$CALL/workers.json" ]; then
 else
   printf '{\n  "workers": []\n}\n' > "$CALL/workers.json" && ok "created an empty workers registry"
 fi
+if [ -e "$CALL/config.json" ]; then
+  ok "kept your config.json"
+else
+  cp "$REPO/config/config.example.json" "$CALL/config.json" \
+    && ok "created config.json (spoken yes after a read-back, the app's permission dialog, workers save pages)"
+fi
 ok "~/.voicemode/call is ready"
 
 step "Done. Two steps left, inside Claude Code:"

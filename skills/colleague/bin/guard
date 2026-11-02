@@ -2,18 +2,26 @@
 """PreToolUse hook: per-worker tool permissions (each worker's "tools" in the registry).
 
 The hook's session_id is matched to a worker by the registry's "transcript" file stem
-(~/.voicemode/call/workers.json). Not a worker: allow silently. A worker is held to its
-"tools" setting:
+(~/.voicemode/call/workers.json). Not a worker: allow silently. A worker without a "tools"
+setting has the full tools of its session, like any chat; a preset is an opt-in restriction
+the owner sets per worker:
 
-    full (or missing)  no guard: everything the session could do anyway
+    full (or missing)  everything the session could do anyway (the default)
     read               Read, Grep, Glob, WebSearch, WebFetch, LS, and in Bash only
                        `pages list|show|spaces` (reading Spaces)
     drafts             read + Write/Edit only into its own outbox (outbox/<key>.jsonl) and
                        page drafts (spaces/.drafts/) + a read-only Bash allow-list, plus
                        `pages draft` (a page for review) and `reply` (its Slack thread reply).
-                       `pages publish|new|mkspace` stay blocked: publishing is the owner's
-                       Approve in the Workers pane
+                       `pages publish|new|mkspace` stay closed: its pages land on the
+                       owner's Approve in the Workers pane
     [names]            an explicit allow-list of tool names ("mcp__x__*" matches a prefix)
+
+Pages, for every worker: `approvals.worker_publish` in ~/.voicemode/call/config.json is
+"direct" (the default: a worker that can run Bash may `pages new|publish|mkspace` itself) or
+"approve" (`pages publish|new|mkspace` are closed to every worker, so pages land only on the
+owner's Approve). Either way a worker passes `--worker <its own key>` to `pages new|draft`,
+and never publishes a Memory draft (every worker follows Memory, so the owner reviews it).
+A missing or invalid config.json means the defaults; config never makes the hook fail.
 
 Every worker may also use the harness tools that change nothing (ToolSearch, TodoWrite,
 Skill, ...) and may speak on the call (`~/.claude/skills/colleague/bin/call say`).
@@ -147,6 +155,32 @@ def deny(reason):
 
 def tilde(path):
     return "~" + path[len(HOME):] if path.startswith(HOME + os.sep) else path
+
+
+# ---------------------------------------------------------------------------- config
+
+APPROVAL_CHOICES = {"outward": ("spoken", "typed"), "permission_prompts": ("app", "pill"),
+                    "worker_publish": ("direct", "approve")}  # the first choice is the default
+
+
+def approvals():
+    """config.json's "approvals", each value checked: anything missing or invalid is its
+    default. Other keys of the file belong to other parts of CludeGods and are ignored."""
+    out = {k: v[0] for k, v in APPROVAL_CHOICES.items()}
+    try:
+        with open(os.path.join(CALL_DIR, "config.json")) as f:
+            block = json.load(f).get("approvals")
+    except FileNotFoundError:
+        return out
+    except Exception as e:  # unreadable, not JSON, not an object: the defaults
+        log(f"config.json unreadable ({type(e).__name__}); using the default approvals")
+        return out
+    if isinstance(block, dict):
+        for k, choices in APPROVAL_CHOICES.items():
+            v = block.get(k)
+            if isinstance(v, str) and v.strip().lower() in choices:
+                out[k] = v.strip().lower()
+    return out
 
 
 # ---------------------------------------------------------------------------- paths
@@ -304,21 +338,130 @@ def speaking(words):
 
 
 PAGES_READ = ("list", "show", "spaces")
+PAGES_WRITE = ("publish", "new", "mkspace")
+PAGES_WRITE_RE = re.compile(r"""colleague/bin/pages['"]?\s+['"]?(publish|new|mkspace)\b""")
+DRAFT_ID_RE = re.compile(r"ob_[0-9a-f]{12}")
 
 
-def pages_problem(words, may_draft):
-    """For a `pages` command: None if this preset may run it, else why."""
+def opt(args, flag):
+    """The value of `flag V` or `flag=V` in args; None when the flag is absent."""
+    for i, a in enumerate(args):
+        if a == flag:
+            return args[i + 1] if i + 1 < len(args) else ""
+        if a.startswith(flag + "="):
+            return a[len(flag) + 1:]
+    return None
+
+
+def pages_words(words):
+    """The words from `pages` on when this simple command runs the colleague `pages` CLI
+    (directly, or as `python3 [flags] pages ...`), else None."""
+    w = words
+    if w and os.path.basename(w[0]) in ("python3", "python"):
+        w = w[1:]
+        while w and w[0].startswith("-"):
+            w = w[1:]
+    if w and (colleague_script(w[0]) == "pages" or w[0].endswith("/colleague/bin/pages")):
+        return w
+    return None
+
+
+def own_worker_problem(key, words):
+    """`pages new|draft` must name the worker running it: the page records who wrote it
+    and the CLI holds it to that worker's spaces."""
     sub = words[1] if len(words) > 1 else ""
-    if sub in PAGES_READ or (may_draft and sub == "draft"):
+    if sub in ("new", "draft") and opt(words[2:], "--worker") != key:
+        return (f"`pages {sub}` needs `--worker {key}` (its own key), so the page records who "
+                f"wrote it and its spaces apply")
+    return None
+
+
+def memory_draft(args, cwd=None):
+    """Is this `pages publish` argument list a draft for the Memory space?"""
+    if opt(args, "--space") == "memory":
+        return True
+    ref, i = None, 0
+    while i < len(args):
+        if args[i] == "--space":
+            i += 2
+            continue
+        if not args[i].startswith("-"):
+            ref = args[i]
+            break
+        i += 1
+    if not ref:
+        return False
+    if DRAFT_ID_RE.fullmatch(ref):
+        path = os.path.join(CALL_DIR, "spaces", ".drafts", ref + ".md")
+    else:
+        path = expand(ref, cwd)
+    try:
+        with open(path or "", encoding="utf-8") as f:
+            text = f.read(8192)
+    except (OSError, ValueError):
+        return False  # no such draft: pages refuses it anyway
+    if not text.startswith("---\n"):
+        return False
+    head = text[4:].partition("\n---")[0]
+    return bool(re.search(r'(?m)^space: *"?memory"? *$', head))
+
+
+def page_write_problem(key, words, cwd=None):
+    """For a worker whose Bash is otherwise open (full, or a list with Bash): None if this
+    `pages` command may run under approvals.worker_publish, else why."""
+    why = own_worker_problem(key, words)
+    if why:
+        return why
+    sub, args = (words[1] if len(words) > 1 else ""), words[2:]
+    if sub in PAGES_WRITE and approvals()["worker_publish"] == "approve":
+        return (f"`pages {sub}` is the owner's Approve in the Workers pane "
+                f"(approvals.worker_publish is \"approve\"): save it with "
+                f"`pages draft <space> \"Title\" --worker {key} --from -` for review")
+    if sub == "publish" and memory_draft(args, cwd):
+        return ("a Memory draft lands only on the owner's Approve in the Workers pane, since "
+                "every worker follows Memory: leave it for review")
+    return None
+
+
+def open_bash_problem(key, cmd, cwd=None):
+    """The `pages` rules for a worker whose Bash is otherwise open. None to allow."""
+    if "pages" not in cmd:
         return None
-    if sub in ("publish", "new", "mkspace"):
-        return (f"`pages {sub}` is the owner's Approve in the Workers pane"
-                + ("; save it with `pages draft` for review" if may_draft else ""))
-    allowed = "list|show|spaces" + ("|draft" if may_draft else "")
-    return f"only `pages {allowed}` are open to it"
+    try:
+        segs = segments(cmd)
+    except ValueError:
+        # cannot be judged: only the approve mode needs a no here
+        if PAGES_WRITE_RE.search(cmd) and approvals()["worker_publish"] == "approve":
+            return ("`pages publish|new|mkspace` is the owner's Approve in the Workers pane "
+                    "(approvals.worker_publish is \"approve\"): save it with `pages draft` "
+                    "for review")
+        return None
+    for words, _ in segs:
+        pw = pages_words(words)
+        if pw:
+            why = page_write_problem(key, pw, cwd)
+            if why:
+                return why
+    return None
 
 
-def readonly_problem(words):
+def pages_problem(words, may_draft, key=""):
+    """For a `pages` command under the read or drafts preset: None if the preset may run
+    it, else why."""
+    sub = words[1] if len(words) > 1 else ""
+    if sub in PAGES_READ:
+        return None
+    if may_draft and sub == "draft":
+        return own_worker_problem(key, words)
+    if not may_draft:
+        return "Spaces are read-only to it: only `pages list|show|spaces` are open to it"
+    if sub in PAGES_WRITE:
+        return (f"`pages {sub}` is closed to the drafts preset: save it with `pages draft` and "
+                f"it lands on the owner's Approve in the Workers pane")
+    return "only `pages list|show|spaces|draft` are open to it"
+
+
+def readonly_problem(words, key=""):
     """None if this simple command only reads, else a short why."""
     if not words:
         return None
@@ -329,7 +472,7 @@ def readonly_problem(words):
         return "environment assignments are not on the list"
     script = colleague_script(prog)
     if script == "pages":
-        return pages_problem(words, may_draft=True)
+        return pages_problem(words, may_draft=True, key=key)
     if script == "reply":  # its answer in the Slack thread that asked it
         return None
     if script:
@@ -408,20 +551,28 @@ def git_problem(args):
 def decide(worker, tool, inp, cwd=None):
     """None to allow, else the deny reason."""
     key, name, tools = worker["key"], worker["name"], worker.get("tools", "full")
-    if tools in (None, "full", ""):
-        return None
     if tool in HARNESS or tool.startswith(HARNESS_PREFIXES):
+        return None
+    if tools in (None, "full", ""):
+        if tool == "Bash":
+            why = open_bash_problem(key, str(inp.get("command") or ""), cwd)
+            if why:
+                return f"{name}: {why}."
         return None
     outbox = f"~/.voicemode/call/outbox/{key}.jsonl"
 
     if isinstance(tools, list):
         allowed = [t for t in tools if isinstance(t, str)]
         if any(tool == t or (t.endswith("*") and tool.startswith(t[:-1])) for t in allowed):
+            if tool == "Bash":
+                why = open_bash_problem(key, str(inp.get("command") or ""), cwd)
+                if why:
+                    return f"{name}: {why}."
             return None
         if tool == "Bash" and only_speaking(inp.get("command", "")):
             return None
-        return (f"{name} may only use {', '.join(allowed) or 'no tools'}: {tool} is not one of "
-                f"them. Say what you need in your reply instead.")
+        return (f"{name} may only use {', '.join(allowed) or 'no tools'} (its tool list): "
+                f"{tool} is not one of them. Say what you need in your reply instead.")
 
     if tools not in ("read", "drafts"):
         log(f"{key}: unknown tools setting {tools!r}, held to read")
@@ -434,8 +585,9 @@ def decide(worker, tool, inp, cwd=None):
             why = read_bash_problem(inp.get("command", ""))
             if why is None:
                 return None
-            return f"{name} is read-only: {why}. Say what you would do in your reply instead."
-        return (f"{name} is read-only: it can read and search, not use {tool}. "
+            return (f"{name} has the read-only preset: {why}. Say what you would do in your "
+                    f"reply instead.")
+        return (f"{name} has the read-only preset: it can read and search, not use {tool}. "
                 f"Say what you would do in your reply instead.")
 
     # drafts
@@ -443,15 +595,16 @@ def decide(worker, tool, inp, cwd=None):
         path = expand(str(inp.get(WRITE_TOOLS[tool]) or ""), cwd)
         if draft_area(key, path):
             return None
-        return (f"{name} is drafts-only: write to the outbox instead ({outbox}), "
+        return (f"{name} has the drafts preset: write to its outbox instead ({outbox}), "
                 f"or draft a page with ~/.claude/skills/colleague/bin/pages draft.")
     if tool == "Bash":
         why = bash_problem(key, inp.get("command", ""))
         if why is None:
             return None
-        return (f"{name} is drafts-only: {why}. Put what you would run in the outbox "
-                f"({outbox}) for a yes.")
-    return f"{name} is drafts-only: {tool} is not allowed. Write to the outbox instead ({outbox})."
+        return (f"{name} has the drafts preset: {why}. Put what you would run in the outbox "
+                f"({outbox}) for the owner's yes.")
+    return (f"{name} has the drafts preset: {tool} is not open to it. Write to the outbox "
+            f"instead ({outbox}).")
 
 
 def only_speaking(cmd):
@@ -495,7 +648,7 @@ def bash_problem(key, cmd):
         for target in outs:
             if not draft_area(key, expand(target)):
                 return f"it writes to {target}"
-        why = readonly_problem(words)
+        why = readonly_problem(words, key)
         if why:
             return why
     return None
@@ -536,6 +689,7 @@ def selftest():
         {"key": "scout", "name": "Scout", "tools": ["Read", "WebSearch", "mcp__claude-in-chrome__*"],
          "transcript": "~/.claude/projects/x/s-list.jsonl"},
         {"key": "odd", "name": "Odd", "tools": "readonly", "transcript": "s-odd.jsonl"},
+        {"key": "hands", "name": "Hands", "tools": ["Read", "Bash"], "transcript": "s-bash.jsonl"},
     ]}
     with open(os.path.join(tmp, "workers.json"), "w") as f:
         json.dump(reg, f)
@@ -581,7 +735,8 @@ def selftest():
     check("read: Read", "s-read", "Read", {"file_path": "/etc/hosts"}, "allow")
     check("read: WebFetch", "s-read", "WebFetch", {"url": "https://example.com"}, "allow")
     check("read: ToolSearch (harness)", "s-read", "ToolSearch", {"query": "x"}, "allow")
-    check("read: Write", "s-read", "Write", {"file_path": outbox}, "deny", "Research is read-only")
+    check("read: Write", "s-read", "Write", {"file_path": outbox}, "deny",
+          "Research has the read-only preset")
     check("read: Bash ls", "s-read", "Bash", {"command": "ls"}, "deny", "read-only")
     check("read: speaks on the call", "s-read", "Bash", {"command": say}, "allow")
     check("read: speak; rm", "s-read", "Bash", {"command": say + "; rm -rf /tmp/x"}, "deny")
@@ -592,9 +747,9 @@ def selftest():
         check(f"read: Bash {cmd[len(P) - 5:][:44]!r}", "s-read", "Bash", {"command": cmd}, "allow")
     for cmd, why in [(f"{P} draft notes \"Plan\" --worker research --from - <<'EOF'\nx\nEOF",
                       "only `pages list|show|spaces`"),
-                     (f"{P} publish d.md --space notes", "owner's Approve"),
-                     (f"{P} new notes \"Plan\"", "owner's Approve"),
-                     (f"{P} mkspace \"Ideas\"", "owner's Approve"),
+                     (f"{P} publish d.md --space notes", "only `pages list|show|spaces`"),
+                     (f"{P} new notes \"Plan\" --worker research", "Spaces are read-only"),
+                     (f"{P} mkspace \"Ideas\"", "Spaces are read-only"),
                      (f"{P} list > /tmp/pages.txt", "not write to /tmp/pages.txt"),
                      (f"{P} list | head -3", "not run `head`"),
                      (B + "reply in_1 hi", "not run")]:
@@ -612,7 +767,7 @@ def selftest():
           f"variables refused; tool paths join cwd" + ("" if ok else f"  {got}"))
     check("drafts: Write page draft", "s-drafts", "Write", {"file_path": page}, "allow")
     check("drafts: Write outside", "s-drafts", "Write", {"file_path": "/tmp/notes.md"}, "deny",
-          "Scribe is drafts-only: write to the outbox instead")
+          "Scribe has the drafts preset: write to its outbox instead")
     check("drafts: Write another worker's outbox", "s-drafts", "Write",
           {"file_path": os.path.join(tmp, "outbox", "sales.jsonl")}, "deny")
     check("drafts: Write its decisions file", "s-drafts", "Write",
@@ -621,7 +776,7 @@ def selftest():
           {"file_path": os.path.join(tmp, "workers.json")}, "deny")
     check("drafts: Write ../ escape", "s-drafts", "Write",
           {"file_path": os.path.join(tmp, "spaces", ".drafts", "..", "..", "workers.json")}, "deny")
-    check("drafts: Agent", "s-drafts", "Agent", {"prompt": "x"}, "deny", "Agent is not allowed")
+    check("drafts: Agent", "s-drafts", "Agent", {"prompt": "x"}, "deny", "Agent is not open to it")
     # drafts: Bash read-only vs not
     for cmd in ["ls -la ~/Documents", "grep -rn TODO . | head -20", "git log --oneline -5",
                 "git -C ~/x diff HEAD~1 --stat", "cat a.txt 2>/dev/null || echo none",
@@ -658,6 +813,84 @@ def selftest():
     check("list: Bash", "s-list", "Bash", {"command": "ls"}, "deny", "Scout may only use Read")
     check("list: speaks on the call", "s-list", "Bash", {"command": say}, "allow")
     check("list: Grep not listed", "s-list", "Grep", {"pattern": "x"}, "deny")
+    # pages and approvals.worker_publish. Two drafts on disk: one for Notes, one for Memory.
+    drafts = os.path.join(tmp, "spaces", ".drafts")
+    os.makedirs(drafts)
+    for draft_id, space in (("ob_aaaaaaaaaaaa", "memory"), ("ob_bbbbbbbbbbbb", "notes")):
+        with open(os.path.join(drafts, draft_id + ".md"), "w") as f:
+            f.write(f"---\ntitle: Tone\nby: sales\nspace: {space}\nid: {draft_id}\n---\n\nShort.\n")
+    mem_path = os.path.join(drafts, "ob_aaaaaaaaaaaa.md")
+    cfg = os.path.join(tmp, "config.json")
+
+    def config(text):
+        if os.path.isdir(cfg):
+            os.rmdir(cfg)
+        elif os.path.exists(cfg):
+            os.remove(cfg)
+        if text is not None:
+            with open(cfg, "w") as f:
+                f.write(text)
+
+    pub_notes = f"{P} publish ob_bbbbbbbbbbbb --space notes"
+    new_page = f"{P} new notes \"Plan\" --worker sales --from - <<'EOF'\nx\nEOF"
+    opaque = f"echo $(date); {P} publish ob_bbbbbbbbbbbb"
+    # no config.json: the defaults (direct)
+    for cmd in [pub_notes, new_page, f"{P} mkspace \"Ideas\"", f"{pub_notes} && {P} list",
+                f"{P} draft notes \"Plan\" --worker sales --from -", opaque]:
+        check(f"direct (no config): full {cmd[len(P) - 5:].splitlines()[0][:40]!r}", "s-full",
+              "Bash", {"command": cmd}, "allow")
+    check("direct: list with Bash may publish", "s-bash", "Bash", {"command": pub_notes}, "allow")
+    for sid, cmd, why in [
+            ("s-full", f"{P} new notes \"Plan\" --from -", "--worker sales"),
+            ("s-full", f"{P} draft notes \"Plan\" --worker scribe --from -", "--worker sales"),
+            ("s-full", f"{P} publish ob_aaaaaaaaaaaa", "Memory draft"),
+            ("s-full", f"{P} publish {mem_path}", "Memory draft"),
+            ("s-full", f"{P} publish ob_bbbbbbbbbbbb --space memory", "Memory draft"),
+            ("s-full", f"python3 -I {P} publish ob_aaaaaaaaaaaa", "Memory draft"),
+            ("s-bash", f"{P} new notes \"Plan\"", "--worker hands"),
+            ("s-drafts", pub_notes, "closed to the drafts preset"),
+            ("s-drafts", f"{P} draft notes \"Plan\" --worker sales --from -", "--worker scribe"),
+            ("s-read", pub_notes, "only `pages list|show|spaces`")]:
+        check(f"direct: {sid[2:]} {cmd[len(P) - 5:][:44]!r} denied", sid, "Bash",
+              {"command": cmd}, "deny", why)
+    # approve: page writes are the owner's Approve for every worker, whatever its tools
+    config('{"approvals": {"worker_publish": "approve"}, "user_label": "USER"}')
+    for sid, cmd in [("s-full", pub_notes), ("s-full", new_page),
+                     ("s-full", f"{P} mkspace \"Ideas\""), ("s-full", opaque),
+                     ("s-bash", pub_notes)]:
+        check(f"approve: {sid[2:]} {cmd[len(P) - 5:].splitlines()[0][:40]!r} denied", sid,
+              "Bash", {"command": cmd}, "deny", "approvals.worker_publish")
+    check("approve: drafts preset message unchanged", "s-drafts", "Bash", {"command": pub_notes},
+          "deny", "closed to the drafts preset")
+    for label, sid, tool, inp in [
+            ("full pages draft", "s-full", "Bash",
+             {"command": f"{P} draft notes \"Plan\" --worker sales --from -"}),
+            ("full pages list", "s-full", "Bash", {"command": f"{P} list --space notes"}),
+            ("full git push", "s-full", "Bash", {"command": "git push"}),
+            ("full Write", "s-full", "Write", {"file_path": "/tmp/x.md"}),
+            ("drafts pages draft", "s-drafts", "Bash",
+             {"command": f"{P} draft notes \"Plan\" --worker scribe --from -"})]:
+        check(f"approve: {label} still allowed", sid, tool, inp, "allow")
+    config('{"approvals": {"worker_publish": " Approve "}}')
+    check("approve: value read case-blind", "s-full", "Bash", {"command": pub_notes}, "deny",
+          "approvals.worker_publish")
+    config('{"approvals": {"outward": "typed", "permission_prompts": "pill", '
+           '"worker_publish": "direct"}, "user_label": "ME", "workers": {"default_tools": "full"}}')
+    check("direct (explicit, other keys kept): publish", "s-full", "Bash", {"command": pub_notes},
+          "allow")
+    # an invalid config.json means the defaults and never an error
+    for label, text in [("not JSON", '{"approvals": '), ("a list", "[]"),
+                        ("approvals not an object", '{"approvals": "approve"}'),
+                        ("an unknown value", '{"approvals": {"worker_publish": "maybe"}}'),
+                        ("a number", '{"approvals": {"worker_publish": 1}}')]:
+        config(text)
+        check(f"invalid config ({label}): defaults", "s-full", "Bash", {"command": pub_notes},
+              "allow")
+    config(None)
+    os.mkdir(cfg)
+    check("invalid config (a folder): defaults", "s-full", "Bash", {"command": pub_notes}, "allow")
+    config(None)
+
     # an unknown preset is held to read, not waved through
     check("unknown preset held to read", "s-odd", "Write", {"file_path": outbox}, "deny", "read-only")
     # broken registry falls back to the last good cache; garbage stdin fails open
@@ -673,9 +906,10 @@ def selftest():
     with open(os.path.join(tmp, "guard.log")) as f:
         logged = f.read()
     checks += 1
-    ok = "deny scribe Bash" in logged and "error" in logged
+    ok = ("deny scribe Bash" in logged and "error" in logged
+          and "config.json unreadable" in logged)
     fails += not ok
-    print(f"{'PASS' if ok else 'FAIL'}  guard.log has denies and the error")
+    print(f"{'PASS' if ok else 'FAIL'}  guard.log has denies, the error and the bad config")
 
     # speed: the hook path, in-process timing of a warm cache (subprocess adds interpreter start)
     with open(os.path.join(tmp, "workers.json"), "w") as f:

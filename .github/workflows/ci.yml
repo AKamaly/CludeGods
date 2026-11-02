@@ -25,6 +25,9 @@ jobs:
       - name: Worker tool permissions (guard)
         run: python3 -I skills/colleague/bin/guard --selftest
 
+      - name: Permission prompts (permit)
+        run: python3 -I skills/colleague/bin/permit --selftest
+
       - name: Spaces and Pages (pages CLI)
         run: python3 -B -I -m unittest discover -s skills/spaces/tests -v
 

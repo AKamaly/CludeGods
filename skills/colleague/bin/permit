@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""permit: Claude Code PermissionRequest hook that lets the call pill answer the prompt.
+"""permit: Claude Code PermissionRequest hook that can let the call pill answer the prompt.
 
 Register (in ~/.claude/settings.json, see config/settings.example.json):
   "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command",
       "command": "$HOME/.claude/skills/colleague/bin/permit", "timeout": 60}]}]
 
-Flow:
-  - CallPill not running: exit 0, no output. Claude Code behaves exactly as without the hook.
-  - Otherwise write ~/.voicemode/call/permit/<id>.json and poll every 0.2 s for <id>.answer
-    ("allow" or "deny", written only by a physical click on the pill) for up to 50 s
-    (PERMIT_TIMEOUT_S overrides). allow/deny prints the decision JSON; timeout prints nothing,
-    so the in-app dialog takes over. Both files are always removed.
-  - During a live voice call, a spoken heads-up only. Voice can never answer: the only
-    writer of <id>.answer is the pill's click handler.
-Any error: exit 0, no output.
+Where prompts show is `approvals.permission_prompts` in ~/.voicemode/call/config.json:
+  - "app" (the default, also for a missing or invalid config): exit 0 at once, no output,
+    stdin unread. Claude Code shows its own dialog exactly as without the hook.
+  - "pill": only while a call is live (the call's session file is there and its ears are
+    running) and CallPill runs. Write ~/.voicemode/call/permit/<id>.json and poll every
+    0.2 s for <id>.answer ("allow" or "deny", written only by a physical click on the pill)
+    for up to 50 s (PERMIT_TIMEOUT_S overrides). allow/deny prints the decision JSON;
+    timeout prints nothing, so the in-app dialog takes over. Both files are always removed.
+    A spoken heads-up says a prompt is waiting. No live call: the app's dialog, as above.
+Voice never answers a prompt in either mode: the only writer of <id>.answer is the pill's
+click handler. Any error: exit 0, no output.
+
+    permit < payload.json     the hook
+    permit --selftest         both modes against a temp folder, asserts what it prints
 """
 import glob
 import json
@@ -25,14 +30,24 @@ import sys
 import time
 
 HOME = os.path.expanduser("~")
-CALL = os.path.join(HOME, ".voicemode", "call")
+CALL = os.environ.get("PERMIT_CALL_DIR") or os.path.join(HOME, ".voicemode", "call")
 PERMIT_DIR = os.environ.get("PERMIT_DIR") or os.path.join(CALL, "permit")
 CALL_BIN = os.path.join(HOME, ".claude", "skills", "colleague", "bin", "call")
 
 
+def prompt_mode():
+    """approvals.permission_prompts from config.json: "pill" or "app" (the default)."""
+    try:
+        with open(os.path.join(CALL, "config.json")) as f:
+            v = json.load(f).get("approvals", {}).get("permission_prompts")
+        return "pill" if str(v).strip().lower() == "pill" else "app"
+    except Exception:
+        return "app"
+
+
 def pill_running():
-    if os.environ.get("PERMIT_ASSUME_PILL") == "1":   # tests only
-        return True
+    if os.environ.get("PERMIT_ASSUME_PILL") in ("0", "1"):   # tests only
+        return os.environ["PERMIT_ASSUME_PILL"] == "1"
     try:
         return subprocess.run(["pgrep", "-x", "CallPill"], stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=2).returncode == 0
@@ -113,7 +128,7 @@ def heads_up(short):
 
 
 def main():
-    if not pill_running():
+    if prompt_mode() != "pill" or not live_call() or not pill_running():
         return None
     raw = sys.stdin.read()
     d = json.loads(raw) if raw.strip() else {}
@@ -158,7 +173,7 @@ def main():
         with open(req + ".tmp", "w") as f:
             json.dump(rec, f)
         os.replace(req + ".tmp", req)
-        if live_call() and os.environ.get("PERMIT_QUIET") != "1":
+        if os.environ.get("PERMIT_QUIET") != "1":
             heads_up(short)
         try:
             timeout = float(os.environ.get("PERMIT_TIMEOUT_S") or 50)
@@ -179,7 +194,123 @@ def main():
         cleanup()
 
 
+def selftest():
+    """Run this hook as Claude Code does, against a temp call folder. Never speaks
+    (PERMIT_QUIET) and never asks the real CallPill (PERMIT_ASSUME_PILL)."""
+    import shutil
+    import tempfile
+    import threading
+
+    tmp = tempfile.mkdtemp(prefix="permit-test-")
+    pdir = os.path.join(tmp, "permit")
+    payload = json.dumps({"session_id": "s-test", "tool_name": "Bash", "cwd": "/tmp",
+                          "hook_event_name": "PermissionRequest",
+                          "tool_input": {"command": "npm run deploy", "description": "Deploy"}})
+    fails = checks = 0
+    # 300 ms on a Mac in use; shared CI runners are slower and noisier
+    budget = 1500 if os.environ.get("CI") else 300
+
+    def setup(config=None, live=False, pill=True):
+        for name in ("config.json", "session", "ears.pid"):
+            p = os.path.join(tmp, name)
+            if os.path.isdir(p):
+                os.rmdir(p)
+            elif os.path.exists(p):
+                os.remove(p)
+        if config is not None:
+            with open(os.path.join(tmp, "config.json"), "w") as f:
+                f.write(config)
+        if live:
+            with open(os.path.join(tmp, "session"), "w") as f:
+                f.write("s-call\n")
+            with open(os.path.join(tmp, "ears.pid"), "w") as f:
+                f.write(str(os.getpid()))  # a live process: this test
+        return {**os.environ, "PERMIT_CALL_DIR": tmp, "PERMIT_DIR": pdir, "PERMIT_QUIET": "1",
+                "PERMIT_ASSUME_PILL": "1" if pill else "0", "PERMIT_TIMEOUT_S": "3"}
+
+    def run(env, answer=None):
+        """(stdout, return code, ms, request seen). answer: what the pill click writes."""
+        seen = []
+
+        def click():
+            end = time.time() + 2.5
+            while time.time() < end:
+                reqs = glob.glob(os.path.join(pdir, "*.json"))
+                if reqs:
+                    seen.append(json.load(open(reqs[0])))
+                    with open(reqs[0][:-5] + ".answer", "w") as f:
+                        f.write(answer)
+                    return
+                time.sleep(0.05)
+
+        t = threading.Thread(target=click) if answer else None
+        if t:
+            t.start()
+        t0 = time.time()
+        p = subprocess.run([sys.executable, os.path.realpath(__file__)], input=payload,
+                           capture_output=True, text=True, env=env, timeout=20)
+        ms = (time.time() - t0) * 1000
+        if t:
+            t.join()
+        return p.stdout.strip(), p.returncode, ms, seen
+
+    def check(label, ok, detail=""):
+        nonlocal fails, checks
+        checks += 1
+        fails += not ok
+        print(f"{'PASS' if ok else 'FAIL'}  {label}" + (f"  [{detail}]" if detail and not ok else ""))
+
+    def leftovers():
+        return os.listdir(pdir) if os.path.isdir(pdir) else []
+
+    # app mode (and anything that is not a valid "pill"): out of the way, at once
+    for label, config, live in [("no config.json", None, True),
+                                ("app", '{"approvals": {"permission_prompts": "app"}}', True),
+                                ("not JSON", '{"approvals": ', True), ("a list", "[]", True),
+                                ("unknown value", '{"approvals": {"permission_prompts": "x"}}', True),
+                                ("approvals not an object", '{"approvals": "pill"}', True)]:
+        out, rc, ms, _ = run(setup(config, live=live), answer=None)
+        check(f"app mode ({label}): prints nothing, returns at once ({ms:.0f} ms, live call)",
+              out == "" and rc == 0 and ms < budget and not leftovers(), f"{out!r} rc={rc}")
+    # pill mode, but no live call: the app's dialog
+    pill = '{"approvals": {"permission_prompts": "pill"}, "user_label": "USER"}'
+    out, rc, ms, _ = run(setup(pill, live=False))
+    check(f"pill mode, no call: prints nothing, returns at once ({ms:.0f} ms)",
+          out == "" and rc == 0 and ms < budget and not leftovers(), f"{out!r}")
+    env = setup(pill, live=True)
+    os.remove(os.path.join(tmp, "ears.pid"))
+    out, rc, ms, _ = run(env)
+    check(f"pill mode, session file but no ears: at once ({ms:.0f} ms)",
+          out == "" and rc == 0 and ms < budget and not leftovers(), f"{out!r}")
+    out, rc, ms, _ = run(setup(pill, live=True, pill=False))
+    check(f"pill mode, live call, CallPill not running: at once ({ms:.0f} ms)",
+          out == "" and rc == 0 and ms < budget and not leftovers(), f"{out!r}")
+    # pill mode during a live call: the pill's click answers
+    for answer, behavior in (("allow", "allow"), ("deny", "deny")):
+        out, rc, ms, seen = run(setup(pill, live=True), answer=answer)
+        try:
+            got = json.loads(out)["hookSpecificOutput"]["decision"]["behavior"]
+        except Exception:
+            got = None
+        check(f"pill mode, live call: a click on {answer} answers ({ms:.0f} ms)",
+              got == behavior and rc == 0 and not leftovers()
+              and bool(seen) and seen[0].get("short") == "Deploy", f"{out!r} {seen[:1]}")
+    out, rc, ms, _ = run(setup(' {"approvals": {"permission_prompts": " PILL "}} ', live=True),
+                         answer="allow")
+    check("pill mode: value read case-blind", '"allow"' in out, f"{out!r}")
+    env = setup(pill, live=True)
+    env["PERMIT_TIMEOUT_S"] = "0.5"
+    out, rc, ms, _ = run(env)
+    check(f"pill mode, live call, no click: prints nothing after the timeout ({ms:.0f} ms)",
+          out == "" and rc == 0 and 450 < ms and not leftovers(), f"{out!r}")
+    shutil.rmtree(tmp, ignore_errors=True)
+    print(f"\n{checks - fails} passed, {fails} failed")
+    return fails
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        raise SystemExit(1 if selftest() else 0)
     try:
         verdict = main()
     except Exception:

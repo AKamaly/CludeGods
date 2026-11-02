@@ -6,7 +6,7 @@
   pages list [--space S] [--q text]          the pages, as a tree (flat with --q)
   pages show S/page                          print a page, front matter included
   pages new S "Title" [--parent P] [--from file|-] [--worker K]
-                                             write a page now (only when the owner asks)
+                                             write a page now
   pages draft S[/page] "Title" --worker K [--parent P] [--from file|-]
                                              save a draft for review: S for a new page,
                                              S/page for a revision of that page
@@ -20,9 +20,15 @@ Files live under ~/.voicemode/call/spaces/:
                                 (and page, base_updated, base_hash for a revision)
 
 `draft` also appends a `page` item to ~/.voicemode/call/outbox/<worker>.jsonl, so the owner
-reviews it in the Workers pane; Approve runs `pages publish`. `publish` refuses to overwrite
-a page that changed since its draft was made (exit 3) unless --force. A draft published
-twice lands once: the second run answers with the page the first one saved.
+reviews it in the Workers pane; Approve runs `pages publish`. A worker may also publish its
+own draft, or save with `new --worker K`, unless `approvals.worker_publish` in
+~/.voicemode/call/config.json is "approve" (the guard hook closes `publish` to workers then,
+and `new --worker K` is refused here, exit 4). A worker never saves to Memory with `new`:
+every worker follows Memory, so it changes only through a draft the owner approves.
+`publish` records the draft's outbox item as approved, so it leaves "needs your yes".
+`publish` refuses to overwrite a page that changed since its draft was made (exit 3) unless
+--force. A draft published twice lands once: the second run answers with the page the
+first one saved.
 
 Add --json to spaces, list, show, new, draft or publish for machine-readable output.
 Exit codes: 0 done, 1 error, 2 usage, 3 the page changed since the draft, 4 not allowed.
@@ -75,7 +81,7 @@ NOTES_WELCOME = """# Welcome to Notes
 Notes is a space for working documents: briefs, research, meeting notes and drafts.
 
 - Ask a worker about a page from the Spaces pane.
-- Workers save pages as drafts. You approve them in the Workers pane before they land.
+- Workers save pages here, or leave drafts for your Approve in the Workers pane.
 - Add a subpage to keep related pages together.
 """
 
@@ -444,6 +450,46 @@ def require_write(worker: dict, space: str) -> None:
         )
 
 
+def worker_publish() -> str:
+    """approvals.worker_publish from config.json: "direct" (the default) or "approve".
+    A missing or invalid file means the default."""
+    try:
+        value = json.loads((call_dir() / "config.json").read_text(encoding="utf-8"))["approvals"]["worker_publish"]
+    except Exception:
+        return "direct"
+    return "approve" if str(value).strip().lower() == "approve" else "direct"
+
+
+def record_approved(worker_key: str, draft_id: str, at: str) -> None:
+    """Mark a published draft's outbox item approved, so it leaves "needs your yes" in the
+    Workers pane. Best effort: the page is already saved."""
+    if not WORKER_RE.fullmatch(worker_key or "") or not ID_RE.fullmatch(draft_id):
+        return
+    line = json.dumps({"id": draft_id, "decision": "approved", "at": at, "via": "pages publish"})
+    path = call_dir() / "outbox" / f"{worker_key}.decisions.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a+", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                for old in f.read().splitlines():
+                    with contextlib.suppress(ValueError, AttributeError):
+                        if json.loads(old).get("id") == draft_id:
+                            return  # already decided (the pane's Approve, say)
+                f.seek(0, os.SEEK_END)
+                if f.tell() > 0:
+                    f.seek(f.tell() - 1)
+                    if f.read(1) != "\n":
+                        f.write("\n")
+                f.write(line + "\n")
+                f.flush()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
 def append_outbox(worker_key: str, item: dict) -> Path:
     path = call_dir() / "outbox" / f"{worker_key}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -592,6 +638,14 @@ def cmd_new(args) -> int:
     if args.worker:
         worker = registry_worker(args.worker)
         require_write(worker, space)
+        if space == "memory":
+            raise Fail("Memory changes only through a draft the owner approves (every worker "
+                       f"follows it): pages draft memory \"{title}\" --worker {args.worker} --from -",
+                       EXIT_DENIED)
+        if worker_publish() == "approve":
+            raise Fail("Workers save pages as drafts for the owner's Approve here "
+                       f"(approvals.worker_publish is \"approve\"): pages draft {space} \"{title}\" "
+                       f"--worker {args.worker} --from -", EXIT_DENIED)
         by = args.worker
     content = read_content(args.source)
     ensure_defaults()
@@ -660,7 +714,8 @@ def cmd_draft(args) -> int:
         item["page"] = target
     append_outbox(args.worker, item)
     emit(args, item, f"Draft {draft_id} saved for review: {path}\n"
-                     f"The owner approves it in the Workers pane; it lands as a page only then.")
+                     f"It lands as a page on the owner's Approve in the Workers pane, or "
+                     f"when published with `pages publish {draft_id}`.")
     return 0
 
 
@@ -735,6 +790,8 @@ def cmd_publish(args) -> int:
         receipt = {"id": draft_id, "space": space, "page": slug, "path": str(dest), "at": stamp}
         write_atomic(guard(receipt_path), json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
         path.unlink()
+    if by != "you":
+        record_approved(by, draft_id, stamp)
     for note in notes:
         print(f"Note: {note}", file=sys.stderr)
     emit(args, receipt, f"Published {space}/{slug}: {dest}")
@@ -767,7 +824,7 @@ def parser() -> argparse.ArgumentParser:
     sp = add("show", "print a page")
     sp.add_argument("target", metavar="S/page")
 
-    sp = add("new", "write a page now (only when the owner asks)")
+    sp = add("new", "write a page now")
     sp.add_argument("space", metavar="S")
     sp.add_argument("title")
     sp.add_argument("--parent", metavar="P")

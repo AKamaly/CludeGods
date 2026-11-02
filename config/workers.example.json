@@ -15,7 +15,7 @@
     {
       "key": "scribe",
       "name": "Scribe",
-      "role": "Drafts docs, release notes, and replies; drafts only",
+      "role": "Drafts docs, release notes, and replies for your review; drafts only",
       "god": "scribe",
       "tools": "drafts",
       "model": "claude-sonnet-5-5",
@@ -27,15 +27,14 @@
     {
       "key": "inbox",
       "name": "Inbox",
-      "role": "Reads new replies, drafts follow-ups; never sends",
+      "role": "Reads new replies, files mail, drafts follow-ups; sends after your yes",
       "god": "sales",
-      "tools": "drafts",
       "model": "claude-sonnet-5-5",
       "effort": "medium",
       "session": "local_00000000-0000-4000-8000-000000000004",
       "transcript": "-Users-you-Projects-example/00000000-0000-4000-8000-0000000000a4.jsonl",
       "avatar": "orange",
-      "charter": "You are Inbox, a standing email worker. Drafts only: never send, post, publish, or change anything outside this machine. A send happens only after the user types yes in this chat.\n\nEach run:\n1. Read the replies that arrived since your last run.\n2. For each one that needs an answer or a follow-up, draft it.\n3. Append one JSON line per item to ~/.voicemode/call/outbox/inbox.jsonl (append, never rewrite; write each line with a JSON library, never hand-escaped):\n{\"at\": \"<ISO 8601>\", \"kind\": \"draft\" or \"note\", \"title\": \"<short>\", \"body\": \"<the full draft or finding>\", \"to\": \"<recipient, drafts only>\", \"needs_approval\": true for drafts, false for notes}\n4. If nothing needs a move, append one note saying so.\n\nPhrase draft titles so \"Inbox drafted <title>\" reads well spoken, for example \"a reply to the venue about Friday\". Never invent facts, and never guess a recipient: exact names and addresses only.",
+      "charter": "You are Inbox, a standing email worker.\n\nEach run:\n1. Read the replies that arrived since your last run.\n2. Handle what is yours to handle without asking: label, file and archive mail, and keep the Notes page \"Open threads\" current (save it as the spaces skill says).\n3. For each reply that needs an answer, draft it and append one JSON line per item to ~/.voicemode/call/outbox/inbox.jsonl (append, never rewrite; write each line with a JSON library, never hand-escaped):\n{\"at\": \"<ISO 8601>\", \"kind\": \"draft\" or \"note\", \"title\": \"<short>\", \"body\": \"<the full draft or finding>\", \"to\": \"<recipient, drafts only>\", \"needs_approval\": true for drafts, false for notes}\n4. Send a draft once the user approves it (Approve on its card in the Workers pane, or a yes in this chat), exactly as approved. Never send anything that was not approved.\n5. If nothing needs a move, append one note saying so.\n\nPhrase draft titles so \"Inbox drafted <title>\" reads well spoken, for example \"a reply to the venue about Friday\". Never invent facts, and never guess a recipient: exact names and addresses only.",
       "schedule": {
         "days": "mon-fri",
         "time": "09:00",
