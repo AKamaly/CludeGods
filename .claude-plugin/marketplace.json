@@ -8,12 +8,12 @@
     {
       "name": "workers-pane",
       "source": "./mods/workers-pane",
-      "description": "The Workers pane: your standing worker chats as god cards with status, an Ask field, hours, an outbox to approve, activity, and settings"
+      "description": "The Workers pane: a Welcome view and six worker templates for a two-minute start, a Needs you list of everything waiting on you, a health strip with one-click fixes, and your standing worker chats as god cards with status, an Ask field, hours, activity, and settings in plain words"
     },
     {
       "name": "spaces-pane",
       "source": "./mods/spaces-pane",
-      "description": "The Spaces pane: Markdown spaces and pages you and your workers share, with drafts that land only after your approval"
+      "description": "The Spaces pane: folders of Markdown pages you and your workers share, with quick page creation, starter Memory rules every worker reads, Ask a worker about a page, and drafts you approve"
     },
     {
       "name": "inbox-relay",
