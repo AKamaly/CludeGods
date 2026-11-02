@@ -19,6 +19,13 @@
 //            (~/.voicemode/call/accepted), not raw mic turns: on speakers most raw turns are echo.
 //            ~/.voicemode/call/muted present = Muted (red mic-slash on the mic button).
 // Buttons:   mic = `call mute` / `call unmute`; stop = `call stopwork`. Always visible.
+//            Push to talk (config.json "call": {"mic": "talk"}): mic = `call talk`, "talk now";
+//            the card says Press to talk, One sec while the mic opens, then Go ahead, and the
+//            button fills while a turn is open (~/.voicemode/call/talk). Right-click (or
+//            control-click) the mic button to switch between Open mic and Push to talk
+//            (`call mode open|talk`).
+// Screen:    opens on the screen under the mouse, at the spot it was last dragged to on that
+//            screen (per display, by its UUID; default: top-right, 16 pt in). Kept in UserDefaults.
 // Compact:   the arrows button (top-right, on hover) folds the card to just the god + mic/stop,
 //            and back. Kept in UserDefaults.
 // Resize:    scroll or pinch over the card, 0.6x...1.75x, top-right anchored, kept in UserDefaults.
@@ -43,7 +50,8 @@
 //            and ad-hoc sign with a fixed identifier and designated requirement, so macOS keeps the
 //            app's grants across rebuilds.
 // Snapshot:  ./pill --snapshot out.png   (every state, light and dark, into one PNG; no window)
-// Demo:      CALLPILL_DEMO=<listening|you|thinking|claude|muted|off|happy> ./pill   (a fixed state for
+// Selftest:  ./pill --selftest   (the state rules and the placement math; no window)
+// Demo:      CALLPILL_DEMO=<listening|you|thinking|claude|muted|off|happy|ptt|arming|armed> ./pill   (a fixed state for
 //            screenshots: never reads the logs, never runs `call`, saves nothing). Extras:
 //            CALLPILL_DEMO_LINE (caption), CALLPILL_DEMO_EXPAND=1 (list open), CALLPILL_DEMO_HOVER=1,
 //            CALLPILL_DEMO_COMPACT=1, CALLPILL_DEMO_AT=right,top (inset from the screen's top-right),
@@ -307,6 +315,7 @@ final class GodView: NSView {
 
 enum Phase: CaseIterable {
     case listening, you, thinking, claude, off, muted
+    case ptt, arming, armed          // push to talk: waiting for a press, the mic opening, open
 
     var label: String {
         switch self {
@@ -316,13 +325,16 @@ enum Phase: CaseIterable {
         case .claude: return "Speaking"
         case .off: return "Mic off"
         case .muted: return "Muted"
+        case .ptt: return "Press to talk"
+        case .arming: return "One sec"
+        case .armed: return "Go ahead"
         }
     }
 
     var god: GodState {
         switch self {
-        case .listening, .off, .muted: return .idle
-        case .you: return .listen
+        case .listening, .off, .muted, .ptt, .arming: return .idle
+        case .you, .armed: return .listen
         case .thinking: return .work
         case .claude: return .talk
         }
@@ -336,8 +348,34 @@ enum Phase: CaseIterable {
         case "claude", "talk", "speaking": return .claude
         case "off": return .off
         case "muted": return .muted
+        case "ptt", "push": return .ptt
+        case "arming": return .arming
+        case "armed", "goahead": return .armed
         default: return nil
         }
+    }
+
+    /// What the card shows, from what the call is doing. Push to talk: the mic is off between
+    /// turns by design, so that is "Press to talk", not "Mic off"; a turn the user opened wins
+    /// over Thinking, and Speaking wins over both (a press cuts the speech a moment later).
+    struct Inputs {
+        var muted = false, micOff = false, speaking = false, hearing = false
+        var thinking = false, permits = false, talkMode = false, talkOpen = false, talkLive = false
+    }
+
+    static func decide(_ i: Inputs) -> Phase {
+        if i.talkMode && !i.muted {
+            if i.speaking { return .claude }
+            if i.talkOpen { return !i.talkLive ? .arming : i.hearing ? .you : .armed }
+            if i.thinking || i.permits { return .thinking }
+            return .ptt
+        }
+        if i.muted { return .muted }          // `call mute` also stops the ears: Muted wins over Mic off
+        if i.micOff { return .off }
+        if i.speaking { return .claude }
+        if i.hearing { return .you }
+        if i.thinking || i.permits { return .thinking }   // a permission request waits
+        return .listening
     }
 }
 
@@ -370,8 +408,11 @@ final class RoundButton: NSView {
     enum Kind { case mic, stop }
     let kind: Kind
     var muted = false { didSet { if muted != oldValue { needsDisplay = true } } }
+    var talk = false { didSet { if talk != oldValue { needsDisplay = true } } }     // push to talk
+    var armed = false { didSet { if armed != oldValue { needsDisplay = true } } }   // a talk turn is open
     var theme = Theme.light { didSet { needsDisplay = true } }
     var action: (() -> Void)?
+    var menuAction: ((NSEvent) -> Void)?   // right-click or control-click
     private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
 
     init(kind: Kind, tip: String) {
@@ -393,23 +434,36 @@ final class RoundButton: NSView {
         let r = min(bounds.width, bounds.height) / 2
         return hypot(q.x - bounds.midX, q.y - bounds.midY) <= r ? self : nil
     }
-    override func mouseDown(with e: NSEvent) { pressed = true }
-    override func mouseDragged(with e: NSEvent) { pressed = bounds.contains(convert(e.locationInWindow, from: nil)) }
+    private var menuDown = false
+    override func mouseDown(with e: NSEvent) {
+        if e.modifierFlags.contains(.control), let m = menuAction { menuDown = true; m(e); return }
+        pressed = true
+    }
+    override func rightMouseDown(with e: NSEvent) { menuAction?(e) }
+    override func mouseDragged(with e: NSEvent) { if !menuDown { pressed = bounds.contains(convert(e.locationInWindow, from: nil)) } }
     override func mouseUp(with e: NSEvent) {
+        if menuDown { menuDown = false; return }
         let inside = bounds.contains(convert(e.locationInWindow, from: nil))
         pressed = false
         if inside { action?() }
     }
     override func draw(_ dirty: NSRect) {
-        RoundButton.paint(in: bounds, kind: kind, muted: muted, theme: theme, pressed: pressed)
+        RoundButton.paint(in: bounds, kind: kind, muted: muted, talk: talk, armed: armed, theme: theme, pressed: pressed)
     }
 
-    static func paint(in b: NSRect, kind: Kind, muted: Bool, theme t: Theme, pressed: Bool) {
+    static func paint(in b: NSRect, kind: Kind, muted: Bool, talk: Bool = false, armed: Bool = false,
+                      theme t: Theme, pressed: Bool) {
         let d = min(b.width, b.height)
         let c = NSRect(x: b.midX - d / 2, y: b.midY - d / 2, width: d, height: d).insetBy(dx: 0.5, dy: 0.5)
         let p = NSBezierPath(ovalIn: c)
         p.lineWidth = 1
         switch kind {
+        case .mic where talk && !muted:
+            // push to talk: an accent "talk now" button, filled while the turn is open
+            (armed ? t.accent : t.micFill).setFill(); p.fill()
+            t.accent.withAlphaComponent(armed ? 1 : 0.6).setStroke(); p.lineWidth = armed ? 1 : 1.5; p.stroke()
+            drawSymbol(armed ? "mic.fill" : "mic", size: d * 0.38, weight: armed ? .semibold : .regular,
+                       color: armed ? .white : t.accent, center: NSPoint(x: b.midX, y: b.midY))
         case .mic:
             (muted ? t.mutedFill : t.micFill).setFill(); p.fill()
             (muted ? t.mutedStroke : t.micStroke).setStroke(); p.stroke()
@@ -552,8 +606,12 @@ final class CardView: NSView {
 
     var name = "Claude" { didSet { if name != oldValue { needsDisplay = true } } }
     var timerText: String? { didSet { if timerText != oldValue { needsDisplay = true } } }
-    var muted = false {
-        didSet { if muted != oldValue { mic.muted = muted; mic.toolTip = muted ? "Unmute" : "Mute" } }
+    var muted = false { didSet { if muted != oldValue { mic.muted = muted; micTip() } } }
+    var talkMode = false { didSet { if talkMode != oldValue { mic.talk = talkMode; micTip() } } }
+    var talkArmed = false { didSet { if talkArmed != oldValue { mic.armed = talkArmed; micTip() } } }
+    private func micTip() {
+        mic.toolTip = talkMode ? (talkArmed ? "Done talking" : "Talk now (push to talk)")
+                               : (muted ? "Unmute" : "Mute")
     }
     var pendingCount = 0 { didSet { if pendingCount != oldValue { updateControls(animated: true) } } }
     var expanded = false { didSet { if expanded != oldValue { updateControls(animated: true) } } }
@@ -561,6 +619,8 @@ final class CardView: NSView {
     private(set) var hovered = false { didSet { if hovered != oldValue { updateControls(animated: true) } } }
 
     var onMute: ((Bool) -> Void)?       // the state to switch to (true = mute)
+    var onTalk: (() -> Void)?           // push to talk: the mic button means "talk now"
+    var onMode: ((String) -> Void)?     // "open" or "talk", from the mic button's menu
     var onStop: (() -> Void)?
     var onZoom: ((CGFloat) -> Void)?    // additive change to the target scale
     var onExpand: (() -> Void)?         // toggle the waiting list
@@ -571,7 +631,11 @@ final class CardView: NSView {
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
         for v in [god, caption, mic, stop, chevron, toggle] as [NSView] { addSubview(v) }
-        mic.action = { [weak self] in guard let self = self else { return }; self.onMute?(!self.muted) }
+        mic.action = { [weak self] in
+            guard let self = self else { return }
+            if self.talkMode { self.onTalk?() } else { self.onMute?(!self.muted) }
+        }
+        mic.menuAction = { [weak self] e in self?.showMicMenu(e) }
         stop.action = { [weak self] in self?.onStop?() }
         chevron.action = { [weak self] in self?.onExpand?() }
         toggle.action = { [weak self] in self?.onCompact?() }
@@ -584,6 +648,22 @@ final class CardView: NSView {
     override var mouseDownCanMoveWindow: Bool { true }
 
     func sc(_ r: NSRect) -> NSRect { NSRect(x: r.minX * k, y: r.minY * k, width: r.width * k, height: r.height * k) }
+
+    /// The mic button's menu: the two mic modes, the current one checked.
+    func showMicMenu(_ e: NSEvent) {
+        let m = NSMenu()
+        for (title, mode) in [("Open mic", "open"), ("Push to talk", "talk")] {
+            let it = NSMenuItem(title: title, action: #selector(pickMode(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = mode
+            it.state = (mode == "talk") == talkMode ? .on : .off
+            m.addItem(it)
+        }
+        NSMenu.popUpContextMenu(m, with: e, for: mic)
+    }
+    @objc func pickMode(_ sender: NSMenuItem) {
+        if let mode = sender.representedObject as? String { onMode?(mode) }
+    }
 
     /// Lay the card out at scale `k` inside the current bounds (the panel's pixel-rounded size).
     func configure(k: CGFloat, compact: Bool) {
@@ -1097,6 +1177,17 @@ final class Pill: NSObject, NSApplicationDelegate {
     let mutedURL = callDir.appendingPathComponent("muted")
     var muteClick: (state: Bool, at: Date)?
     var demoMuted = false
+    // Push to talk: the mode is config.json "call": {"mic": "talk"} (read every second); a turn is
+    // open while ~/.voicemode/call/talk exists (`call talk` writes it, its watcher removes it).
+    let configURL = callDir.appendingPathComponent("config.json")
+    let talkURL = callDir.appendingPathComponent("talk")
+    var talkMode = false
+    var talkClick: (open: Bool, at: Date)?      // the click's result, shown until the file catches up
+    var lastStart = Date.distantPast, lastStop = Date.distantPast   // the ears' capture events
+    // Where the card sits on each screen: its top-right corner's inset from that screen's
+    // visible top-right, by display UUID. Set by dragging; not by our own moves.
+    static let positionsKey = "callCardPositions"
+    var placing = false
     // Card scale and compact flag, anchored top-right, persisted (new keys: the card is new).
     var scale: CGFloat = 1, scaleTarget: CGFloat = 1
     var compact = false
@@ -1129,6 +1220,8 @@ final class Pill: NSObject, NSApplicationDelegate {
         panel.contentView = view
 
         view.onMute = { [weak self] on in self?.setMuted(on) }
+        view.onTalk = { [weak self] in self?.pressTalk() }
+        view.onMode = { [weak self] mode in self?.runCall("mode \(mode == "talk" ? "talk" : "open")") }
         view.onStop = { [weak self] in self?.runCall("stopwork") }
         view.onZoom = { [weak self] d in self?.zoom(by: d) }
         view.onExpand = { [weak self] in self?.setExpanded(!(self?.view.expanded ?? false)) }
@@ -1142,14 +1235,16 @@ final class Pill: NSObject, NSApplicationDelegate {
             compact = demo?.compact ?? false
         }
         scaleTarget = scale
-        if let screen = NSScreen.main {
-            let f = screen.visibleFrame
+        if let screen = Pill.screenUnderMouse() {
             let S = scaledSize(scale, backing: screen.backingScaleFactor)
             panel.setContentSize(S)
             applyScale()
-            let inset = demo?.at ?? NSPoint(x: 16, y: 16)   // top-right, 16 pt in from both edges
-            panel.setFrameOrigin(NSPoint(x: f.maxX - S.width - inset.x, y: f.maxY - S.height - inset.y))
+            place(on: screen)
         }
+        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: panel,
+                                               queue: nil) { [weak self] _ in self?.panelMoved() }
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: nil) { [weak self] _ in self?.screensChanged() }
         panel.orderFrontRegardless()
         panel.invalidateShadow()
         view.god.start()
@@ -1167,7 +1262,10 @@ final class Pill: NSObject, NSApplicationDelegate {
             view.forceHover = demo?.hover ?? false
         }
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
-        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshPending(); self?.refreshFocus() }
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshPending(); self?.refreshFocus(); self?.refreshMode()
+        }
+        refreshMode()
         refreshFocus()
         refreshPending()
         render()
@@ -1201,6 +1299,71 @@ final class Pill: NSObject, NSApplicationDelegate {
         }
         view.name = name
         view.god.kind = kind
+    }
+
+    /// Push to talk on? config.json "call": {"mic": "talk"}; anything else (or no file) is open.
+    func refreshMode() {
+        if let d = demo { talkMode = [.ptt, .arming, .armed].contains(d.phase) || env["CALLPILL_DEMO_TALK"] == "1"; return }
+        var on = false
+        if let data = try? Data(contentsOf: configURL),
+           let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let c = o["call"] as? [String: Any], (c["mic"] as? String) == "talk" { on = true }
+        talkMode = on
+    }
+
+    // MARK: which screen, and where on it
+
+    /// The screen the user is on: the one under the mouse, else the key window's, else any.
+    static func screenUnderMouse() -> NSScreen? {
+        let p = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(p, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// A stable key for a display: its UUID (survives reboots and rearranging), else its name.
+    static func displayKey(_ s: NSScreen) -> String {
+        if let n = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+           let u = CGDisplayCreateUUIDFromDisplayID(CGDirectDisplayID(n.uint32Value))?.takeRetainedValue(),
+           let str = CFUUIDCreateString(nil, u) as String? {
+            return str
+        }
+        return s.localizedName
+    }
+
+    /// The card's origin for a top-right inset on a visible frame, kept wholly on that frame.
+    static func origin(size S: NSSize, visible f: NSRect, inset: NSPoint) -> NSPoint {
+        let x = max(f.minX, min(f.maxX - S.width, f.maxX - S.width - inset.x))
+        let y = max(f.minY, min(f.maxY - S.height, f.maxY - S.height - inset.y))
+        return NSPoint(x: x, y: y)
+    }
+
+    func savedInset(for s: NSScreen) -> NSPoint? {
+        guard let all = UserDefaults.standard.dictionary(forKey: Pill.positionsKey),
+              let v = all[Pill.displayKey(s)] as? [Double], v.count == 2, v.allSatisfy({ $0.isFinite }) else { return nil }
+        return NSPoint(x: v[0], y: v[1])
+    }
+
+    func place(on screen: NSScreen) {
+        let inset = demo?.at ?? savedInset(for: screen) ?? NSPoint(x: 16, y: 16)   // default: top-right, 16 pt in
+        placing = true
+        panel.setFrameOrigin(Pill.origin(size: panel.frame.size, visible: screen.visibleFrame, inset: inset))
+        placing = false
+    }
+
+    /// The user dragged the card: remember the spot for the screen it is on now.
+    func panelMoved() {
+        guard demo == nil, !placing, let s = panel.screen else { return }
+        let v = s.visibleFrame, f = panel.frame
+        var all = UserDefaults.standard.dictionary(forKey: Pill.positionsKey) ?? [:]
+        all[Pill.displayKey(s)] = [Double(v.maxX - f.maxX), Double(v.maxY - f.maxY)]
+        UserDefaults.standard.set(all, forKey: Pill.positionsKey)
+    }
+
+    /// A display went away or changed size: if the card is now off every screen, bring it back
+    /// to the screen under the mouse.
+    func screensChanged() {
+        guard !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(panel.frame) }),
+              let s = Pill.screenUnderMouse() else { return }
+        place(on: s)
     }
 
     // MARK: the heard log
@@ -1284,9 +1447,13 @@ final class Pill: NSObject, NSApplicationDelegate {
             let ev = obj["event"] as? String
             if ev == "listen-started" {
                 micOff = false
+                lastStart = Date()
                 if let ts = obj["ts"] as? String, let d = iso.date(from: ts) { callStart = d }
             }
-            if ev == "listen-stopped" { micOff = true; speaking = false; thinking = false }
+            if ev == "listen-stopped" {
+                micOff = true; lastStop = Date()
+                if !talkMode { speaking = false; thinking = false }   // a talk turn closing is not a hang-up
+            }
         default: break
         }
     }
@@ -1319,6 +1486,29 @@ final class Pill: NSObject, NSApplicationDelegate {
         muteClick = (on, Date())
         runCall(on ? "mute" : "unmute")
         render()
+    }
+
+    /// Push to talk: `call talk` opens the mic for one turn (a second press closes it).
+    func pressTalk() {
+        let open = !talkOpen
+        if demo != nil { talkClick = (open, Date()); render(); return }
+        talkClick = (open, Date())
+        runCall("talk")
+        render()
+    }
+
+    var talkOpen: Bool {
+        if let c = talkClick, Date().timeIntervalSince(c.at) < 1.5 { return c.open }
+        if let d = demo { return d.phase == .arming || d.phase == .armed }
+        return FileManager.default.fileExists(atPath: talkURL.path)
+    }
+
+    /// The capture the open talk turn started is up (its listen-started came after the press).
+    var talkLive: Bool {
+        if let d = demo { return d.phase == .armed }
+        let pressed = (try? FileManager.default.attributesOfItem(atPath: talkURL.path))?[.modificationDate] as? Date
+            ?? talkClick?.at ?? .distantFuture
+        return lastStart > lastStop && lastStart >= pressed.addingTimeInterval(-0.5)
     }
 
     var isMuted: Bool {
@@ -1502,7 +1692,9 @@ final class Pill: NSObject, NSApplicationDelegate {
     func resizeAnchored() {
         let f = panel.frame
         let S = scaledSize(scale, backing: panel.backingScaleFactor)
+        placing = true
         panel.setFrame(NSRect(x: f.maxX - S.width, y: f.maxY - S.height, width: S.width, height: S.height), display: false)
+        placing = false
         applyScale()
         if !permits.isEmpty { positionPermit() }
         if view.expanded { positionList() }
@@ -1528,14 +1720,14 @@ final class Pill: NSObject, NSApplicationDelegate {
             }
             // a reply that only went to the chat never produces 'saying'; do not stay stuck
             if thinking && now.timeIntervalSince(thinkingSince) > 45 { thinking = false; sayingAt = now }
-            if isMuted { next = .muted }          // `call mute` also stops the ears: Muted wins over Mic off
-            else if micOff { next = .off }
-            else if speaking { next = .claude }
-            else if now.timeIntervalSince(lastPartial) < 1.5 { next = .you }
-            else if thinking || !permits.isEmpty { next = .thinking }   // a permission request waits
-            else { next = .listening }
+            next = Phase.decide(Phase.Inputs(
+                muted: isMuted, micOff: micOff, speaking: speaking,
+                hearing: now.timeIntervalSince(lastPartial) < 1.5, thinking: thinking,
+                permits: !permits.isEmpty, talkMode: talkMode, talkOpen: talkOpen, talkLive: talkLive))
         }
         view.muted = next == .muted
+        view.talkMode = talkMode
+        view.talkArmed = talkMode && [.arming, .armed, .you].contains(next) && (demo != nil || talkOpen)
         // happy: one loop when a reply has ended and the call has gone quiet again
         if demo == nil, next == .listening, saidAt > happyFor,
            now.timeIntervalSince(saidAt) >= 0.5, now.timeIntervalSince(saidAt) < 3 {
@@ -1569,13 +1761,15 @@ func snapshot(to out: String) {
 
     func card(_ dark: Bool, _ phase: Phase, line: String? = nil, compact: Bool = false, hover: Bool = false,
               pending: Int = 0, expanded: Bool = false, god: GodState? = nil, kind: String = "colleague",
-              name: String = "Claude") -> CardView {
+              name: String = "Claude", talk: Bool = false) -> CardView {
         let v = CardView(frame: NSRect(origin: .zero, size: CardGeo(compact: compact).size))
         v.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         v.applyTheme()
         v.configure(k: 1, compact: compact)
         v.name = name
         v.muted = phase == .muted
+        v.talkMode = talk
+        v.talkArmed = talk && [.arming, .armed, .you].contains(phase)
         v.pendingCount = pending
         v.expanded = expanded
         v.forceHover = hover
@@ -1615,7 +1809,9 @@ func snapshot(to out: String) {
         let row: [CardView] = [
             card(dark, .listening), card(dark, .claude, line: "Hmm, let me look. Reading the CI log."),
             card(dark, .you), card(dark, .thinking), card(dark, .muted), card(dark, .listening, god: .happy),
+            card(dark, .ptt, talk: true), card(dark, .armed, talk: true),
             card(dark, .listening, compact: true), card(dark, .thinking, compact: true, hover: true, pending: 2),
+            card(dark, .ptt, compact: true, talk: true),
         ]
         for v in row {
             placed.append(Placed(view: v, x: x, y: y, god: (v.god, 5)))
@@ -1692,7 +1888,50 @@ func snapshot(to out: String) {
     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
 }
 
+/// The state rules and the placement math, without a window. Prints each check; exit 1 on a failure.
+func selftest() -> Int32 {
+    var fails = 0
+    func check<T: Equatable>(_ name: String, _ got: T, _ want: T) {
+        let ok = got == want
+        if !ok { fails += 1 }
+        print("\(ok ? "PASS" : "FAIL")  pill: \(name)" + (ok ? "" : "\n      got  \(got)\n      want \(want)"))
+    }
+    typealias I = Phase.Inputs
+    check("open mic: muted > mic off > speaking > you > thinking > listening",
+          [Phase.decide(I(muted: true, micOff: true, speaking: true)), Phase.decide(I(micOff: true, speaking: true)),
+           Phase.decide(I(speaking: true, hearing: true)), Phase.decide(I(hearing: true, thinking: true)),
+           Phase.decide(I(permits: true)), Phase.decide(I())],
+          [Phase.muted, .off, .claude, .you, .thinking, .listening])
+    check("push to talk: the mic off between turns is Press to talk, not Mic off",
+          [Phase.decide(I(micOff: true, talkMode: true)), Phase.decide(I(micOff: true, thinking: true, talkMode: true))],
+          [Phase.ptt, .thinking])
+    check("push to talk: a press shows One sec, then Go ahead, then You while they speak",
+          [Phase.decide(I(micOff: true, thinking: true, talkMode: true, talkOpen: true)),
+           Phase.decide(I(talkMode: true, talkOpen: true, talkLive: true)),
+           Phase.decide(I(hearing: true, talkMode: true, talkOpen: true, talkLive: true)),
+           Phase.decide(I(speaking: true, talkMode: true, talkOpen: true, talkLive: true))],
+          [Phase.arming, .armed, .you, .claude])
+    check("push to talk: an explicit mute still shows Muted",
+          Phase.decide(I(muted: true, micOff: true, talkMode: true)), Phase.muted)
+    let vis = NSRect(x: 1440, y: 0, width: 1920, height: 1050), S = NSSize(width: 220, height: 250)
+    check("placement: default top-right inset, on that screen",
+          Pill.origin(size: S, visible: vis, inset: NSPoint(x: 16, y: 16)), NSPoint(x: 3124, y: 784))
+    check("placement: a saved spot kept on a smaller screen stays wholly on it",
+          [Pill.origin(size: S, visible: vis, inset: NSPoint(x: 5000, y: -300)),
+           Pill.origin(size: S, visible: vis, inset: NSPoint(x: -40, y: 2000))],
+          [NSPoint(x: 1440, y: 800), NSPoint(x: 3140, y: 0)])
+    if let s = NSScreen.screens.first {
+        check("placement: every screen has a non-empty key", Pill.displayKey(s).isEmpty, false)
+    }
+    print("\n\(fails == 0 ? "all passed" : "\(fails) failed")")
+    return fails == 0 ? 0 : 1
+}
+
 let args = CommandLine.arguments
+if args.contains("--selftest") {
+    _ = NSApplication.shared
+    exit(selftest())
+}
 if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
     _ = NSApplication.shared
     snapshot(to: args[i + 1])

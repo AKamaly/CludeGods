@@ -51,6 +51,9 @@ jobs:
       - name: Build CallPill
         run: scripts/build-pill.sh
 
+      - name: CallPill state rules and placement
+        run: skills/gods/bin/pill --selftest
+
       - name: Snapshot every CallPill state
         continue-on-error: true
         run: skills/gods/bin/pill --snapshot callpill-states.png

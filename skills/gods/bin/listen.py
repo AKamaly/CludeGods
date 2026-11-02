@@ -16,14 +16,27 @@ Tails ~/.voicemode/logs/conversations/heard_*.jsonl from its current end and pri
     PANE: ...                                  a request from the Workers pane mod
     FOCUS: on key=… name=… voice=… session=…    a worker was put on the call (`call focus`)
     FOCUS: off                                 the call is back with the main colleague
+    MIC: talk (…) / MIC: open (…)              the mic mode changed (`call mode`, the pill)
+    CALL: moved to another chat (…)            /gods started in another chat, which has the
+                                               call now; this listener exits
 
 USER is the label: "user_label" in ~/.voicemode/call/config.json (default USER), read when
-the listener starts. A missing or broken file means the defaults; other keys are not ours.
+the listener starts. The mic mode is "call": {"mic": "open"|"talk"} in the same file, read
+twice a second. A missing or broken file means the defaults; other keys are not ours.
 
 Catch-up. The Monitor that runs this expires every 30 minutes. The listener keeps a cursor
-(~/.voicemode/call/listen.cursor: the log, a byte offset, the call's start). Re-armed on the
-same call, it resumes from the cursor, so a turn spoken while no listener ran is delivered
-as `USER (earlier, …)` instead of being lost.
+(~/.voicemode/call/listen.cursor: the log, a byte offset, the call's start, and the focus,
+mute, mic mode and Stop press it last reported). Re-armed on the same call, it resumes from
+the cursor, also across midnight into the next day's log, so a turn spoken while no listener
+ran is delivered as `USER (earlier, …)` instead of being lost, and a Stop, mute, focus or
+mode change made meanwhile is reported first. On SIGTERM (the Monitor's expiry) it writes
+the cursor and exits quietly.
+
+Talk mode ("call": {"mic": "talk"}). The mic is off between turns; `call talk` opens it for
+one turn and starts `listen.py --talk-watch`, which closes it after his first turn, or when
+nothing is said. His turns then go out whole (no "mid-thought": nothing more is coming),
+and the ears starting and stopping for each turn is not news (no EARS lines unless they
+fail).
 
 Echo. On laptop speakers the mic hears the mouth (my lines AND the filler clips), and
 there is no echo canceller. So on speakers the gate is half-duplex: a turn whose audio
@@ -54,6 +67,15 @@ compounds) because the echo comes back garbled. The turn that follows a barge-in
                                     the call receipt: his turns (through the same echo gate)
                                     and the spoken replies, as a page in the Spaces "calls"
                                     space (~/.voicemode/call/spaces/calls/<date-time>.md)
+    listen.py --replay-rearm FILE [--every S] [--gap S,S] [--stale] [--speakers|--headphones]
+                                    replay a real log as if the Monitor expired every S
+                                    seconds (default 1800) and was re-armed after each gap
+                                    (default 5,30,120): every turn the gate passes must reach
+                                    the call exactly once, compared with one listener that
+                                    never expired (--stale: the cursor a second behind)
+    listen.py --talk-watch TOKEN    close the mic after one talk turn (`call talk` runs it)
+    listen.py --set-mic open|talk   write "call": {"mic": …} into config.json, keeping every
+                                    other key (`call mode` runs it)
 
 Standard library only.
 """
@@ -64,6 +86,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -99,10 +122,16 @@ ECHO_CHARS = 0.58         # speakers: a partial whose letters match a stretch of
 ECHO_CHARS_TURN = 0.62    # ...and a turn's leftover over me: stricter, a miss here drops words
 ECHO_CHARS_MIN = 8        # ...judged only on partials with at least this many letters
 CATCHUP_MAX_S = 3600.0    # a cursor older than this is not resumed
-CATCHUP_MAX_LINES = 10    # at most this many earlier turns are delivered on re-arm
+CATCHUP_MAX_LINES = 30    # at most this many earlier turns are delivered on re-arm; any
+                          # older ones are counted in one line, never silently dropped
 FRESH_S = 60.0            # a caught-up turn younger than this goes out as a normal turn
 START_WINDOW_S = 120.0    # a listener armed this soon after `call start` hears the whole call
 EARS_GRACE_S = 10.0       # after starting, how long before "the ears are not running" is said
+TALK_START_S = 15.0       # talk: the ears must be up this soon after the press
+TALK_WAIT_S = float(os.environ.get("CALL_TALK_WAIT_S") or 10)  # talk: open this long with
+                                                                # nothing said closes the mic
+TALK_MAX_S = float(os.environ.get("CALL_TALK_MAX_S") or 90)    # talk: one turn at most this long
+MIC_MODES = ("open", "talk")
 CALL = Path(__file__).resolve().parent / "call"
 CONFIG = CALL_DIR / "config.json"
 CURSOR = CALL_DIR / "listen.cursor"
@@ -149,6 +178,44 @@ def user_label(cfg=None):
         return DEFAULT_LABEL
     v = re.sub(r"[\s:()\[\]]+", " ", v).strip()[:32].strip()
     return v or DEFAULT_LABEL
+
+
+def mic_mode(cfg=None):
+    """The mic mode: config "call": {"mic": "talk"} is push to talk, anything else "open"."""
+    c = (load_config() if cfg is None else cfg).get("call")
+    m = c.get("mic") if isinstance(c, dict) else None
+    return m if m in MIC_MODES else "open"
+
+
+def set_mic(mode, path=None):
+    """Write "call": {"mic": mode} into config.json, keeping every other key (and every other
+    key under "call"). A file that is not a JSON object is left alone: returns an error text,
+    or None when written."""
+    path = path or CONFIG
+    if mode not in MIC_MODES:
+        return f"unknown mic mode '{mode}' (open or talk)"
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as e:
+        return f"{path.name} is not readable JSON ({e}); fix it first, nothing was changed"
+    if not isinstance(data, dict):
+        return f"{path.name} is not a JSON object; nothing was changed"
+    call = data.get("call") if isinstance(data.get("call"), dict) else {}
+    data["call"] = {**call, "mic": mode}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(f".{path.name}.part")
+    part.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    part.replace(path)
+    return None
+
+
+def mic_line(mode):
+    if mode == "talk":
+        return ("MIC: talk (push to talk: the mic opens only when they press talk, and each of "
+                "their lines arrives as a whole turn)")
+    return "MIC: open (the mic is always on again)"
 
 
 def load_workers(call_dir=None):
@@ -374,9 +441,10 @@ def play_filler():
 class Gate:
     """Everything the heard log tells us, and the decision for each of his turns."""
 
-    def __init__(self, headphones, label=DEFAULT_LABEL):
+    def __init__(self, headphones, label=DEFAULT_LABEL, talk=lambda: False):
         self.headphones = headphones   # a callable, so a device switch mid-call is honoured
         self.label = label             # what his lines start with (config "user_label")
+        self.talk = talk               # a callable: push to talk, so every turn is whole
         self.capture_start = None
         self.live_events = False       # set once the initial catch-up read is done
         self.offsets = []              # wall ts minus capture time, from recent partials
@@ -580,7 +648,8 @@ class Gate:
                         return ("drop", "echo of me")
                     text = rest
 
-        if re.search(r"[.?!]['\"]?$", text) and not text.endswith(("...", "…")):
+        if self.talk() or (re.search(r"[.?!]['\"]?$", text) and not text.endswith(("...", "…"))):
+            # push to talk: the mic closed after this turn, so no more is coming
             return ("emit", f"{self.label}: {text}", True)
         return ("emit", f"{self.label} (mid-thought, wait for more): {text}", False)
 
@@ -592,8 +661,8 @@ def mtime(path):
         return 0.0
 
 
-def newest_log():
-    logs = sorted(LOG_DIR.glob("heard_*.jsonl"))
+def newest_log(log_dir=None):
+    logs = sorted((log_dir or LOG_DIR).glob("heard_*.jsonl"))
     return logs[-1] if logs else None
 
 
@@ -639,12 +708,17 @@ def read_cursor(path=None):
     return cur if isinstance(cur, dict) else None
 
 
-def write_cursor(log, offset, call, path=None, now=None):
+def write_cursor(log, offset, call, path=None, now=None, state=None):
+    """Where this listener is: the log, the byte offset of everything it has handled, the call,
+    and (`state`) the focus, mute, mic mode and Stop press it last reported."""
     path = path or CURSOR
+    cur = {"log": str(log), "offset": offset, "call": call,
+           "at": now if now is not None else time.time()}
+    if state is not None:
+        cur["state"] = state
     try:
         part = path.with_name(path.name + ".part")
-        part.write_text(json.dumps({"log": str(log), "offset": offset, "call": call,
-                                    "at": now if now is not None else time.time()}))
+        part.write_text(json.dumps(cur))
         part.replace(path)
     except OSError:
         pass
@@ -665,6 +739,25 @@ def resume_offset(cursor, log, call, now=None):
     return off
 
 
+def resume_logs(cursor, newest, call, now=None):
+    """The logs a re-armed listener of this call reads, oldest first, as (log, offset): the
+    cursor's own log from its offset, and when the day rolled over while no listener ran,
+    first the rest of yesterday's log and then today's from its start. [] if nothing resumes."""
+    if newest is None:
+        return []
+    newest = Path(newest)
+    off = resume_offset(cursor, newest, call, now)
+    if off is not None:
+        return [(newest, off)]
+    if not cursor or not call or cursor.get("call") != call:
+        return []
+    old = Path(str(cursor.get("log") or ""))
+    if not old.name.startswith("heard_") or old.name >= newest.name:
+        return []
+    off = resume_offset(cursor, old, call, now)
+    return [(old, off), (newest, 0)] if off is not None else []
+
+
 def next_line(fh):
     """The next whole line of a log opened in binary mode, or None at the end. A line the
     ears are still writing (no newline yet) is left for the next read."""
@@ -680,9 +773,11 @@ def next_line(fh):
 
 def catch_up(fh, gate, label, offset=None, since=None, now=None):
     """Read the log to its end. Records up to `offset` (a byte offset) and before `since` (an
-    epoch) only build the gate's state (the capture start, my recent lines); the ones after
-    are judged, because no listener saw them. Returns his turns from that stretch, oldest
-    first: as the gate says them if under FRESH_S old, else as `<label> (earlier, HH:MM, ...)`.
+    epoch) only build the gate's state (the capture start, my recent lines, a barge-in in
+    flight), at their own time, as the listener that saw them did; the ones after are judged,
+    because no listener saw them. Returns his turns from that stretch, oldest first: as the
+    gate says them if under FRESH_S old, else as `<label> (earlier, HH:MM, ...)`. Uncapped:
+    catch_up_all caps what goes to the call.
     With neither set, everything is read silently (a fresh listener follows from the end)."""
     now = now if now is not None else time.time()
     lines = []
@@ -694,11 +789,10 @@ def catch_up(fh, gate, label, offset=None, since=None, now=None):
             rec = json.loads(raw)
             missed = ((offset is not None and fh.tell() > offset)
                       or (since is not None and ts(rec) >= since))
-            if not missed:
-                gate.feed(rec)
-                continue
             out = gate.feed(rec, now=ts(rec))
         except (ValueError, KeyError, TypeError):
+            continue
+        if not missed:
             continue
         if out and out[0] in ("barge", "emit") and out[1]:
             if now - ts(rec) <= FRESH_S:
@@ -706,7 +800,16 @@ def catch_up(fh, gate, label, offset=None, since=None, now=None):
             else:
                 lines.append(f"{label} (earlier, {datetime.fromtimestamp(ts(rec)):%H:%M}, said "
                              f"while no listener was running): {out[1].split(': ', 1)[1]}")
-    return lines[-CATCHUP_MAX_LINES:]
+    return lines
+
+
+def capped(lines, label):
+    """At most CATCHUP_MAX_LINES caught-up turns, the newest; the ones left out are counted."""
+    if len(lines) <= CATCHUP_MAX_LINES:
+        return lines
+    n = len(lines) - CATCHUP_MAX_LINES + 1
+    return ([f"{label} (earlier, said while no listener was running): [{n} older turns not "
+             "repeated here; ask what you missed if it matters]"] + lines[-(CATCHUP_MAX_LINES - 1):])
 
 
 def start_point(cursor, log, call, now=None):
@@ -724,6 +827,25 @@ def start_point(cursor, log, call, now=None):
     return (None, began) if 0 <= now - began <= START_WINDOW_S else (None, None)
 
 
+def catch_up_all(gate, label, cursor, newest, call, now=None):
+    """Open the newest log and read it to its end through catch_up: resuming this call's
+    cursor (yesterday's log first if the day rolled over meanwhile), else from the call's
+    start, else silently. Returns (lines, fh on the newest log, resumed)."""
+    now = now if now is not None else time.time()
+    plan = resume_logs(cursor, newest, call, now)
+    if plan:
+        lines = []
+        for log, off in plan[:-1]:
+            with open(log, "rb") as old:
+                lines += catch_up(old, gate, label, off, None, now)
+        fh = open(plan[-1][0], "rb")
+        lines += catch_up(fh, gate, label, plan[-1][1], None, now)
+        return capped(lines, label), fh, True
+    fh = open(newest, "rb")
+    offset, since = start_point(None, newest, call, now)
+    return capped(catch_up(fh, gate, label, offset, since, now), label), fh, False
+
+
 def ears_alive(call_dir=None):
     try:
         os.kill(int(((call_dir or CALL_DIR) / "ears.pid").read_text()), 0)
@@ -732,35 +854,129 @@ def ears_alive(call_dir=None):
         return False
 
 
+MUTED_LINE = "EARS: muted (the user turned the mic off on the pill; do not restart it)"
+
+
+def stop_line(label, earlier=False):
+    when = " while no listener was running" if earlier else ""
+    return (f"{label}: Stop. (The user pressed Stop on the pill{when}: halt the current work and "
+            "any helper agents now, then say in a few words that you stopped.)")
+
+
+def call_state(call_dir=None, mic=None):
+    """What the pill, the pane and `call` can change while no listener runs."""
+    d = call_dir or CALL_DIR
+    return {"focus": read_focus(d), "muted": (d / "muted").exists(),
+            "mic": mic or mic_mode(load_config(d / "config.json")), "stop": mtime(d / "stop-request")}
+
+
+def state_news(before, now, label, workers=None):
+    """What changed since the last listener reported `before`, as the lines a live listener
+    would have printed: a Stop press first (it halts work), then focus, mic mode, mute."""
+    if not isinstance(before, dict):
+        return []
+    out = []
+    try:
+        if "stop" in before and now["stop"] > float(before["stop"]):
+            out.append(stop_line(label, earlier=True))
+    except (TypeError, ValueError):
+        pass
+    if "focus" in before and now["focus"] != before["focus"]:
+        out.append(focus_line(now["focus"], load_workers() if workers is None else workers))
+    if "mic" in before and now["mic"] != before["mic"]:
+        out.append(mic_line(now["mic"]))
+    if "muted" in before and now["muted"] != before["muted"]:
+        out.append(MUTED_LINE if now["muted"] else "EARS: unmuted")
+    return out
+
+
+def read_owner(call_dir=None):
+    try:
+        return ((call_dir or CALL_DIR) / "session").read_text().strip()
+    except OSError:
+        return ""
+
+
+def moved(me, owner):
+    """The call belongs to another chat now: /gods ran there (`call start` records the
+    session). A listener that does not know its own session never decides this."""
+    return bool(me) and bool(owner) and owner != me
+
+
+MOVED_LINE = ("CALL: moved to another chat (/gods started there, and that chat has the call now). "
+              "This chat is off the call: do not re-arm the listener, do not speak, and do not "
+              "run `call stop`.")
+
+
 def live():
     label = user_label()
-    gate = Gate(on_headphones, label)
-    path = newest_log()
-    fh = open(path, "rb") if path else None
-    if fh:
+    mode = {"mic": mic_mode()}
+    gate = Gate(on_headphones, label, talk=lambda: mode["mic"] == "talk")
+    me = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if moved(me, read_owner()):   # a listener re-armed in the chat the call moved away from
+        print(MOVED_LINE, flush=True)
+        return
+    path, fh, resumed = newest_log(), None, False
+    cursor, call = read_cursor(), call_id()
+    lines = []
+    if path:
         # a re-arm on the same call resumes where the last listener stopped, so nothing he
         # said in between is lost; otherwise read history silently and follow from the end
-        offset, since = start_point(read_cursor(), path, call_id())
-        for line in catch_up(fh, gate, label, offset, since):
-            print(line, flush=True)
-        write_cursor(path, fh.tell(), call_id())
+        lines, fh, resumed = catch_up_all(gate, label, cursor, path, call)
+        path = Path(fh.name)
+    state = call_state(mic=mode["mic"])
+    if resumed:  # what was pressed or switched meanwhile, then what he said
+        lines = state_news((cursor or {}).get("state"), state, label) + lines
+    for line in lines:
+        print(line, flush=True)
+    focus, last_stop = state["focus"], state["stop"]
+    # "EARS: unmuted" only follows a mute the call was told about; a stop that is not a mute
+    # (a mute undone at once, a mode switch) is checked again a moment later, not reported
+    ears = {"muted_said": state["muted"], "down_check": 0.0}
+    pos = {"at": fh.tell() if fh else 0}   # everything before this byte has been handled
+
+    def snapshot():
+        return {"focus": focus, "muted": muted_file.exists(), "mic": mode["mic"], "stop": last_stop}
+
+    def save():
+        if path:
+            write_cursor(path, pos["at"], call_id(), state=snapshot())
+
+    def on_term(signum, frame):
+        # the Monitor's expiry: leave the cursor exactly where we are, and go quietly
+        save()
+        os._exit(0)
+
     gate.live_events = True
     started = last_seen = last_cursor = time.time()
     ears_checked = False
     stop_file, muted_file = CALL_DIR / "stop-request", CALL_DIR / "muted"
-    last_stop = mtime(stop_file)
+    save()
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, on_term)
     requests_dir = CALL_DIR / "requests"
     next_scan = 0.0
-    focus = read_focus()  # a worker already on the call when listening starts is not news
+
+    def refresh_mode():
+        """Re-read the mic mode; say so if it changed. True if it just changed."""
+        new = mic_mode()
+        if new == mode["mic"]:
+            return False
+        mode["mic"] = new
+        print(mic_line(new), flush=True)
+        return True
 
     while True:
         stop_at = mtime(stop_file)
         if stop_at > last_stop:
             last_stop = stop_at
-            print(f"{label}: Stop. (The user pressed Stop on the pill: halt the current work and any "
-                  "helper agents now, then say in a few words that you stopped.)", flush=True)
+            print(stop_line(label), flush=True)
         if time.time() >= next_scan:  # the Workers pane's requests, twice a second
             next_scan = time.time() + 0.5
+            if moved(me, read_owner()):
+                print(MOVED_LINE, flush=True)
+                return
+            refresh_mode()
             now_focus = read_focus()
             if now_focus != focus:  # `call focus` from this session, the pane or the pill
                 focus = now_focus
@@ -778,11 +994,16 @@ def live():
                     pass
                 req.unlink(missing_ok=True)
             if path and time.time() - last_cursor >= 1.0:
-                write_cursor(path, fh.tell(), call_id())
+                save()
                 last_cursor = time.time()
+        talk = mode["mic"] == "talk"   # the ears are off between talk turns: that is not news
+        if ears["down_check"] and time.time() >= ears["down_check"]:
+            ears["down_check"] = 0.0
+            if not ears_alive() and not muted_file.exists() and mode["mic"] != "talk":
+                print("EARS: down (stopped)", flush=True)
         if not ears_checked and time.time() - started > EARS_GRACE_S:
             ears_checked = True  # said at once, not after the 150 s heartbeat limit
-            if not ears_alive() and not muted_file.exists():
+            if not ears_alive() and not muted_file.exists() and not talk:
                 print("EARS: down (the ears are not running)", flush=True)
                 last_seen = time.time()
         raw = next_line(fh) if fh else None
@@ -790,37 +1011,258 @@ def live():
             newer = newest_log()
             if newer and newer != path:  # midnight roll
                 path, fh = newer, open(newer, "rb")
+                pos["at"] = 0
                 continue
             if time.time() - last_seen > HEARTBEAT_LIMIT_S:
-                if not muted_file.exists():
+                if not muted_file.exists() and not talk:
                     print("EARS: down (no heartbeat)", flush=True)
                 last_seen = time.time()
             time.sleep(0.1)
             continue
-        try:
-            rec = json.loads(raw)
-        except ValueError:
-            continue
         last_seen = time.time()
         try:
-            out = gate.feed(rec)
+            out = gate.feed(json.loads(raw))
         except (KeyError, ValueError, TypeError):
-            continue
-        if not out:
-            continue
-        if out[0] == "down":
-            if muted_file.exists():
-                print("EARS: muted (the user turned the mic off on the pill; do not restart it)", flush=True)
+            out = None
+        if out and out[0] in ("down", "up"):
+            # a mode switch stops or starts the ears itself: say the switch, not the ears
+            switched = refresh_mode()
+            if out[0] == "down":
+                if switched or (mode["mic"] == "talk" and out[1] in ("stop", "ceiling")):
+                    pass   # a talk turn closing, or the switch to talk
+                elif muted_file.exists():
+                    if not ears["muted_said"]:
+                        print(MUTED_LINE, flush=True)
+                    ears["muted_said"] = True
+                elif out[1] == "stop":
+                    ears["down_check"] = time.time() + 3.0   # asked to stop: a restart may follow
+                else:
+                    print(f"EARS: down ({out[1]})", flush=True)
             else:
-                print(f"EARS: down ({out[1]})", flush=True)
-        elif out[0] == "up":
-            print("EARS: unmuted", flush=True)
-        elif out[0] in ("barge", "emit"):
+                ears["down_check"] = 0.0
+                if ears["muted_said"] and not switched and mode["mic"] != "talk":
+                    print("EARS: unmuted", flush=True)
+                ears["muted_said"] = False
+        elif out and out[0] in ("barge", "emit"):
             if out[0] == "emit" and out[2] and os.environ.get("CALL_FILLERS") == "on":
                 play_filler()  # off by default: they sound canned
             deliver(out, label)
-            write_cursor(path, fh.tell(), call_id())
+        pos["at"] = fh.tell()
+        if out and out[0] in ("barge", "emit"):
+            save()
             last_cursor = time.time()
+
+
+class TalkWatch:
+    """One push-to-talk turn: when to close the mic again. Fed the heard log from the press
+    on: the mic closes after his first turn, when the ears stop by themselves, when the ears
+    never come up, when the mic has been open TALK_WAIT_S with nothing said, or after
+    TALK_MAX_S in all."""
+
+    def __init__(self, armed_at, wait_s=None, start_s=TALK_START_S, max_s=None):
+        self.armed_at = armed_at
+        self.wait_s = TALK_WAIT_S if wait_s is None else wait_s
+        self.start_s = start_s
+        self.max_s = TALK_MAX_S if max_s is None else max_s
+        self.live_at = None   # the capture this press started
+        self.spoke = False
+
+    def feed(self, rec):
+        """A heard-log record; returns why the turn is over, or None."""
+        try:
+            t = ts(rec)
+        except (ValueError, KeyError, TypeError):
+            return None
+        if t < self.armed_at or rec.get("source") != "mic":
+            return None   # before the press: the previous capture
+        kind, ev = rec.get("kind"), rec.get("event")
+        if kind == "event" and ev == "listen-started":
+            self.live_at = t
+            return None
+        if self.live_at is None or t < self.live_at:
+            return None   # the previous capture's tail
+        if kind == "event" and ev == "listen-stopped":
+            return "stopped"
+        text = (rec.get("text") or "").strip()
+        if kind == "partial" and text and not NOISE.match(text):
+            self.spoke = True
+        if kind == "turn":
+            return "turn"
+        return None
+
+    def tick(self, now):
+        if now - self.armed_at > self.max_s:
+            return "too long"
+        if self.live_at is None:
+            return "ears did not start" if now - self.armed_at > self.start_s else None
+        if not self.spoke and now - max(self.live_at, self.armed_at) > self.wait_s:
+            return "nothing said"
+        return None
+
+
+def end_talk(token, why, call_dir=None):
+    """Close the mic after a talk turn, unless another press or a mode switch already took
+    over (the talk file no longer holds this press's token)."""
+    d = call_dir or CALL_DIR
+    talk = d / "talk"
+    try:
+        if talk.read_text().strip() != token:
+            return False
+        talk.unlink()
+    except OSError:
+        return False
+    if why != "stopped":
+        (d / "ears.stop").touch()
+    return True
+
+
+def talk_watch(token, call_dir=None, log_dir=None, clock=time.time, nap=0.1):
+    """`call talk` runs this in the background: follow the heard log from the press and close
+    the mic when TalkWatch says the turn is over. Exits at once if the press is superseded."""
+    d = call_dir or CALL_DIR
+    try:
+        watch = TalkWatch(float(token))
+    except ValueError:
+        return 2
+    path = fh = None
+    while True:
+        try:
+            if (d / "talk").read_text().strip() != token:
+                return 0
+        except OSError:
+            return 0   # a second press, a mode switch or a hang-up ended it
+        newer = newest_log(log_dir)
+        if newer and newer != path:
+            if fh:
+                fh.close()
+            first = path is None
+            path, fh = newer, open(newer, "rb")
+            if first:   # the press came a moment ago: its records are near the end
+                fh.seek(max(0, newer.stat().st_size - 65536))
+        why = None
+        while fh and why is None:
+            raw = next_line(fh)
+            if raw is None:
+                break
+            try:
+                why = watch.feed(json.loads(raw))
+            except ValueError:
+                continue
+        why = why or watch.tick(clock())
+        if why:
+            end_talk(token, why, d)
+            return 0
+        time.sleep(nap)
+
+
+def norm(line):
+    """His words in a line for the call, whatever its label says."""
+    return line.split(": ", 1)[1] if ": " in line else line
+
+
+def rearm_simulation(lines, every, gap, headphones=False, stale=False, label=DEFAULT_LABEL,
+                     tmp=None):
+    """Replay a heard log (its raw lines, as bytes) twice: through one listener that never
+    expires, and through a chain of listeners each killed `every` s after it was armed and
+    re-armed `gap` s later, through the live code path (write_cursor at the kill, then
+    catch_up_all on the log as it stood at the re-arm). `stale`: the cursor as of a second
+    before the kill (no SIGTERM handler). Returns (ref, got, notes): his lines, normalized,
+    as each would reach the call, and what happened at each re-arm."""
+    recs, pos = [], 0
+    for raw in lines:
+        pos += len(raw)
+        try:
+            rec = json.loads(raw)
+            t = ts(rec)
+        except (ValueError, KeyError, TypeError):
+            continue
+        recs.append((pos, t, rec))
+    if not recs:
+        return [], [], []
+    blob = b"".join(lines)
+    ref = []
+    g = Gate(lambda: headphones, label)
+    for _, t, rec in recs:
+        out = g.feed(rec, now=t)
+        if out and out[0] in ("barge", "emit") and out[1]:
+            ref.append(norm(out[1]))
+
+    def upto(t):
+        """Index just past the last record (in file order) written by time t."""
+        j = 0
+        for k, (_, rt, _) in enumerate(recs):
+            if rt <= t:
+                j = k + 1
+        return j
+
+    own_tmp = tmp is None
+    tmp = Path(tempfile.mkdtemp(prefix="rearm-")) if own_tmp else tmp
+    log = tmp / f"heard_{datetime.fromtimestamp(recs[0][1]).date().isoformat()}.jsonl"
+    cur = tmp / "listen.cursor"
+    call = str(int(recs[0][1]))
+    got, notes = [], []
+    arm, i, gate, first = recs[0][1] - 1, 0, None, True
+    while True:
+        kill = arm + every
+        gate = Gate(lambda: headphones, label)
+        if not first:
+            i = upto(arm)
+            log.write_bytes(blob[:recs[i - 1][0]] if i else b"")
+            caught, fh, resumed = catch_up_all(gate, label, read_cursor(cur), log, call, now=arm)
+            fh.close()
+            got += [norm(x) for x in caught]
+            earlier = sum(1 for x in caught if "(earlier," in x)
+            notes.append(f"{datetime.fromtimestamp(arm):%H:%M:%S} re-armed after {gap:g} s: "
+                         f"{'resumed' if resumed else 'NOT RESUMED'}, {len(caught)} caught up"
+                         + (f" ({earlier} as earlier)" if earlier else ""))
+        first = False
+        last_emit = recs[i - 1][0] if i else 0
+        end = upto(kill)
+        while i < end:
+            off, t, rec = recs[i]
+            out = gate.feed(rec, now=t)
+            if out and out[0] in ("barge", "emit") and out[1]:
+                got.append(norm(out[1]))
+                last_emit = off
+            i += 1
+        if i >= len(recs):
+            break
+        consumed = recs[i - 1][0] if i else 0
+        if stale:
+            j = upto(kill - 1.0)
+            consumed = max(last_emit, recs[j - 1][0] if j else 0)
+        write_cursor(log, consumed, call, path=cur, now=kill)
+        arm = kill + gap
+    if own_tmp:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ref, got, notes
+
+
+def rearm_report(ref, got):
+    """(lost, duplicated) lines: in the reference but never delivered, delivered too often."""
+    from collections import Counter
+    r, g = Counter(ref), Counter(got)
+    return sorted((r - g).elements()), sorted((g - r).elements())
+
+
+def replay_rearm(path, every, gaps, headphones, stale=False):
+    lines = [raw for raw in open(path, "rb").read().splitlines(keepends=True) if raw.endswith(b"\n")]
+    problems = 0
+    for gap in gaps:
+        ref, got, notes = rearm_simulation(lines, every, gap, headphones, stale)
+        lost, dup = rearm_report(ref, got)
+        problems += len(lost) + len(dup)
+        print(f"every {every:g} s, re-armed after {gap:g} s"
+              f"{', cursor a second stale' if stale else ''}: {len(notes)} expiries, "
+              f"{len(ref)} lines from one listener, {len(got)} delivered, "
+              f"{len(lost)} lost, {len(dup)} duplicated")
+        for n in notes:
+            print("   ", n)
+        for x in lost:
+            print(f"    LOST  {x[:70]!r}")
+        for x in dup:
+            print(f"    DUP   {x[:70]!r}")
+    return problems
 
 
 def ago(s):
@@ -1380,6 +1822,142 @@ def selftest():
           "heard: capture stopped 5 s ago (no audio)")
     shutil.rmtree(tmp, ignore_errors=True)
 
+    # 20. re-arm: the Monitor expires mid-call; every turn the gate passes must reach the call
+    # exactly once, compared with one listener that never expired. The kills land between a
+    # barge-in and its turn, mid-line, and in a quiet stretch; the cursor is exact (SIGTERM)
+    # or a second stale; the re-arm comes 3 s, 45 s or 100 s later.
+    def raw(recs):
+        return [json.dumps(r).encode() + b"\n" for r in recs]
+
+    long_call = ears() + [
+        turn(10, "First, check the build.", 7.0, 9.0),
+        saying(12, "u1", line), partial(14.5, "wait hold on"), said(14.7, "u1"),
+        turn(16, "Wait, hold on.", 12.3, 13.9),
+        turn(30, "Not that one, the release notes.", 27.0, 29.5),
+        saying(40, "u2", garble_line), partial(43, "Claude and Mike Goff."),
+        partial(44.5, "No wait, switch projects"), said(44.8, "u2"),
+        turn(47, "No wait, switch projects to the Atlas one first.", 42.6, 46.0),
+        saying(60, "u3", brief), said(66, "u3"),
+        turn(67, "Questions to a helmet, keep the reply sport.", 62.0, 65.5),
+        turn(90, "And send me the summary after.", 87.0, 89.5),
+        turn(130, "Also check the tests", 127.0, 129.0),
+        turn(131.5, "on the release branch.", 130.0, 131.0)]
+    for hp in (True, False):
+        for every, gap, stale in ((16, 3, False), (16, 45, True), (33, 3, True), (45, 100, False),
+                                  (8, 3, False), (8, 3, True)):
+            ref, got, notes = rearm_simulation(raw(long_call), every, gap, headphones=hp, stale=stale)
+            lost, dup = rearm_report(ref, got)
+            check(f"re-arm ({'headphones' if hp else 'speakers'}, every {every} s, gap {gap} s"
+                  f"{', stale cursor' if stale else ''}): nothing lost, nothing twice",
+                  (len(ref) >= 6, all("resumed" in n for n in notes), lost, dup),
+                  (True, True, [], []))
+
+    # 21. re-arm across midnight: the rest of yesterday's log, then all of today's
+    tmp = Path(tempfile.mkdtemp(prefix="midnight-test-"))
+    day1, day2 = tmp / "heard_2026-01-01.jsonl", tmp / "heard_2026-01-02.jsonl"
+    early = ears() + [turn(10, "First thing, check the build.", 7.0, 9.0)]
+    day1.write_bytes(b"".join(raw(early)))
+    mid = day1.stat().st_size
+    with open(day1, "ab") as fh:
+        fh.write(b"".join(raw([turn(40, "Also the release notes.", 37.0, 39.0)])))
+    day2.write_bytes(b"".join(raw([turn(70, "And the changelog.", 67.0, 69.0)])))
+    call = str(int(base))
+    cur = tmp / "listen.cursor"
+    write_cursor(day1, mid, call, path=cur, now=base + 20)
+    got, fh, resumed = catch_up_all(Gate(lambda: True), "USER", read_cursor(cur), day2, call,
+                                    now=base + 75)
+    fh.close()
+    check("re-arm across midnight: yesterday's rest, then today's log from its start",
+          (resumed, [norm(x) for x in got], resume_logs(read_cursor(cur), day2, "9", base + 75)),
+          (True, ["Also the release notes.", "And the changelog."], []))
+
+    many = [f"USER: turn {k}" for k in range(CATCHUP_MAX_LINES + 4)]
+    out = capped(many, "USER")
+    check("catch-up cap: the newest turns, and one line that counts the rest",
+          (len(out), out[0], out[-1], capped(many[:3], "USER")),
+          (CATCHUP_MAX_LINES, "USER (earlier, said while no listener was running): [5 older turns "
+           "not repeated here; ask what you missed if it matters]", many[-1], many[:3]))
+
+    # 22. what was pressed or switched while no listener ran is reported first, Stop leading
+    before = {"focus": "", "muted": False, "mic": "open", "stop": 100.0}
+    after = {"focus": "scribe", "muted": True, "mic": "talk", "stop": 200.0}
+    check("re-arm: Stop, focus, mic mode and mute changes meanwhile are reported",
+          [x.split(" (")[0] for x in state_news(before, after, "USER", workers)],
+          ["USER: Stop.", "FOCUS: on key=scribe name=Scribe voice=bf_emma session=",
+           "MIC: talk", "EARS: muted"])
+    check("re-arm: nothing changed, or an old cursor with no state -> nothing to report",
+          (state_news(before, dict(before), "USER", workers), state_news(None, after, "USER", workers),
+           state_news({"focus": ""}, {**after, "focus": ""}, "USER", workers)), ([], [], []))
+
+    # 23. one call, one chat: /gods in another chat takes the call; this listener steps back
+    check("handover: only a known session that differs from the call's owner moves",
+          [moved("a", "b"), moved("a", "a"), moved("", "b"), moved("a", "")],
+          [True, False, False, False])
+
+    # 24. the mic mode in config.json: written with every other key kept, read safely
+    cfg = tmp / "config.json"
+    errs = [set_mic("talk", cfg)]
+    modes = [mic_mode(load_config(cfg))]
+    cfg.write_text(json.dumps({"approvals": {"outward": "typed"}, "user_label": "Sam",
+                               "call": {"other": 1, "mic": "talk"}, "_help": {"x": "y"}}))
+    errs.append(set_mic("open", cfg))
+    kept = json.loads(cfg.read_text())
+    cfg.write_text("{broken")
+    errs.append(set_mic("talk", cfg) is not None)
+    errs.append(set_mic("loud", cfg) is not None)
+    modes += [mic_mode({"call": {"mic": "talk"}}), mic_mode({"call": "talk"}), mic_mode({}),
+              mic_mode({"call": {"mic": "TALK"}})]
+    check("mic mode: set_mic keeps every other key; a broken file or bad mode changes nothing",
+          (errs, kept, cfg.read_text(), modes),
+          ([None, None, True, True], {"approvals": {"outward": "typed"}, "user_label": "Sam",
+                                      "call": {"other": 1, "mic": "open"}, "_help": {"x": "y"}},
+           "{broken", ["talk", "talk", "open", "open", "open"]))
+
+    # 25. talk mode: a turn is whole (the mic closed after it), never "mid-thought"
+    outs = [Gate(lambda: True, "USER", talk=lambda: t).feed(turn(20, "And then", 17.0, 18.0), now=base + 20)
+            for t in (False, True)]
+    check("talk mode: an unfinished sentence goes out as a plain turn",
+          outs, [("emit", "USER (mid-thought, wait for more): And then", False),
+                 ("emit", "USER: And then", True)])
+
+    # 26. talk watch: when the mic closes again after a press at 100
+    def ev(sec, name):
+        return {"ts": at(sec), "kind": "event", "source": "mic", "event": name}
+
+    def watch(recs, until):
+        w, why = TalkWatch(base + 100, wait_s=10, start_s=15, max_s=90), None
+        for r in recs:
+            why = why or w.feed(r)
+        return why or w.tick(base + until)
+
+    check("talk watch: first turn, nothing said, ears never up, stopped, too long, still going",
+          [watch([ev(101, "listen-started"), partial(103, "check the build"),
+                  turn(106, "Check the build.", 1.0, 4.0)], 106),
+           watch([ev(101, "listen-started")], 112),
+           watch([], 116),
+           watch([ev(99.8, "listen-stopped"), ev(101, "listen-started"), ev(104, "listen-stopped")], 104),
+           watch([ev(101, "listen-started"), partial(103, "a very long thought")], 191),
+           watch([ev(99.5, "listen-started"), turn(99.6, "the last turn's tail", 0, 1),
+                  ev(101, "listen-started"), partial(103, "still talking")], 108)],
+          ["turn", "nothing said", "ears did not start", "stopped", "too long", None])
+    calldir, logdir = tmp / "call", tmp / "logs"
+    calldir.mkdir()
+    logdir.mkdir()
+    token = f"{base + 100:.3f}"
+    (calldir / "talk").write_text(token + "\n")
+    (logdir / "heard_2026-01-01.jsonl").write_bytes(b"".join(raw(
+        [ev(101, "listen-started"), partial(103, "check the build"),
+         turn(106, "Check the build.", 1.0, 4.0)])))
+    rc = talk_watch(token, calldir, logdir, clock=lambda: base + 107, nap=0)
+    closed = (rc, (calldir / "talk").exists(), (calldir / "ears.stop").exists())
+    (calldir / "ears.stop").unlink()
+    (calldir / "talk").write_text("123.000\n")      # a newer press took over
+    superseded = (talk_watch(token, calldir, logdir, clock=lambda: base + 107, nap=0),
+                  (calldir / "talk").read_text().strip(), (calldir / "ears.stop").exists())
+    check("talk watch: closes the mic after the turn; a superseded press touches nothing",
+          (closed, superseded), ((0, False, True), (0, "123.000", False)))
+    shutil.rmtree(tmp, ignore_errors=True)
+
     # 19. the narrate hook's pacing (its own self-test, run here so CI covers it)
     narrate = Path(__file__).resolve().parent / "narrate"
     if narrate.exists():
@@ -1408,10 +1986,29 @@ if __name__ == "__main__":
     ap.add_argument("--stop", type=float)
     ap.add_argument("--call-dir", type=Path)
     ap.add_argument("--log-dir", type=Path)
+    ap.add_argument("--replay-rearm", metavar="FILE")
+    ap.add_argument("--every", type=float, default=1800.0)
+    ap.add_argument("--gap", default="5,30,120")
+    ap.add_argument("--stale", action="store_true")
+    ap.add_argument("--talk-watch", metavar="TOKEN")
+    ap.add_argument("--set-mic", choices=MIC_MODES)
     args = ap.parse_args()
     try:
         if args.selftest:
             raise SystemExit(1 if selftest() else 0)
+        if args.replay_rearm:
+            gaps = [float(g) for g in args.gap.split(",") if g.strip()]
+            raise SystemExit(1 if replay_rearm(args.replay_rearm, args.every, gaps,
+                                               args.headphones and not args.speakers,
+                                               args.stale) else 0)
+        if args.talk_watch:
+            raise SystemExit(talk_watch(args.talk_watch, args.call_dir, args.log_dir))
+        if args.set_mic:
+            err = set_mic(args.set_mic, (args.call_dir / "config.json") if args.call_dir else None)
+            if err:
+                raise SystemExit(f"call mode: {err}")
+            print(f"mic: {args.set_mic}")
+            raise SystemExit(0)
         if args.status:
             status()
             raise SystemExit(0)
