@@ -36,8 +36,10 @@ export type RegistryWorker = {
   spaces?: string[] | '*'
   /** The worker's standing brief: every wake carries all of it; the pane never draws it. */
   charter?: string
-  /** When the pane wakes the worker to run its charter. */
+  /** When the pane wakes the worker to run its charter (or, with no charter, to check in on its role). */
   schedule?: Schedule
+  /** When the pane wrote the entry (ISO), for a worker made with + New worker. */
+  created?: string
 }
 
 /**
@@ -77,6 +79,8 @@ export type OutboxItem = {
   title: string
   body: string
   to?: string
+  /** An email draft's subject line, when the worker wrote one. */
+  subject?: string
   needs_approval: boolean
   /** A page's space and its draft awaiting review; `page` names the page a revision changes. */
   space?: string
@@ -84,14 +88,62 @@ export type OutboxItem = {
   page?: string
 }
 
-/** One line of `outbox/<key>.decisions.jsonl`. */
-export type Decision = { id: string; decision: 'approved' | 'declined'; at: string }
+/**
+ * One line of `outbox/<key>.decisions.jsonl`. `changes`: the owner asked for a revision
+ * (`note` says what), so the item leaves the "needs your yes" list and the worker drafts
+ * a new one.
+ */
+export type Decision = { id: string; decision: 'approved' | 'declined' | 'changes'; at: string; note?: string }
 
 /** One tool call from a worker's transcript, as the activity view draws it. */
 export type ActivityStep = { id: string; tool: string; arg: string; atMs: number }
 
-/** What a worker's status line says right now. */
-export type WorkerStatus = { isWorking: boolean; lastActiveMs: number; isNew: boolean }
+/**
+ * What a worker's status line says right now. `state` comes from the worker's own chat
+ * (`status/<key>.json`, written as each turn starts and ends); without it, the status is
+ * read from the transcript's mtime alone.
+ */
+export type WorkerStatus = {
+  isWorking: boolean
+  lastActiveMs: number
+  isNew: boolean
+  /** No `session` yet: the chat was asked for and has not started. */
+  isStarting?: boolean
+  state?: WorkerState['state']
+  /** When the running turn started, or the last one ended. */
+  sinceMs?: number
+}
+
+/**
+ * `~/.voicemode/call/status/<key>.json`, written by the worker's own chat (this mod runs
+ * in every chat, and a chat that finds itself in the registry reports on itself): what
+ * it is doing, from its turns, not guessed from a file's mtime.
+ */
+export type WorkerState = {
+  state: 'working' | 'idle' | 'stopped' | 'error'
+  /** When this was written (ms). */
+  at: number
+  /** When the running turn started, or the last one did (ms). */
+  since: number
+  /** The first line of what the turn was asked, short. */
+  asked?: string
+}
+
+/**
+ * One line of `~/.voicemode/call/runs/<key>.jsonl`, appended by the worker's own chat as
+ * each turn ends: what it was asked and the start of its answer. The Today view reads it.
+ */
+export type RunRecord = {
+  at: string
+  turn: string
+  reason: 'answer' | 'aborted' | 'refusal' | 'error'
+  durationMs: number
+  asked: string
+  answer: string
+}
+
+/** The `workers` key of `~/.voicemode/call/config.json`: what this pane owns there. */
+export type WorkersConfig = { defaultTools: ToolsPreset }
 
 /** The last task sent to a worker from the pane. */
 export type SentTask = { text: string; atMs: number; isDelivered: boolean; reason?: string }
@@ -120,14 +172,18 @@ export type EditValue = string | number | boolean | null | readonly EditValue[] 
  * `isTried` turns on once a create was attempted with an invalid name, so the
  * hint shows only after a failed try, never before typing. `god` is a god kind.
  */
-export type FormState = { isOpen: boolean; isValid: boolean; isTried: boolean; god: string }
+export type FormState = { isOpen: boolean; isValid: boolean; isTried: boolean; god: string; tools?: string }
 
 /**
- * A create the pane put in the prompt box: once a worker of that exact name (and a
- * key that was not in the registry then) appears, the pane fills in the god, voice and
- * tools the call session left out.
+ * A create the pane put in the prompt box. The pane writes the entry itself (`key`);
+ * if a call session that predates that registers a second entry of that exact name (or
+ * key), the pane folds it into the first. An older pane's create has no `key`: then the
+ * god, voice and tools are filled in where the new entry lacks them.
  */
-export type PendingCreate = { god: string; voice: string; tools: ToolsPreset; atMs: number; known: string[] }
+export type PendingCreate = { god: string; voice: string; tools: ToolsPreset; atMs: number; known: string[]; key?: string }
+
+/** What the pane body shows: the workers, or the Today digest across them. */
+export type PaneView = 'workers' | 'today'
 
 declare module 'claude-code' {
   interface PluginState {
@@ -160,6 +216,10 @@ declare module 'claude-code' {
        * group's highlight move on the click, before the registry write lands.
        */
       edits: Shaped<PendingEdits>
+      /** The Workers list, or the Today digest. */
+      view: Shaped<PaneView>
+      /** Outbox item id to true while its "What should change?" field is open. */
+      changing: Shaped<Record<string, boolean>>
     }
   }
 }

@@ -105,37 +105,54 @@ starting it."). They can override ("use Opus for that").
 ## Workers (standing chats with personas)
 
 The registry is `~/.voicemode/call/workers.json`; the Workers pane mod reads it.
-- **Create**: a prompt `Create worker: name=…; role=…; avatar=…` comes from the pane's
-  create field: the pane puts it in the prompt box and the user's Enter sends it, so it is
-  their own words (a submit by the mod itself is refused by the app as automated). If
-  `start_session` still refuses, propose the card (`own_initiative`) and register the worker
-  when its first turn ends. There is no model in it: the user picks the model inside the chat.
-  Start it on a mid-tier model, effort `medium`. `start_session` (initiation `user_asked`,
-  `fresh`, `use_worktree: false`, title `Worker: <name>`, a short standby prompt), then
-  append `{key, name, role, model, effort, session, avatar, god, voice, tools}` to the
-  registry (`god`, `voice` and `tools` come from the create prompt's `god=…; voice=…;
-  tools=…` when present). `transcript`
-  comes later: find the `.jsonl` under `~/.claude/projects/<project-dir>/` that holds its
-  standby prompt, and store it as a path relative to `~/.claude/projects/` (or absolute).
-  A model pricier than this session's is ignored by `start_session`: then call
+- **Create**: **+ New worker** in the pane writes the worker's entry itself (key, name,
+  role, god, voice, tools, `created`) and puts a request in the prompt box for the user's
+  own Enter (a submit by the mod itself is refused by the app as automated). The request's
+  first line is `Create worker: name=…; role=…; avatar=…; god=…; voice=…; tools=…; key=…`;
+  the lines after it say what to do. Do exactly that: `start_session` (initiation
+  `user_asked`, `fresh`, `use_worktree: false`, title `Worker: <name>`, a mid-tier model at
+  effort `medium`, and the standby prompt the request quotes word for word), then set that
+  entry's `session` to the new chat's id. Do not append a second entry and change no other
+  key. If `start_session` still refuses, propose the card (`own_initiative`) and set
+  `session` when its first turn ends. A request with no `key=` comes from an older pane:
+  then append `{key, name, role, model, effort, session, avatar, god, voice, tools}` as
+  before. A model pricier than this session's is ignored by `start_session`: then call
   `set_session_model` after, which asks the user in the app.
+- **`transcript` fills itself in.** The pane runs in every chat, so it also runs in the
+  worker's own chat, which finds itself in the registry (by the desktop's id for it, or by
+  the standby prompt it started with) and writes its own `transcript`, again after a
+  `/clear`. Never look it up by hand. Status, Activity and the `guard` hook key on it: a
+  worker without one runs unguarded.
+- **Default tools**: a new worker gets `full` unless `~/.voicemode/call/config.json` says
+  `{"workers": {"default_tools": "drafts"}}` (or `"read"`). The pane owns that key and
+  keeps every other key in the file.
 - **Route** by voice ("new task for Research: …"): `SendMessage` to that worker's `session`.
+  "Tell everyone …": the pane's **Today** view has **Ask all**; by voice, `SendMessage` each
+  worker with a `session`, names exact.
 - **Open the pane**: `touch ~/.voicemode/call/open-workers`. Never ask them to type `/workers`.
-- **Proactive workers**: a registry entry may carry a `charter` (the worker's standing
-  brief, limits included) and a `schedule` (`{"days": "mon-fri", "time": "09:00", "tz":
-  "UTC"}`, or every few hours: add `"every": "3h"` with optional `"from"`/`"to"` active hours
-  instead of `"time"`; days also take `sun-thu`, `mon,wed,fri` or `daily`). To make a worker
-  proactive, write both into its entry; the Workers pane wakes it at those times. Do not
-  use a scheduled task or cron for this: neither can put a message into an existing chat.
-  The charter must say: drafts only, never send, and append one JSON line per item to
-  `~/.voicemode/call/outbox/<key>.jsonl`:
+- **Proactive workers**: a registry entry may carry a `schedule` (`{"days": "mon-fri",
+  "time": "09:00", "tz": "UTC"}`, or every few hours: add `"every": "3h"` with optional
+  `"from"`/`"to"` active hours instead of `"time"`; days also take `sun-thu`, `mon,wed,fri`
+  or `daily`), and a `charter` (the worker's standing brief, limits included). The Workers
+  pane wakes it at those times: with a charter, to run it; with none, to check in on its
+  `role`. Do not use a scheduled task or cron for this: neither can put a message into an
+  existing chat. A charter must say: drafts only, never send, and append one JSON line per
+  item to `~/.voicemode/call/outbox/<key>.jsonl`:
   `{"at", "kind": "draft"|"note", "title", "body", "to" (drafts only), "needs_approval"}`.
   A worker's own chat runs its charter on "run your charter now" (`SendMessage`), the same
   text the pane's Run now sends.
 - **Outbox**: each new line is toasted by the pane and, during a call, spoken once by
   `bin/outbox-say` ("Inbox drafted a reply to …"); do not repeat it. Asked what is in an
-  outbox, read the file and give the short version. Drafts are approved in the worker's own
-  chat with a typed yes, never on a spoken yes and never from this session.
+  outbox, read the file and give the short version. Drafts are approved in the pane (a
+  click) or in the worker's own chat with a typed yes, never on a spoken yes and never from
+  this session. The pane's **Change** sends the worker a note on what to revise and records
+  `{"id", "decision": "changes", "note", "at"}` in `outbox/<key>.decisions.jsonl`; the
+  worker then appends a revised item.
+- **What did they do today?** Each worker's own chat appends one line per finished turn to
+  `~/.voicemode/call/runs/<key>.jsonl` (`at`, `asked`, `answer`, `reason`) and keeps
+  `~/.voicemode/call/status/<key>.json` (`working`, `idle`, `stopped`, `error`). Asked
+  what the workers did, read those and the outboxes since midnight and give the short
+  version; the pane's **Today** view shows the same.
 - **Voice and tools**: each worker speaks in its own voice (registry `voice`, else its god's
   default; `$C say --as <key>` picks it). Its `tools` (`read`, `drafts`, `full`, or a list
   of tool names; missing means `full`) is enforced by the `guard` PreToolUse hook: a denied

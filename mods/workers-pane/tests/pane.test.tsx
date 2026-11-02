@@ -285,7 +285,8 @@ test('the New worker form picks one of six gods as a radio, Scribe first, the fo
   expect((await ui.find({ key: 'nw-god-scribe' }))?.props.dimColor).toBe(true)
   expect((await ui.find({ key: 'nw-god-tile-herald' }))?.props.borderColor).toBe(HERALD)
   expect((await ui.find({ key: 'new-form' }))?.props.borderColor).toBe(HERALD)
-  expect(await ui.find({ type: 'Text', text: /Voice bm_george · drafts only/ })).toBeDefined()
+  // New workers start with full access unless config.json says otherwise.
+  expect(await ui.find({ type: 'Text', text: /Voice bm_george · full access/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -301,13 +302,23 @@ test('Enter splits the one field at the first comma and puts the create request 
   await ui.press({ key: 'new-worker' })
   await ui.input({ key: 'nw-entry', text: '  Solo  ' })
 
-  // A new worker is drafts only; the v1 fields lead, so an older call session still reads it.
-  expect(w.prompts).toEqual([
-    'Create worker: name=Herald; role=announcements; avatar=gold; god=herald; voice=bm_george; tools=drafts',
-    'Create worker: name=Scribe 2; role=drafts, posts, comments; avatar=gold; god=herald; voice=bm_george; tools=drafts',
-    'Create worker: name=Solo; role=; avatar=gold; god=herald; voice=bm_george; tools=drafts',
+  // The v1 fields lead, so an older call session still reads the first line; the key
+  // names the entry the pane has already written.
+  expect(w.prompts.map(t => t.split('\n')[0])).toEqual([
+    'Create worker: name=Herald; role=announcements; avatar=gold; god=herald; voice=bm_george; tools=full; key=herald',
+    'Create worker: name=Scribe 2; role=drafts, posts, comments; avatar=gold; god=herald; voice=bm_george; tools=full; key=scribe-2',
+    'Create worker: name=Solo; role=; avatar=gold; god=herald; voice=bm_george; tools=full; key=solo',
   ])
   expect(await ui.find({ key: 'nw-entry' })).toBeUndefined()
+  // Each one is in the registry at once, every other entry and key kept.
+  const reg = registryOf(w)
+  expect(reg.version).toBe(2)
+  expect(reg.workers.slice(0, 4)).toEqual(REGISTRY.workers)
+  expect(reg.workers.slice(4)).toEqual([
+    { key: 'herald', name: 'Herald', role: 'announcements', god: 'herald', avatar: 'gold', voice: 'bm_george', tools: 'full', created: ISO(NOW) },
+    { key: 'scribe-2', name: 'Scribe 2', role: 'drafts, posts; comments', god: 'herald', avatar: 'gold', voice: 'bm_george', tools: 'full', created: ISO(NOW) },
+    { key: 'solo', name: 'Solo', god: 'herald', avatar: 'gold', voice: 'bm_george', tools: 'full', created: ISO(NOW) },
+  ])
   await ui.unmount()
 })
 

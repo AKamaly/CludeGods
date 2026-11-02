@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { parseDelivered, parseInbox, parseWorkers, relayText } from '../hooks/register'
+import { isOwnChat, parseDelivered, parseInbox, parseWorkers, relayText } from '../hooks/register'
 
 const HOME = '/home/tester'
 const CALL = `${HOME}/.voicemode/call`
@@ -20,6 +20,7 @@ type Worker = { key: string; name: string; session?: string; transcript?: string
 type World = {
   now: number
   self: string
+  host?: string
   files: Map<string, { text: string; mtimeMs: number }>
   claimed: Set<string>
   deliver: boolean
@@ -46,7 +47,7 @@ function world(on: On, w: World) {
   const sends: { to: string; text: string }[] = []
   const toasts: string[] = []
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? HOME : e.name === 'CLAUDE_CODE_HOST_SESSION_ID' ? w.host : undefined }))
   on('clock.now', () => ({ value: w.now }))
   on('clock.every', () => ({ value: undefined }))
   on('ui.toast', (_, e) => {
@@ -204,6 +205,31 @@ test("an unreadable registry holds everything, and a worker's own chat never rel
   await start($)
   await settle()
   expect(sends).toHaveLength(1)
+})
+
+test("a worker's own chat is known by a transcript given as a path, or by its desktop id", async ($, on) => {
+  const w = newWorld([{ ...SCRIBE, transcript: '-home-tester-work/scribe-cli.jsonl' }])
+  put(w, `${INBOX}/scribe.jsonl`, `${line('in_000000000001', 'a')}\n`)
+  w.self = 'scribe-cli'
+  const { sends } = world(on, w)
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(0)
+  // A chat whose transcript changed (a /clear) is still known by the desktop's id for it.
+  w.self = 'scribe-after-clear'
+  w.host = 'local_scribe-1'
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(0)
+  w.host = 'local_someone-else'
+  await start($)
+  await settle()
+  expect(sends).toHaveLength(1)
+  expect(isOwnChat({ transcript: 'a.jsonl' }, 'a', '')).toBe(true)
+  expect(isOwnChat({ transcript: '/x/y/a.jsonl' }, 'a', '')).toBe(true)
+  expect(isOwnChat({ transcript: 'a.jsonl' }, '', '')).toBe(false)
+  expect(isOwnChat({ session: 'local_a' }, '', 'local_a')).toBe(true)
+  expect(isOwnChat({ session: 'local_a' }, '', '')).toBe(false)
 })
 
 test('no inbox yet is quiet', async ($, on) => {
