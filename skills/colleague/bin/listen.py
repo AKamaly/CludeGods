@@ -1372,6 +1372,16 @@ def selftest():
           "heard: capture stopped 5 s ago (no audio)")
     shutil.rmtree(tmp, ignore_errors=True)
 
+    # 19. the narrate hook's pacing (its own self-test, run here so CI covers it)
+    narrate = Path(__file__).resolve().parent / "narrate"
+    if narrate.exists():
+        res = subprocess.run([sys.executable, "-I", "-B", str(narrate), "--selftest"],
+                             capture_output=True, text=True)
+        for row in res.stdout.splitlines():
+            checks += 1
+            fails += not row.startswith("PASS")
+            print(row)
+
     print(f"\n{checks - fails} passed, {fails} failed")
     return fails
 
