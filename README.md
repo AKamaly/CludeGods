@@ -72,6 +72,8 @@ The parts:
   only, drafts only, or a list of tools.
 - **Slack bridge**: mention a worker in your own Slack workspace and it answers in the
   thread, through a local Socket Mode app with an allow-list.
+- **`cludegods`**: sets up voice, checks every part and fixes what is off, updates and
+  uninstalls.
 
 ### What it feels like
 
@@ -202,12 +204,12 @@ _Scribe runs Monday to Friday at 9:00 and leaves two drafts that need your yes._
 ### Spaces and Pages
 
 A Space is a folder of Markdown pages under `~/.voicemode/call/spaces/`. The Spaces pane
-lists them with search and nested subpages, shows a page, and has **Ask a worker** (send a
-question about this page to any worker) and **Open in editor**. Workers read pages and save
+lists them with search and nested subpages, shows a page, and has **Ask a worker about this
+page** (send a question about it to any worker) and **Open in editor**. Workers read pages and save
 them directly in the spaces you let them write. Set `approvals.worker_publish` to
 `"approve"` and they save through `pages draft` instead: the draft shows up in their outbox
 as "needs your yes", and only your Approve publishes it, with a revision check so a stale
-draft never overwrites newer edits. A built-in **Memory** space holds preferences every
+draft never overwrites newer edits. A built-in **Memory** space holds the rules every
 worker reads before it starts; it changes only through a draft you approve, whatever the
 setting. Each call leaves a short receipt page in a **calls** space.
 
@@ -260,64 +262,81 @@ _MIT licensed. The voice stack runs locally; the session itself still talks to C
 
 ### Install (macOS on Apple Silicon)
 
-You need the Claude desktop app with Claude Code, [Homebrew](https://brew.sh), and the Xcode
-command line tools (`xcode-select --install`).
+You need the Claude desktop app with Claude Code, plus git and python3 (the Xcode command
+line tools have both: `xcode-select --install`).
 
-#### Fastest: let Claude install it
+#### One line
 
-Copy this, paste it into a Claude Code chat, and press Enter. Claude installs everything,
-asks you two quick questions on the way, and tells you when it is ready.
+Paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AKamaly/CludeGods/main/bootstrap.sh | bash
+```
+
+It clones CludeGods to `~/.cludegods/src`, installs the skills, the hooks, CallPill and the
+Workers and Spaces panes, then checks everything. It backs up what it replaces and is safe to
+run again. Then:
+
+1. Restart the Claude app (quit it fully, then open it again).
+2. Type `/gods` in any chat. The **Workers** and **Spaces** buttons are in the chat footer;
+   the Workers pane opens on a Welcome view with three first steps.
+
+#### Voice is optional
+
+Workers and Spaces work without it. Voice is what lets you talk to Claude out loud: local
+Whisper, Kokoro through mlx-audio, and Silero VAD, all managed by VoiceMode. It needs
+[Homebrew](https://brew.sh), downloads a few GB of speech models, and takes a few minutes.
+Add it whenever you like:
+
+- type `/gods`: with no voice yet, Claude says what voice needs and sets it up on your typed
+  yes, then starts the call;
+- or press **Enable voice** on the Workers pane's Welcome view (**Show** on its Getting
+  started bar brings Welcome back);
+- or run `~/.claude/skills/gods/bin/cludegods setup voice` in Terminal.
+
+Or install with voice from the start:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AKamaly/CludeGods/main/bootstrap.sh | bash -s -- --voice
+```
+
+In Terminal, the setup shows what it will install and asks first. Run it again and it skips
+what is already done. It ends with a short spoken test and a mic check. AirPods or other
+Bluetooth output? Add `--bluetooth-patch`.
+
+**Something off?** `~/.claude/skills/gods/bin/cludegods doctor` checks every part and says
+how to fix what is not right (`--fix <id>` runs the fix). The Workers pane shows the same
+checks, with a button for each fix. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+explains each one.
+
+#### Or let Claude install it
+
+Copy this, paste it into a Claude Code chat, and press Enter. Claude installs CludeGods,
+asks you about voice on the way, and tells you when it is ready.
 
 ```text
 Install CludeGods for me from https://github.com/AKamaly/CludeGods and get it running.
 I'm on a Mac with Apple Silicon and the Claude desktop app.
 
-1. Prerequisites: check for Homebrew, git, uv and the Xcode command line tools. Install uv
-   with `brew install uv` if it is missing. If Homebrew or the Xcode tools are missing,
-   tell me how to install them and stop.
-2. Find the Claude Code CLI: use `claude` if it is on my PATH and supports
-   `claude plugin marketplace`; otherwise use the newest
-   ~/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude
-   (quote the path, it has spaces). Use that CLI for every `claude` command below.
-3. VoiceMode, the local voice: run `claude plugin marketplace add mbailey/voicemode` and
-   `claude plugin install voicemode@voicemode`. Then run `uvx voice-mode-install --dry-run`,
-   show me what it will install, and after my yes run `uvx voice-mode-install --yes`.
-   Then run `voicemode service install mlx-audio`, `voicemode whisper model large-v3-turbo`,
-   `voicemode service enable whisper` and `voicemode service enable mlx-audio`.
-4. CludeGods: clone the repo to ~/CludeGods (or `git pull` there if it already exists).
-   Ask me if I use AirPods or other Bluetooth headphones. Then run `./install.sh` from that
-   folder, adding `--bluetooth-patch` if I said yes.
-5. The panes: run `claude plugin marketplace add AKamaly/CludeGods`, then
-   `claude plugin install workers-pane@cludegods`, `claude plugin install spaces-pane@cludegods`
-   and `claude plugin install inbox-relay@cludegods`.
-6. Check it: run `~/.claude/skills/gods/bin/call status` and `claude plugin list`, then
-   tell me in a few lines what is installed and anything that failed.
-7. Finish by telling me to restart the Claude app once, then type /gods in any chat to
-   start a voice call. The Workers and Spaces buttons appear in the chat footer.
+1. Run the one-line installer:
+   curl -fsSL https://raw.githubusercontent.com/AKamaly/CludeGods/main/bootstrap.sh | bash
+   It installs CludeGods without voice (the lite install), adds the Workers and Spaces
+   panes, and checks everything. If it stops early, tell me why in a line or two and stop.
+2. Run ~/.claude/skills/gods/bin/cludegods doctor and tell me in a few lines what is
+   installed and anything that failed. For a failed check with a fix, ask me first, then
+   run the fix line it prints.
+3. Ask me if I want voice now, to talk to Claude out loud (local speech models, a few GB,
+   a few minutes, needs Homebrew). On a yes, ask if I use AirPods or other Bluetooth
+   headphones, then run ~/.claude/skills/gods/bin/cludegods setup voice --yes, adding
+   --bluetooth-patch if I said yes. It takes a few minutes, so run it in the background
+   where no timeout cuts it off. It ends with a spoken test line: tell me before it starts
+   to say a few words when I hear it. Then tell me what each step did. On a no, tell me I
+   can add voice later: /gods offers it, and so does Enable voice in the Workers pane.
+4. Finish by telling me to restart the Claude app once, then type /gods in any chat. The
+   Workers and Spaces buttons appear in the chat footer.
 ```
 
 #### Or step by step
-
-**1. VoiceMode** (the local ears and voice). In Claude Code:
-
-```
-/plugin marketplace add mbailey/voicemode
-/plugin install voicemode@voicemode
-/voicemode:install
-```
-
-Then its local services, in a terminal:
-
-```bash
-voicemode service install whisper
-voicemode service install kokoro
-voicemode service install mlx-audio
-voicemode whisper model large-v3-turbo
-voicemode service enable whisper
-voicemode service enable mlx-audio
-```
-
-**2. CludeGods.** In a terminal:
 
 ```bash
 git clone https://github.com/AKamaly/CludeGods.git
@@ -325,16 +344,18 @@ cd CludeGods
 ./install.sh
 ```
 
-The installer copies the `colleague` and `spaces` skills into `~/.claude/skills/`, builds
-CallPill, adds the hooks to `~/.claude/settings.json`, sets up Silero VAD for VoiceMode,
-and creates `~/.voicemode/call/` with your settings in `config.json`. The defaults suit one
-developer on their own Mac; [config/config.example.json](config/config.example.json)
-explains every key, and the installer never overwrites your copy. It backs up anything it
-replaces and is safe to run again after a `git pull`. Use AirPods or other Bluetooth output? Run `./install.sh
---bluetooth-patch` instead (it fixes crackling; upgrading VoiceMode removes it, so run it
-again after).
+`./install.sh --voice` adds voice, `--bluetooth-patch` fixes crackling on AirPods and other
+Bluetooth output (upgrading VoiceMode removes it, so run it again after), and `--skip-pill`
+skips CallPill. The installer copies the `gods` and `spaces` skills, with the `cludegods`
+CLI, into `~/.claude/skills/`, installs CallPill (built here when the Xcode tools are
+installed, else the prebuilt app from the latest release, signed on your Mac), adds the hooks
+to `~/.claude/settings.json`, and creates `~/.voicemode/call/` with your settings in
+`config.json`. The defaults suit one developer on their own Mac;
+[config/config.example.json](config/config.example.json) explains every key, and the
+installer never overwrites your copy. It backs up anything it replaces and is safe to run
+again after a `git pull`.
 
-**3. The panes.** In a terminal session of Claude Code:
+Then the panes. In a terminal session of Claude Code:
 
 ```
 /plugin install workers-pane --marketplace AKamaly/CludeGods
@@ -345,15 +366,41 @@ again after).
 Answer `y` to add the marketplace and press Enter for the user scope. `inbox-relay` is only
 needed for Slack. In the desktop app, where `/plugin` does not run: click **+** next to the
 prompt box, then **Plugins**, **Add marketplace** with `AKamaly/CludeGods`, and add each
-plugin. Restart the app once.
-
-That's it. Type `/gods` in any chat to start a call. The first call takes up to a
-minute while the voice model loads.
+plugin. `~/.claude/skills/gods/bin/cludegods doctor --fix install-panes` does the same from
+Terminal. Restart the app once, then type `/gods` in any chat.
 
 <details>
 <summary>Manual install (what the installer does, step by step)</summary>
 
-1. Silero VAD into the VoiceMode environment:
+1. The skills and the pill:
+
+   ```bash
+   mkdir -p ~/.claude/skills
+   cp -R skills/gods skills/spaces ~/.claude/skills/
+   scripts/install-pill.sh ~/.claude/skills/gods/bin
+   ```
+
+2. The hooks: merge `config/settings.example.json` into `~/.claude/settings.json`, keeping
+   any hooks you already have. It registers `narrate` and `guard` on `PreToolUse` and
+   `permit` on `PermissionRequest`.
+
+3. The state folder: `mkdir -p ~/.voicemode/call` and an empty registry,
+   `{"workers": []}`, in `~/.voicemode/call/workers.json`.
+   `config/workers.example.json` shows every field a worker can have. Copy
+   `config/config.example.json` to `~/.voicemode/call/config.json` for the settings.
+
+4. Voice (optional). VoiceMode and its local services (needs uv: `brew install uv`):
+
+   ```bash
+   uvx voice-mode-install
+   voicemode service install mlx-audio
+   voicemode service install whisper
+   voicemode whisper model large-v3-turbo
+   voicemode service enable whisper
+   voicemode service enable mlx-audio
+   ```
+
+   Then Silero VAD into the VoiceMode environment:
 
    ```bash
    VM_PY=~/.local/share/uv/tools/voice-mode/bin/python
@@ -363,7 +410,7 @@ minute while the voice model loads.
      https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
    ```
 
-2. The Bluetooth patch (optional):
+   And the Bluetooth patch, if you want it:
 
    ```bash
    SITE=$("$VM_PY" -c 'import voice_mode, os; print(os.path.dirname(voice_mode.__path__[0]))')
@@ -371,46 +418,69 @@ minute while the voice model loads.
    patch -d "$SITE" -p1 -b < patches/voicemode-mouth-bluetooth.patch
    ```
 
-3. The skills and the pill:
-
-   ```bash
-   mkdir -p ~/.claude/skills
-   cp -R skills/gods skills/spaces ~/.claude/skills/
-   scripts/build-pill.sh ~/.claude/skills/gods/bin
-   ```
-
-4. The hooks: merge `config/settings.example.json` into `~/.claude/settings.json`, keeping
-   any hooks you already have. It registers `narrate` and `guard` on `PreToolUse` and
-   `permit` on `PermissionRequest`.
-
-5. The state folder: `mkdir -p ~/.voicemode/call` and an empty registry,
-   `{"workers": []}`, in `~/.voicemode/call/workers.json`.
-   `config/workers.example.json` shows every field a worker can have. Copy
-   `config/config.example.json` to `~/.voicemode/call/config.json` for the settings.
-
-6. Working on a mod instead of installing it: start Claude Code with
+5. Working on a mod instead of installing it: start Claude Code with
    `--plugin-dir /path/to/CludeGods/mods/workers-pane` (one flag per mod), or list the
    folders in `CLAUDE_CODE_PLUGIN_DIRS`.
 
 </details>
 
+### Update and uninstall
+
+`cludegods` lives at `~/.claude/skills/gods/bin/cludegods`; it is not on your PATH, so type
+the full path, or add `alias cludegods=~/.claude/skills/gods/bin/cludegods` to `~/.zshrc`.
+
+- **Update:** `~/.claude/skills/gods/bin/cludegods update` pulls the source you installed
+  from, runs `install.sh` again with the same options (voice stays once it is set up),
+  updates the three panes, and lists what changed. Restart the Claude app afterwards.
+- **Uninstall:** `~/.claude/skills/gods/bin/cludegods uninstall`, or `./uninstall.sh` from
+  the source folder (`~/.cludegods/src` after the one-line install). It backs everything up
+  to `~/.claude/cludegods-backups/` first, then removes the skills (with the CLI and
+  CallPill), its own hooks in `settings.json` (yours stay), and the three panes. Your
+  workers, spaces and settings in `~/.voicemode/call` go too, once you type `delete`;
+  `--keep-data` keeps them. VoiceMode stays; it has its own uninstaller.
+- **Coming from 0.4 or earlier:** `/colleague` is now `/gods`. In your clone, run
+  `git pull && ./install.sh` once: it moves the old `colleague` skill to
+  `~/.claude/cludegods-backups/` and points the hooks and worker instructions at
+  `skills/gods`. Then `~/.claude/skills/gods/bin/cludegods update` brings the panes up to
+  date, and from then on it is the only command you need.
+
 ## How to use it
 
 ### The call
 
+- **First call:** if voice is not set up yet, `/gods` says what it needs (local speech
+  models, a few GB, a few minutes, nothing leaves your Mac) and sets it up on your typed yes,
+  then starts the call.
 - **Start:** type `/gods`, or say "let's talk" in a chat. Claude starts the mic, the
-  voice and CallPill, and says "I'm here. What's first?" Then just talk. The conversation
-  runs best on Haiku at low effort; heavier work goes to Sonnet or Opus helpers by itself.
+  voice and CallPill, and says "I'm here. What's first?" Then just talk. Calls run best on
+  Haiku at low effort, and heavier work goes to Sonnet or Opus helpers by itself; if the
+  chat is on another model, Claude tells you once a day which menu choice to pick. `/gods`
+  in another chat moves the call there, and the first chat steps back.
 - **Cut in** any time: talk over Claude and it stops and listens.
-- **Mute key:** `~/.claude/skills/gods/bin/call mic` toggles the mic, the same as the
-  pill's Mic button. Bind it to a keyboard shortcut with the Shortcuts app (a "Run Shell
-  Script" action).
+- **Push to talk:** right-click the pill's mic button and choose **Push to talk** (or run
+  `~/.claude/skills/gods/bin/call mode talk`; `call mode open` switches back). The mic then
+  stays off until you press the mic button or run `call talk`, and closes after your turn,
+  or after about 10 seconds of silence. A second press closes it at once, and a press also
+  cuts Claude's speech.
+- **Mic key:** `~/.claude/skills/gods/bin/call mic` is one key for both modes: with push to
+  talk it is your talk key, with the open mic it mutes and unmutes. To put it on a key, open
+  the Shortcuts app, make a new shortcut with a **Run Shell Script** action running that
+  command, then open its details and choose **Add Keyboard Shortcut**. The first run asks
+  you to allow scripts (Shortcuts, Settings, Advanced, **Allow Running Scripts**).
+- **Tips:** once a day the call may say which model menu choice is fastest and, on laptop
+  speakers, that headphones make cutting in work better. `call tip model --never` or
+  `call tip headphones --never` turns one off.
 - **Something off?** `~/.claude/skills/gods/bin/call status` shows the voice and Whisper
-  services, what the ears last heard, and whether a listener is armed.
+  services, the mic mode, what the ears last heard, and whether a listener is armed.
+  `cludegods doctor` checks the whole install, and
+  [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) covers no sound, a silent mic, echo and
+  more.
 - **CallPill** shows who you are talking to and what they are saying. **Mic** mutes you
-  (capture really stops); **Stop** cuts the speech and stops the current work and its
-  helpers. Drag it to move it, scroll or pinch to resize, and use the arrows to fold it
-  down to just the god and the buttons.
+  (capture really stops); with push to talk it is the talk button (Press to talk, One sec,
+  Go ahead). **Stop** cuts the speech and stops the current work and its helpers. It opens
+  on the screen you are using and remembers where you put it on each screen. Drag it to
+  move it, scroll or pinch to resize, and use the arrows to fold it down to just the god and
+  the buttons.
 - **Sending and posting:** before anything outward (an email, a post, a delete), Claude
   puts the exact action in the chat and reads it back in one sentence. Say "yes, send it" to
   go ahead. Set `approvals.outward` to `"typed"` to require a typed yes instead.
@@ -425,44 +495,61 @@ minute while the voice model loads.
 A worker is a standing Claude Code chat with a job. It keeps its context between tasks,
 has its own god, voice and hours, and is held to the tools you allow.
 
-- **Create one:** **+ New worker** in the Workers pane (the **Workers** button in the
-  footer, or `/workers`). Give it a name, what it does, a character, and its tools (full
-  access unless you change the default). Its card appears at once; press Enter on the
-  request it puts in your prompt box to start its chat. **Start chat** on the card asks
-  again.
+- **First run:** with no workers yet, the Workers pane (the **Workers** button in the
+  footer, or `/workers`) opens on **Welcome**, with three one-click steps: **Create your
+  first worker**, **Write your first Memory rule** (it opens Memory in the Spaces pane on a
+  new rule), and **Try a voice call** (it puts `/gods` in your prompt box, or offers
+  **Enable voice** while voice is not set up). A **Getting started · 1 of 3 done** bar stays
+  on top until you finish or dismiss it.
+- **Create one:** **+ New worker** offers six ready-made workers: Inbox triage, Daily brief,
+  Repo watcher, Research, Release notes and Meeting prep. One click makes its card with
+  hours and instructions; press Enter on the request it puts in your prompt box to start its
+  chat (**Start chat** on the card asks again). **Blank worker** lets you name one yourself.
+- **Needs you:** everything waiting on you in one list, each with its button: drafts for
+  your yes (Approve, Change, Decline), permission requests on the call card (Open),
+  scheduled runs that did not go through (Retry), and setup problems (their fix).
+  **Needs you · N** in the header opens it, and the footer shows how many.
+- **Health strip:** Voice, Listening and Workers at a glance, from `cludegods doctor`. A red
+  or amber problem shows a button that fixes it, like **Restart Whisper** or **Install
+  panes**, and **Check** checks again. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+  explains each one.
 - **Give it a task:**
   - type into its **Ask** field and press Enter,
   - press **Open** and talk to it in its own chat,
   - or on a call, say "new task for Scribe: …". Claude passes it on and tells you when it
     reports back. "Tell Scribe and Research to …" reaches both.
-- **Talk to it directly:** on a call, say "put me on with Scribe". The pill switches to
-  Scribe's god, and Scribe answers in its own voice. "Back to you" hands the call back.
-- **Make it yours:** **Settings** on the card: name, god, voice, hours, tools (**full**, or
-  restrict it to **drafts** or **read**), pause, and which Spaces it may write to.
-- **Let it work on its own:** give it hours. At that time it wakes, runs its standing brief
-  (its `charter`, see [Proactive workers](#proactive-workers)) or, without one, checks in on
-  its role, and leaves what it found in its outbox.
-- **Outbox:** anything a worker wants to send or post waits there as "needs your yes".
-  **Approve** tells the worker to go ahead with exactly that; **Decline** tells it to drop
-  it. Nothing outward happens before your Approve, or your yes in its own chat.
-- **Change:** on any draft that waits, **Change** sends it back with your note on what to
-  revise.
-- **Today:** the **Today** button shows what waits for your yes across every worker, an
-  **Ask all** field, and what each worker did since midnight.
+- **Talk to it directly:** during a call, press **Talk to Scribe** on its card, or say "put
+  me on with Scribe". The pill switches to Scribe's god, and Scribe answers in its own
+  voice. **Back to Claude**, or "back to you", hands the call back.
+- **Make it yours:** **Settings** on the card: name, god, voice, **When it works** (its
+  hours), **What it can do** (**Can do anything**, or restrict it to **Can draft** or **Can
+  read**), pause, and which Spaces it may write to.
+- **Let it work on its own:** give it hours under **When it works**. At that time it wakes,
+  runs its **Instructions** (its `charter`, see [Proactive workers](#proactive-workers)) or,
+  without them, checks in on its role, and leaves what it found for you.
+- **Approve:** anything a worker wants to send or post waits as "needs your yes", on its
+  card (**Needs you · N**) and in the Needs you list. **Approve** tells the worker to go
+  ahead with exactly that; **Change** sends it back with your note on what to revise;
+  **Decline** tells it to drop it. Nothing outward happens before your Approve, or your yes
+  in its own chat.
+- **Today:** the **Today** button shows the Needs you list, an **Ask all** field, and what
+  each worker did since midnight.
 - **Activity** shows its last steps; **Delete** (two presses) archives the chat.
 
 ### Spaces
 
-Spaces are shared folders of Markdown pages: a small wiki you and your workers both use.
+Spaces are folders of pages you and your workers share: a small wiki for your projects.
 Open them with the **Spaces** button in the footer, or `/spaces-pane`.
 
-- **Memory**: rules and preferences every worker reads before it starts a task ("write in
-  my voice", "never email before I approve"). Write a rule once; every worker follows it.
-- **Notes**: a general space for docs, and where workers may save by default.
+- **Memory**: rules every worker reads before it starts ("write in my voice", "ask before
+  sending anything"). An empty Memory offers starter rules you add with one press, then
+  edit to fit you.
+- **Notes**: a general space for pages, and where workers may save by default.
 - **Calls**: a summary page for each call.
-- Press **Open ›** on a space to see its pages, and on a page to read it. On a page:
-  **Ask a worker** (send a question about this page to a worker), **Open in editor**,
-  **New page**, **New subpage**.
+- **+ New page** takes a title and a few lines right in the pane; **Create and open in
+  editor** opens the file for the rest. Press **Open ›** on a space or a page to go in. On
+  a page: **Ask a worker about this page**, **Open in editor**, **New page**, **New
+  subpage**.
 - Workers save pages in the spaces you let them write. Set `approvals.worker_publish` to
   `"approve"` and they draft instead: the draft shows in their outbox, and the page lands
   only when you press Approve. Memory always works that way.
@@ -546,19 +633,39 @@ Everything runs on your Mac. The only state is plain files under `~/.voicemode/c
 The plumbing, one shell script. `call start` launches the ears (always-on capture with
 Silero VAD and Whisper), the mouth (a non-blocking speech queue), and the pill.
 `call say "text"` returns at once and lines queue in order; `call say --now` cuts in.
-`call hush`, `call mute`, `call unmute`, `call mic` (toggle), `call stopwork`, `call stop`
-(`--now` cuts the last line), `call status`.
-`call start --greet "text"` speaks the greeting as soon as the voice is up. Lines follow the
+`call hush`, `call mute`, `call unmute`, `call stopwork`, `call stop` (`--now` cuts the last
+line), `call status`. Push to talk: `call talk` opens the mic for one turn, `call mode
+open|talk` switches the mode, and `call mic` is one key for both (talk, or mute and unmute).
+`call start --greet "text"` speaks the greeting as soon as the voice is up; `--model NAME`
+names the chat's model for the once-a-day model tip. `call start` exits 3 when the local
+voice is not installed and 4 when it is installed but its services do not answer; `call
+setup-voice` installs it in the background (`cludegods setup voice --yes`) and prints
+`SETUP:` progress lines. `call tip model|headphones --never` turns a tip off. Lines follow the
 Mac's sound output when it changes mid-call. Settings by environment: `CALL_VOICE` (default
 `af_heart`), `CALL_SPEED`, `CALL_OUTPUT_DEVICE` (pin one output), `CALL_SAY_MAX_WORDS`
 (default 45), `CALL_STOP_WAIT_S` (default 8), `CALL_SILERO_THRESHOLD`, `CALL_SILENCE_S`,
 `CALL_MIC_DEVICE`, `VOICEMODE_PY`. `~/.voicemode/call/config.json` may set `user_label`, the
-label your lines carry (default `USER`).
+label your lines carry (default `USER`), and `"call": {"mic": "talk"}` for push to talk.
+
+#### `skills/gods/bin/cludegods`
+
+Sets up, checks, updates and removes CludeGods; Python 3.9+ standard library only.
+`setup voice [--yes] [--bluetooth-patch]` runs six steps that each skip when already done:
+Homebrew and uv, VoiceMode, its services, Silero VAD, the Bluetooth patch, and a spoken
+self-test with a mic check. `setup vad` and `setup bluetooth` run one step. `doctor` prints
+one line per check; `doctor --json` prints the object the Workers pane reads,
+`{"version", "voice_installed", "checks": [{"id", "label", "ok", "severity", "detail", "fix",
+"fix_label"}]}`; `doctor --fix ID` runs one repair (each one is in
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)). `update` pulls the source recorded in
+`~/.voicemode/call/install.json`, runs `install.sh` again with the same options and updates
+the panes. `uninstall [--keep-data] [--yes]` backs up first, then removes. `version` prints
+the installed version.
 
 #### `skills/gods/bin/listen.py`
 
 Runs under Claude Code's `Monitor` tool and turns the ears' log into one line per event:
-`USER: …`, `USER (over you): …`, `EARS: down`, `EARS: muted`, `PANE: …`. Two jobs:
+`USER: …`, `USER (over you): …`, `EARS: down`, `EARS: muted`, `PANE: …`, `CALL: moved` (the
+call went to another chat). Its jobs:
 
 - **Echo gate.** On laptop speakers the mic hears Claude's own voice and there is no echo
   canceller. A turn whose audio starts while Claude is speaking has Claude's words stripped
@@ -568,11 +675,13 @@ Runs under Claude Code's `Monitor` tool and turns the ears' log into one line pe
   is you, the mouth is cut and your words go to the session without waiting for the turn to
   end.
 - **Catch-up.** The Monitor expires every 30 minutes. The listener keeps a cursor per call,
-  so a re-armed listener delivers what was said while none ran, as
-  `USER (earlier, HH:MM, …)`.
+  written when it is stopped too, so a re-armed listener delivers what was said while none
+  ran, as `USER (earlier, HH:MM, …)`: up to 30 lines, with any older turns counted in one
+  line. It also reports a Stop, mute, focus or mic switch made while it was down.
 
 `listen.py --selftest` runs the gate against synthetic logs; `--replay FILE` runs a real
-log through it and prints every decision.
+log through it and prints every decision; `--replay-rearm FILE` checks a real log for lost
+or doubled turns across expiries.
 
 #### `skills/gods/bin/narrate`
 
@@ -596,11 +705,15 @@ strip from `skills/gods/bin/gods/` stepped on a CALayer (about 1.5% CPU), mapped
 the call: Listening is idle, You is listen, Thinking is work, Claude talking is talk, and a
 finished reply plays one happy loop. `~/.voicemode/call/focus` names the worker on the
 call, and the card switches to that worker's god and name. Light and dark follow the
-system. Mic and stop buttons are always visible; a compact mode folds the card to the god
-and the buttons; scroll or pinch to resize. It can also list sessions waiting on you from
+system. Mic and stop buttons are always visible; with push to talk the mic button is the
+talk button (Press to talk, One sec, Go ahead), and a right-click on it switches modes. A
+compact mode folds the card to the god and the buttons; scroll or pinch to resize. It opens
+on the screen under the mouse, at the spot you last dragged it to on that screen, and comes
+back if its display goes away. It can also list sessions waiting on you from
 `~/.voicemode/call/pending/*.json` with an Open button per row (see
 [Waiting sessions](#waiting-sessions-optional)). `pill --snapshot out.png` draws every
-state into one image without opening a window.
+state into one image without opening a window; `pill --selftest` checks the state rules and
+the placement.
 
 <div align="center">
 
@@ -622,10 +735,16 @@ its status (`● Working · 4m`, Idle, `■ Stopped`, `▲ Stopped on an error`,
 a task box that sends straight to that chat, and a two-press Delete; the name opens the
 chat. Workers with hours also get a schedule and Run now (**Check in** when there is no
 charter), and every worker has an outbox feed (see [Proactive workers](#proactive-workers)).
-"+ New worker" writes the worker's entry at once and puts a `Create worker: …` request
-in your prompt box for your own Enter, because the app refuses to start sessions from
-automated events. A `Workers · N` launcher sits in the footer, and a `Today · N` button
-opens the Today view. All paths are resolved from `$HOME` at runtime.
+"+ New worker" (one of six templates, or Blank worker) writes the worker's entry at once
+and puts a `Create worker: …` request in your prompt box for your own Enter, because the app
+refuses to start sessions from automated events; a template's entry records `template:
+<id>`. With no workers it opens on a Welcome view, and keeps first-run progress in
+`~/.voicemode/call/onboarding.json`. Needs you gathers outbox items waiting for a yes,
+permission requests in `permit/`, wakes that did not go through, and `cludegods doctor`
+problems. The health strip runs `cludegods doctor --json` at most once a minute while the
+pane shows, and its buttons run `doctor --fix`. A `Workers · N` launcher sits in the footer
+(with "N need you" beside it while anything waits), and a `Today · N` button opens the Today
+view. All paths are resolved from `$HOME` at runtime.
 
 The mod runs in every chat, so it also runs in each worker's own chat. There it finds its
 worker in the registry (by the desktop's id for the chat, its transcript name, or the
@@ -655,8 +774,10 @@ the matching outbox item; `publish` refuses a draft whose page changed since it 
 (exit 3) and a space the worker may not write (exit 4), and marks the draft's outbox item
 approved. `new --worker K` is refused (exit 4) for Memory, and for every worker when
 `approvals.worker_publish` is `"approve"`. The Spaces pane mod draws the
-library, the page view, Ask a worker, and a footer launcher. `skills/spaces/SKILL.md` tells
-workers how to use it.
+library, the page view, Ask a worker, and a footer launcher. Other panes open it on a space
+by writing `{"at": <ms>, "space": "<slug>", "action": "open" | "new-page"}` to
+`~/.voicemode/call/open-spaces` (new-page opens the new-page form); a plain `touch` opens it
+as it is. `skills/spaces/SKILL.md` tells workers how to use it.
 
 #### `skills/gods/bin/guard`
 
@@ -699,7 +820,8 @@ A worker can run on its own and report back instead of waiting for a task. A `sc
 alone is enough; a `charter` says what each run does (see the `inbox` worker in
 `config/workers.example.json`):
 
-- **`charter`**: the worker's standing instructions, limits included. For example: each
+- **`charter`** (Instructions, in the pane): the worker's standing instructions, limits
+  included. A worker made from a template comes with them. For example: each
   run, read new replies, draft follow-ups to the outbox, send nothing you have not
   approved. The card never shows it; every wake sends all of it. With no `charter`, each
   wake asks the worker to check in on its `role`.
@@ -708,8 +830,8 @@ alone is enough; a `charter` says what each run does (see the `inbox` worker in
   active hours: `{"days": "mon-fri", "every": "3h", "from": "09:00", "to": "18:00", "tz": "UTC"}`
   (`every` is `1h`, `2h`, `3h`, `4h`, `6h` or `12h`). `days` takes a range (`mon-fri`,
   `sun-thu`, `fri-mon`), a list (`mon,wed,fri`) or `daily`; `tz` is any IANA zone. The card's
-  hours chip reads `Mon to Fri · 9:00` or `Every 3h · 9:00-18:00`, and you can set it in the
-  card's Settings.
+  hours chip reads `Mon to Fri · 9:00` or `Every 3h · 9:00-18:00`, and you can set it under
+  **When it works** in the card's Settings.
 
 **The pane is the scheduler.** At the scheduled time the Workers pane sends the worker's
 own chat a wake message carrying its charter (or its role). It has to be the pane: the only local thing
@@ -836,10 +958,13 @@ Ideas, not built:
 ## Repository layout
 
 ```
-install.sh               one-command install of everything in this repo
+bootstrap.sh             the one-line install: clones to ~/.cludegods/src, installs, adds the panes
+install.sh               installs the skills, the cludegods CLI, CallPill, the hooks, the state folder
+uninstall.sh             removes CludeGods (cludegods uninstall), backed up first
 .claude-plugin/          marketplace.json: the three mods, for /plugin install
-skills/gods/        the skill: SKILL.md, bin/ (call, listen.py, narrate, permit, guard, outbox-say,
-                         pages, reply, bridge, pill.swift, gods/), bridges/slack/, design/
+skills/gods/             the skill: SKILL.md, bin/ (call, cludegods, listen.py, narrate, permit, guard,
+                         outbox-say, pages, reply, bridge, pill.swift, gods/), bridges/slack/,
+                         design/, tests/
 skills/spaces/           the skill workers read for Spaces and Pages
 mods/workers-pane/       the Workers pane mod (hooks/, tests/)
 mods/spaces-pane/        the Spaces pane mod
@@ -847,10 +972,12 @@ mods/inbox-relay/        hands bridge messages to worker chats
 art/                     the gods (gods.js, gods.html)
 scripts/render-gods.mjs  renders the gods' sprite strips for CallPill
 docs/design/SPEC.md      the v0.2 design and file contracts
+docs/TROUBLESHOOTING.md  each cludegods doctor check, and common call problems
 patches/                 the VoiceMode Bluetooth diff
 config/                  examples: settings hooks, workers registry, config.json settings
-scripts/build-pill.sh    builds and ad-hoc signs CallPill.app
+scripts/*-pill.sh        build, fetch, sign and install CallPill.app
 docs/media/              README images and the hero GIF
+.github/workflows/       CI, and the release job that attaches the prebuilt CallPill
 ```
 
 ## Contributing

@@ -24,15 +24,24 @@ python3 -I skills/gods/bin/guard --selftest
 python3 -I skills/gods/bin/permit --selftest
 python3 -B -I -m unittest discover -s skills/spaces/tests
 python3 -B -I -m unittest discover -s skills/gods/bridges/slack/tests
-scripts/build-pill.sh && skills/gods/bin/pill --snapshot /tmp/callpill.png
+python3 -B -I -m unittest discover -s skills/gods/tests
+scripts/build-pill.sh && skills/gods/bin/pill --selftest
+skills/gods/bin/pill --snapshot /tmp/callpill.png
 ```
+
+`skills/gods/tests` covers `install.sh`, `bootstrap.sh`, `uninstall.sh` and the `cludegods`
+CLI. Each test runs in a temp HOME with fake brew, uv, VoiceMode, claude and the rest, so it
+never touches your own install; the suite takes a minute or two. `pill --selftest` checks
+CallPill's state rules and placement without opening a window.
 
 What CI cannot run, so run it yourself before opening the pull request:
 
 - **Mods**: `claude plugin validate mods/<name>` and `claude plugin test mods/<name>`
   (Claude Code's own runner), and `tsc -p mods/<name>` after loading the mod once.
 - **The echo gate on a real call**: `listen.py --replay <heard log> --speakers`, before and
-  after your change, on a log of your own.
+  after your change, on a log of your own. For anything that touches catch-up or re-arming,
+  also `listen.py --replay-rearm <heard log>`: it replays Monitor expiries and checks every
+  turn reaches the call exactly once.
 - **Anything you can see**: a screenshot of the pane or the pill in the pull request.
 
 ## Releasing
@@ -44,6 +53,9 @@ When a set of changes is ready to ship:
 2. Bump `version` in each `mods/*/.claude-plugin/plugin.json` that changed.
 3. Merge that, then tag `main`: `git tag -a vx.y.z -m "CludeGods x.y.z"` and push the tag.
 4. Publish a GitHub release for the tag with that version's changelog section as its notes.
+   Publishing runs `.github/workflows/release.yml`, which builds CallPill and attaches
+   `CallPill-macos.zip` (the installer downloads it on Macs without the Xcode tools). Check
+   the zip is on the release.
 
 While the version is 0.x, a minor release adds features and a patch release fixes things.
 

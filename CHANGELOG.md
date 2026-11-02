@@ -7,17 +7,86 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+### Added
+
+- **One-line install:**
+  `curl -fsSL https://raw.githubusercontent.com/AKamaly/CludeGods/main/bootstrap.sh | bash`
+  clones CludeGods to `~/.cludegods/src`, installs it and the three panes, and checks the
+  result. Add `| bash -s -- --voice` for voice too. Safe to run again.
+- **`cludegods`** (`~/.claude/skills/gods/bin/cludegods`): `setup voice` (guided, picks up
+  where it stopped, ends with a spoken self-test and a mic check), `doctor` (health checks
+  with one-click repairs, also in the Workers pane), `update`, `uninstall` and `version`.
+- `uninstall.sh`: removes CludeGods, backing everything up first; `--keep-data` keeps your
+  workers, spaces and settings.
+- **Prebuilt CallPill:** each published release carries `CallPill-macos.zip`. The installer
+  uses it, re-signed on your Mac, when it cannot build CallPill itself (no Xcode command line
+  tools).
+- **Voice from the first `/gods`:** with no local voice yet, the call says what voice needs
+  (local speech models, a few GB, a few minutes, nothing leaves your Mac), sets it up on your
+  typed yes (`call setup-voice`, through `cludegods setup voice --yes`), then starts the call.
+- **A two-minute start in the Workers pane** (workers-pane 0.5.0): a Welcome view with three
+  one-click steps (a worker from a template, a first Memory rule, a voice call, or Enable
+  voice) and a "1 of 3 done" checklist kept in `~/.voicemode/call/onboarding.json`.
+- **Worker templates:** + New worker offers Inbox triage, Daily brief, Repo watcher, Research,
+  Release notes and Meeting prep, each with hours and instructions that work out of the box
+  and keep anything outward for your yes. Blank worker is still there.
+- **Needs you:** one list of everything waiting on you (drafts for a yes, permission requests
+  on the call card, scheduled runs that did not go through, setup problems), each with its
+  action, and a count on the footer launcher.
+- **Health strip:** Voice, Listening and Workers at a glance from `cludegods doctor`, with a
+  button for each fix.
+- **Push to talk:** `"call": {"mic": "talk"}` in `config.json`, `call talk`, `call mode
+  open|talk`, and CallPill's mic button as the talk button (right-click it to switch). `call
+  mic` is one key for both modes; bind it to a keyboard shortcut with the Shortcuts app.
+- **Once-a-day tips on a call:** which model menu choice makes calls fastest, and, on
+  speakers, that headphones make cutting in work better. `call tip <name> --never` turns one
+  off.
+- **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md):** every `cludegods doctor` check with
+  its fix, and the common call problems (no sound, a silent mic, echo, the pill on the wrong
+  screen).
+- For contributors: `listen.py --replay-rearm` replays a real log with Monitor expiries and
+  checks every turn reaches the call exactly once. CI also runs the installer and CLI tests
+  and `pill --selftest`.
+
 ### Changed
 
 - **`/gods` starts a call** (was `/colleague`). The skill folder is `~/.claude/skills/gods`;
   `install.sh` moves an old `colleague` install out of the skills folder and updates the hook
   and worker paths that named it.
+- **`./install.sh` is lite by default:** Workers and Spaces need only git and python3, with no
+  VoiceMode, uv or Swift build. `./install.sh --voice` adds voice. An existing VoiceMode keeps
+  its Silero VAD step.
+- The installer never stops over CallPill: it builds it, downloads it, or carries on without
+  it.
+- **Spaces pane 0.5.0: easier to start.** Every empty view says what to do next with one
+  button; Spaces and Memory are explained in one line where they appear; an empty Memory
+  offers "Add your first rule" and four one-press starter rules ("Write in my voice", "Ask
+  before sending anything", "Keep replies short", "Say when you're not sure").
+- **New page takes a title and a few lines** typed in the pane, with Create and open in
+  editor beside it. "Ask a worker about this page" opens the Ask box from a button.
+- **Other panes can open Spaces on a space:** `~/.voicemode/call/open-spaces` may hold
+  `{"at", "space", "action": "open" | "new-page"}`; new-page opens the new-page form. A plain
+  `touch` still just opens the pane.
+- **`pages` speaks plainly:** errors say what is wrong and what to run next (a missing space
+  lists the spaces), and confirmations are sentences. Exit codes and `--json` output are
+  unchanged.
+- The Workers pane says Instructions (charter), When it works (hours), Can read / Can draft /
+  Can do anything (tools presets) and Talk to <name> (put a worker on the call), and every
+  empty state says what to do next.
+- CallPill opens on the screen under the mouse and remembers its position per screen.
+- `/gods` in a second chat takes the call over; the first chat's listener steps back instead
+  of both answering.
+- The README opens with "Always-on Claude Code Gods that you can talk to" and the feature
+  list, Get started is the two-minute path (one line, voice when you want it), and the launch
+  film and release links open the film on YouTube and the latest release.
 
-### Changed
+### Fixed
 
-- The README's launch film link opens the film on YouTube.
-- The README's release link always points to the latest release.
-- The README opens with "Always-on Claude Code Gods that you can talk to" and the feature list.
+- A Monitor expiry around a barge-in could send a turn twice or drop one, and more than 10
+  turns in one gap were dropped silently (now up to 30, the rest counted). A re-armed listener
+  also reports a Stop, mute, focus or mic switch made while it was down, resumes across
+  midnight, and writes its cursor when it is stopped.
+- A quick mute and unmute could leave the mic off and report the ears as down.
 
 ## [0.4.0] - 2026-11-02
 
