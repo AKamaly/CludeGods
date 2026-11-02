@@ -22,8 +22,10 @@ main() {
   local src="${CLUDEGODS_SRC:-$HOME/.cludegods/src}"
   local cli="$HOME/.claude/skills/gods/bin/cludegods"
 
-  title() { printf '\n\033[1m%s\033[0m\n' "$*"; }
-  die() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+  local bold="" red="" plain=""
+  if [ -t 1 ]; then bold=$'\033[1m' red=$'\033[31m' plain=$'\033[0m'; fi
+  title() { printf '\n%s%s%s\n' "$bold" "$*" "$plain"; }
+  die() { printf '%s✗%s %s\n' "$red" "$plain" "$*" >&2; exit 1; }
 
   [ "$(uname -s)" = Darwin ] || die "CludeGods runs on macOS only."
   python3 -c 'import sys' > /dev/null 2>&1 \

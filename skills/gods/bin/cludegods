@@ -285,10 +285,16 @@ def record_install(repo: str, flags: list) -> None:
     """install.sh calls this (`cludegods record-install REPO [FLAGS...]`) so `update` knows
     where the source is and which options to install with again."""
     rec = read_record()
-    rec.update({"repo": str(Path(repo).resolve()), "flags": [f for f in flags if f not in ("-h", "--help")],
+    flags = [f for f in flags if f not in ("-h", "--help")]
+    # voice, once set up (by --voice, or `setup voice` from the pane), stays set up on updates
+    flags += [f for f in rec.get("flags") or [] if f in STICKY_FLAGS and f not in flags]
+    rec.update({"repo": str(Path(repo).resolve()), "flags": flags,
                 "version": repo_version(Path(repo)) or "unknown",
                 "installed_at": datetime.now().astimezone().isoformat(timespec="seconds")})
     write_json(INSTALL_JSON, rec)
+
+
+STICKY_FLAGS = ("--voice", "--bluetooth-patch")
 
 
 def remember_flags(*flags: str) -> None:
@@ -785,11 +791,13 @@ def fail(what: str, next_step: str | None = None) -> int:
 
 
 def run_install(flags: list, quiet_next: bool = True, extra_env: dict | None = None) -> int:
+    """install.sh again, from the recorded source. The voice self-test (a spoken line) is left
+    out: a repair or an update should not talk."""
     repo = find_repo()
     if repo is None:
         return fail("The CludeGods source was not found, so it cannot be reinstalled.",
                     f"run the one-line installer again: {ONE_LINE}")
-    env = dict(os.environ)
+    env = dict(os.environ, CLUDEGODS_NO_SELFTEST="1")
     if quiet_next:
         env["CLUDEGODS_NO_NEXT_STEPS"] = "1"
     env.update(extra_env or {})
@@ -1050,10 +1058,13 @@ class Progress:
         self.open = True
 
     def detail(self, line: str) -> None:
+        self.newline()
+        print(f"      {line}", flush=True)
+
+    def newline(self) -> None:
         if self.open:
             print(flush=True)
             self.open = False
-        print(f"      {line}", flush=True)
 
     def end(self, word: str) -> None:
         if self.open:
@@ -1063,10 +1074,11 @@ class Progress:
         self.open = False
 
 
-def consent(question: str, yes: bool, no_tty_next: str) -> None:
+def consent(p: Progress, question: str, yes: bool, no_tty_next: str) -> None:
     if yes:
         return
-    answer = ask(question)
+    p.newline()
+    answer = ask("      " + question)
     if answer is None:
         raise SetupFailed("This step needs your yes, and there is no terminal to ask on.", no_tty_next)
     if not answer:
@@ -1081,7 +1093,7 @@ def step_brew_uv(p: Progress, yes: bool) -> str:
     if not brew:
         raise SetupFailed("Homebrew is not installed, and the voice setup needs it.",
                           f"install Homebrew from https://brew.sh, then run: {CLI_REF} setup voice")
-    consent("uv (Python's package runner) is missing. Install it with Homebrew now "
+    consent(p, "uv (Python's package runner) is missing. Install it with Homebrew now "
             "(brew install uv)?", yes, f"brew install uv, then run: {CLI_REF} setup voice")
     rc, _ = run([brew, "install", "uv"], timeout=None, stream=p.detail)
     if rc != 0 or not which("uv"):
@@ -1106,7 +1118,7 @@ def step_voicemode(p: Progress, yes: bool) -> str:
         if rc != 0:
             raise SetupFailed("VoiceMode's installer could not plan the install (see above).",
                               "uvx voice-mode-install --dry-run")
-        consent("Install VoiceMode now?", False, f"{CLI_REF} setup voice --yes")
+        consent(p, "Install VoiceMode now?", False, f"{CLI_REF} setup voice --yes")
     rc, _ = run([uvx, "voice-mode-install", "--yes"], timeout=None, stream=p.detail)
     if rc != 0:
         raise SetupFailed("VoiceMode's installer stopped with an error (see above).",
@@ -1245,7 +1257,7 @@ def selftest(p: Progress) -> str:
         listen = float(os.environ.get("CLUDEGODS_SELFTEST_S", 15))
     except ValueError:
         listen = 15.0
-    t0 = time.time() - 1
+    t0 = time.time() - 0.2
     rc, out = run([CALL, "start", "--greet", TEST_LINE], timeout=120)
     if rc != 0:
         raise SetupFailed(f"The call could not start: {last_line(out) or 'no output'}.",
@@ -1356,7 +1368,7 @@ def cmd_update() -> int:
         return fail("git pull stopped (local changes, or the branch moved in a way that needs you).",
                     f"cd {tilde(repo)} && git status")
     new = run(git + ["rev-parse", "HEAD"], timeout=30)[1].strip()
-    if run_install(list(read_record().get("flags") or []), extra_env={"CLUDEGODS_NO_SELFTEST": "1"}):
+    if run_install(list(read_record().get("flags") or [])):
         return 1
     panes_note = None
     cli = claude_cli()
