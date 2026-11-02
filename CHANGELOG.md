@@ -7,6 +7,8 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-02
+
 ### Added
 
 - **One-line install:**
@@ -87,9 +89,6 @@ release adds features and a patch release fixes things.
   also reports a Stop, mute, focus or mic switch made while it was down, resumes across
   midnight, and writes its cursor when it is stopped.
 - A quick mute and unmute could leave the mic off and report the ears as down.
-
-### Fixed
-
 - Workers pane: a click anywhere on a worker's card selects it and moves the highlight there;
   exactly one card is highlighted, and hovering another no longer draws it in its own colour.
   The name selects the card; Open opens the chat.
@@ -261,7 +260,8 @@ release adds features and a patch release fixes things.
 - A Bluetooth patch for VoiceMode's mouth.
 - The silent launch film, attached to the release.
 
-[Unreleased]: https://github.com/AKamaly/CludeGods/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/AKamaly/CludeGods/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/AKamaly/CludeGods/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AKamaly/CludeGods/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AKamaly/CludeGods/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AKamaly/CludeGods/compare/v0.1.0...v0.2.0
