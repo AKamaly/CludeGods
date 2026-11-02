@@ -904,11 +904,13 @@ def fix_install_panes() -> int:
     known = marketplaces(cli)
     if known is None or MARKETPLACE not in known:
         rc, out = run([cli, "plugin", "marketplace", "add", MARKETPLACE_SOURCE], timeout=300)
-        if rc != 0:
+        if rc == 0:
+            say(f"  ✓ added the {MARKETPLACE_SOURCE} marketplace")
+        elif known is not None:
             say("    " + last_line(out))
             return fail(f"Could not add the {MARKETPLACE_SOURCE} marketplace.",
                         f"\"{cli}\" plugin marketplace add {MARKETPLACE_SOURCE}")
-        say(f"  ✓ added the {MARKETPLACE_SOURCE} marketplace")
+        # the list failed too: it may be there already; the installs below will tell
     plugins = plugin_list(cli) or {}
     failed = []
     for name in PANES:
