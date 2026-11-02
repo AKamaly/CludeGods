@@ -5,7 +5,7 @@
       "name": "Research",
       "role": "Reads, compares, and summarises; never changes anything",
       "god": "research",
-      "tools": "read",
+      "tools": "full",
       "model": "claude-opus-5-5",
       "effort": "high",
       "session": "local_00000000-0000-4000-8000-000000000001",
@@ -15,9 +15,9 @@
     {
       "key": "scribe",
       "name": "Scribe",
-      "role": "Drafts docs, release notes, and replies for your review; drafts only",
+      "role": "Drafts docs, release notes, and replies for your review",
       "god": "scribe",
-      "tools": "drafts",
+      "tools": "full",
       "model": "claude-sonnet-5-5",
       "effort": "medium",
       "session": "local_00000000-0000-4000-8000-000000000002",
@@ -39,7 +39,8 @@
         "days": "mon-fri",
         "time": "09:00",
         "tz": "UTC"
-      }
+      },
+      "tools": "full"
     },
     {
       "key": "scout",
@@ -49,7 +50,8 @@
       "model": "claude-haiku-5-5",
       "effort": "low",
       "session": "local_00000000-0000-4000-8000-000000000003",
-      "avatar": "lime"
+      "avatar": "lime",
+      "tools": "full"
     }
   ]
 }

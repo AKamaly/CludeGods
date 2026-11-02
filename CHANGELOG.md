@@ -7,6 +7,11 @@ release adds features and a patch release fixes things.
 
 ## [Unreleased]
 
+### Changed
+
+- The example workers in `config/workers.example.json` all have full tools; presets are
+  there to add when you want one, not the starting point.
+
 ### Added
 
 - **Tutorial video in the README**: the Overview now opens with a 54-second walkthrough (a
