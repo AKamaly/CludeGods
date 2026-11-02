@@ -17,9 +17,25 @@ non-blocking mouth). You never use the `converse` tool in this mode; it blocks.
 Every second before the first word is dead air, so start in as few model turns as possible.
 
 1. Your first response, with no plan and no other tool first: `$C start --greet "I'm here.
-   What's first?"` (Bash) and, in the same response, ToolSearch `select:Monitor,TaskStop` if
-   they are not loaded. `call start` starts the ears and the mouth, warms the voice, and speaks
-   the greeting itself as soon as the voice is up; it prints the speaker in use.
+   What's first?" --model "<your model's name, as your system prompt gives it>"` (Bash) and,
+   in the same response, ToolSearch `select:Monitor,TaskStop` if they are not loaded.
+   `call start` starts the ears and the mouth, warms the voice, and speaks the greeting itself
+   as soon as the voice is up; it prints the speaker and the mic mode. Then:
+   - **Exit 3, `voice: missing (...)`**: this Mac has no local voice yet. Arm nothing. In the
+     chat, one short paragraph from what it printed: a call needs local speech models, about
+     N GB to download, a few minutes, everything stays on this Mac; set it up now? They are
+     typing, not talking, so wait for their typed answer. On a yes, arm `Monitor` with command
+     `~/.claude/skills/gods/bin/call setup-voice`, description "Voice setup", `timeout_ms:
+     1800000`: it runs `cludegods setup voice --yes` in the background and prints `SETUP:`
+     lines. Give each one a few words in the chat ("Downloading the speech model."). On
+     `SETUP: done`, run step 1 again with the greeting "Voice is ready. What's first?" and go
+     on to step 2. On `SETUP: failed`, put its last line and the log path in the chat and
+     stop. If that monitor expires first, re-arm it the same way: it re-attaches. If `call
+     start` says there is no one-step setup, point them to the README's Get started instead.
+   - **Exit 4, `voice: down (...)`**: installed, but its services did not come up. Put what
+     it printed in the chat and stop.
+   - `took the call over from another chat`: /gods ran in another chat first; that chat steps
+     back by itself. `handoff: <path>`: read that note before your first answer.
 2. Arm `Monitor` with command `~/.claude/skills/gods/bin/call listen`,
    description "The user on the call", `timeout_ms: 1800000`. Anything they said between the
    greeting and the arm is delivered when it starts. Each line it prints is one event. Their
@@ -57,10 +73,24 @@ Every second before the first word is dead air, so start in as few model turns a
      changed. If you just ran `$C focus` yourself, it is only the echo: stay silent and end
      your turn. If you didn't (the pane or the pill did), follow "Put them on with a worker"
      below from step 3 (`on`), or its "back to you" step without `$C focus clear` (`off`).
+   - `MIC: talk (...)` / `MIC: open (...)`: the mic mode changed (see "Push to talk"). If you
+     just ran `$C mode` yourself, it is the echo: stay silent. Otherwise one short line ("Push
+     to talk, got it.").
+   - `CALL: moved to another chat (...)`: /gods started in another chat, which has the call
+     now; the listener has exited. Do not re-arm it, do not speak, do not run `$C stop`.
+     Finish anything in flight in this chat's text only.
 3. End your turn. Waiting costs nothing; their next sentence wakes you.
-4. When the monitor expires (every 30 minutes), re-arm it at once with the same command, and
-   nothing else: no chat text, no spoken line. Nothing is lost while it is down; the new
-   listener delivers what was said in between.
+4. **The monitor expires every 30 minutes; the user must never notice.** When the notice
+   comes that it timed out, your whole response is the same `Monitor` call (same command,
+   description and `timeout_ms`), before anything else you were doing: no chat text, no
+   `say`, no other tool first. Nothing is lost while it is down: the new listener delivers
+   what they said in between (as `USER (earlier, …)` if it is over a minute old), and any
+   Stop, mute, focus or mic switch made meanwhile, first. If the last line before the notice
+   was `CALL: moved`, do not re-arm.
+5. `call say` may print `tip said out loud; put it in the chat too, as its own line: …`: it
+   spoke a once-a-day tip after your line (the model menu, or headphones on speakers). Add
+   that line to the chat as given; say nothing more about it. "Stop the tips": `$C tip model
+   --never` and `$C tip headphones --never`.
 
 ## Sound like a person, never like a report
 
@@ -87,8 +117,13 @@ Every second before the first word is dead air, so start in as few model turns a
 
 ## Pick the model per request
 
-The conversation runs on the fastest model (Haiku) so it stays instant. If this session is
-not on it, say once: "Switch me to Haiku, low effort, in the model menu." Then route each
+The conversation runs best on the fastest model (Haiku, low effort) so it stays instant. A
+chat cannot switch its own model, so `call start --model` queues a once-a-day tip that says
+which model menu choice to pick; do not repeat it. They can stay on any model. They ask to
+move the call to a faster chat: write a short handoff to `~/.voicemode/call/handoff.md`
+(what is in flight, open questions, what they asked for; no secrets), then say "Open a new
+chat, pick Haiku in the model menu, and type /gods. I'll hand over." Never start that chat
+yourself. When `CALL: moved` arrives, this chat is done with the call. Then route each
 request:
 
 | Request | Who does it |
@@ -277,7 +312,32 @@ Spaces "calls" space and prints its path; mention it in the chat, don't read it 
   the model loads; `call start` warms it before the greeting.
 - Lines follow the Mac's sound output: take the AirPods out and the next line plays on the
   speakers. `CALL_OUTPUT_DEVICE` pins one device instead.
-- They want a mute key: `$C mic` toggles the mic (the same as the pill's mic button); they can
-  bind it to a keyboard shortcut with the Shortcuts app ("Run Shell Script").
+- They want a mute key or a talk key: see "Push to talk and the mic key" below.
 - Nothing coming through: `$C stop --now`, `$C start`, re-arm the monitor, tell them in a few
   words out loud and in the chat.
+
+## Push to talk and the mic key
+
+Two mic modes, `"call": {"mic": "open" | "talk"}` in `~/.voicemode/call/config.json`
+(missing means `open`):
+- **open** (the default): the mic is always on; the pill's mic button mutes and unmutes.
+- **talk** (push to talk): the mic is off until they press talk. Each press opens it for one
+  turn: `$C talk`, the pill's mic button, or their shortcut. It closes after their turn, or
+  after about 10 seconds of nothing; a second press closes it at once. A press also cuts
+  your speech. Their lines arrive as whole turns (never `mid-thought`), and the mic going on
+  and off is not news: no `EARS` lines unless it fails. Answer every turn as usual.
+
+Switching: `$C mode talk` / `$C mode open`, or right-click the pill's mic button. The mode
+lives in `config.json`, so a switch asked for by voice follows the typed-yes rule: "Type yes
+and I'll switch to push to talk." (or point them to the pill's right-click). `$C mode`
+alone prints the mode; `$C status` shows it too.
+
+The mic key: `$C mic` is push to talk in talk mode, and mute or unmute in open mode. To bind
+it to a keyboard shortcut, tell them, in the chat:
+1. Open the Shortcuts app and make a new shortcut (File, New Shortcut).
+2. Search the actions for **Run Shell Script** and add it.
+3. Replace its text with `~/.claude/skills/gods/bin/call mic`. Shell: zsh.
+4. Name the shortcut (for example "Talk"), then open its details (the i button), choose
+  **Add Keyboard Shortcut**, and press the keys (for example Control-Option-Space).
+5. The first run asks to allow scripts: Shortcuts, Settings, Advanced, **Allow Running
+   Scripts**.

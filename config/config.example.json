@@ -8,12 +8,16 @@
   "workers": {
     "default_tools": "full"
   },
+  "call": {
+    "mic": "open"
+  },
   "_help": {
     "about": "CludeGods settings. install.sh copies this file to ~/.voicemode/call/config.json once, if that file is absent, and never overwrites it. Every key is optional: a missing file, a missing key, or a value not listed here means the default. Keys starting with _ are ignored.",
     "approvals.outward": "How Claude takes your yes for an outward action (sending, posting, publishing outside this Mac, deleting, a purchase, an invite). spoken (default): Claude writes the exact action in the chat, reads it back in one sentence, and a clear spoken yes such as 'yes, send it' counts. typed: only a yes typed in the chat counts.",
     "approvals.permission_prompts": "Where Claude Code's permission prompts show. app (default): the app's own dialog, as without CludeGods. pill: on CallPill while a call is live, answered only by a mouse click; with no live call the app's dialog shows as usual.",
     "approvals.worker_publish": "How workers save Spaces pages. direct (default): a worker may save pages itself (pages new, pages publish, pages mkspace) in the spaces it may write. approve: workers save drafts and a page lands only on your Approve in the Workers pane. Either way Memory changes are drafts you approve, and a worker with the drafts or read preset never publishes.",
     "user_label": "How your turns are labelled on a call. Default USER.",
+    "call.mic": "The mic on a call. open (default): always on; the pill's mic button mutes it. talk: push to talk, the mic is off until you press talk (the pill's mic button, call talk, or a shortcut that runs call mic) and closes after your turn. Switch with call mode open|talk or a right-click on the pill's mic button.",
     "workers.default_tools": "The tools preset a new worker gets: full (default), drafts or read. The Workers pane's form sets it with Make this the default. drafts and read are opt-in restrictions the guard hook enforces; a list of tool names can be set per worker in workers.json, not here."
   }
 }
